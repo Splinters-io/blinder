@@ -153,6 +153,50 @@ func TestRewriteResponseHeaders_DropsUnknownHeaders(t *testing.T) {
 	}
 }
 
+func TestRewriteResponseHeaders_SetCookieValueScrub(t *testing.T) {
+	gate := scrub.NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "alias.local")
+	headers := http.Header{
+		"Set-Cookie": {"session=tok-AcmeCorp-xyz; Path=/; HttpOnly"},
+	}
+
+	out := RewriteResponseHeaders(headers, gate, "alias.local", "target.com")
+	cookie := out.Get("Set-Cookie")
+
+	if strings.Contains(cookie, "AcmeCorp") {
+		t.Errorf("cookie value should have identity token scrubbed, got: %s", cookie)
+	}
+	if !strings.Contains(cookie, "[REDACTED]") {
+		t.Errorf("cookie value should contain [REDACTED], got: %s", cookie)
+	}
+	if !strings.Contains(cookie, "HttpOnly") {
+		t.Error("cookie attributes should be preserved")
+	}
+}
+
+func TestRewriteRequestHeaders_CookieValueRestored(t *testing.T) {
+	gate := scrub.NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "alias.local")
+
+	respHeaders := http.Header{
+		"Set-Cookie": {"session=tok-AcmeCorp-xyz; Path=/; HttpOnly"},
+	}
+	RewriteResponseHeaders(respHeaders, gate, "alias.local", "target.com")
+
+	aliasedName := gate.AliasCookieNameAndRecord("session")
+	req, _ := http.NewRequest("GET", "https://alias.local/page", nil)
+	req.Header.Set("Cookie", aliasedName+"=tok-[REDACTED]-xyz")
+
+	origins := NewOriginMapper(&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:443", "alias.local")
+	rewritten := RewriteRequestHeaders(req, "target.com", gate, origins)
+
+	cookieHeader := rewritten.Header.Get("Cookie")
+	if !strings.Contains(cookieHeader, "tok-AcmeCorp-xyz") {
+		t.Errorf("cookie value should be restored to original, got: %s", cookieHeader)
+	}
+	if strings.Contains(cookieHeader, "[REDACTED]") {
+		t.Errorf("cookie value should not contain [REDACTED] after restoration, got: %s", cookieHeader)
+	}
+}
+
 func TestRewriteRequestHeaders(t *testing.T) {
 	req, _ := http.NewRequest("GET", "https://alias.local/path", nil)
 	req.Header.Set("Referer", "https://alias.local/previous")

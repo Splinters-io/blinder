@@ -1,23 +1,12 @@
 package rewriter
 
 import (
-	"regexp"
+	"bytes"
 	"strings"
 
+	"golang.org/x/net/html"
+
 	"github.com/Splinters-io/blinder/internal/scrub"
-)
-
-var (
-	htmlCommentRe  = regexp.MustCompile(`<!--[\s\S]*?-->`)
-	titleRe        = regexp.MustCompile(`(?i)(<title[^>]*>)([\s\S]*?)(</title>)`)
-	metaContentRe  = regexp.MustCompile(`(?i)(<meta[^>]*content\s*=\s*")((?:[^"\\]|\\.)*)("[^>]*>)`)
-	imgSrcRe       = regexp.MustCompile(`(?i)(<img[^>]*\bsrc\s*=\s*")((?:[^"\\]|\\.)*)("[^>]*)`)
-	imgAltRe       = regexp.MustCompile(`(?i)(\balt\s*=\s*")([^"]*)(")`)
-	dataAttrRe     = regexp.MustCompile(`(?i)(\bdata-[a-z0-9-]+\s*=\s*")([^"]*)(")`)
-
-	baseHrefRe     = regexp.MustCompile(`(?i)(<base[^>]*\bhref\s*=\s*")((?:[^"\\]|\\.)*)("[^>]*>)`)
-	linkCanonRe    = regexp.MustCompile(`(?i)(<link[^>]*\brel\s*=\s*"canonical"[^>]*\bhref\s*=\s*")((?:[^"\\]|\\.)*)("[^>]*>)`)
-	scriptBlockRe  = regexp.MustCompile(`(?i)(<script\b[^>]*>)([\s\S]*?)(</script>)`)
 )
 
 const loremText = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
@@ -25,137 +14,146 @@ const loremText = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
 var loremWords = strings.Fields(loremText)
 
 func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool) []byte {
-	s := string(body)
+	z := html.NewTokenizer(bytes.NewReader(body))
+	var out bytes.Buffer
+	out.Grow(len(body))
 
-	s = htmlCommentRe.ReplaceAllString(s, "")
+	var rawTextTag string
 
-	s = titleRe.ReplaceAllStringFunc(s, func(match string) string {
-		parts := titleRe.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
 		}
-		return parts[1] + "[Blinder: title removed]" + parts[3]
-	})
 
-	s = baseHrefRe.ReplaceAllStringFunc(s, func(match string) string {
-		parts := baseHrefRe.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
-		}
-		return parts[1] + gate.Scrub(parts[2], "html:base") + parts[3]
-	})
+		switch tt {
+		case html.CommentToken:
 
-	s = linkCanonRe.ReplaceAllStringFunc(s, func(match string) string {
-		parts := linkCanonRe.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
-		}
-		return parts[1] + gate.Scrub(parts[2], "html:canonical") + parts[3]
-	})
+		case html.DoctypeToken:
+			out.Write(append([]byte(nil), z.Raw()...))
 
-	s = metaContentRe.ReplaceAllStringFunc(s, func(match string) string {
-		parts := metaContentRe.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
-		}
-		return parts[1] + gate.Scrub(parts[2], "html:meta") + parts[3]
-	})
-
-	s = imgSrcRe.ReplaceAllStringFunc(s, func(match string) string {
-		parts := imgSrcRe.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
-		}
-		replaced := parts[1] + transparentGifDataURI + parts[3]
-		replaced = imgAltRe.ReplaceAllStringFunc(replaced, func(altMatch string) string {
-			altParts := imgAltRe.FindStringSubmatch(altMatch)
-			if len(altParts) < 4 {
-				return altMatch
-			}
-			return altParts[1] + "[image]" + altParts[3]
-		})
-		return replaced
-	})
-
-	s = dataAttrRe.ReplaceAllStringFunc(s, func(match string) string {
-		parts := dataAttrRe.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
-		}
-		return parts[1] + gate.Scrub(parts[2], "html:data-attr") + parts[3]
-	})
-
-	if paranoid {
-		s = replaceTextNodes(s, gate)
-	}
-	s = scrubHTMLWithScriptProtection(s, gate)
-
-	return []byte(s)
-}
-
-func scrubHTMLWithScriptProtection(html string, gate *scrub.Gate) string {
-	locs := scriptBlockRe.FindAllStringSubmatchIndex(html, -1)
-	if len(locs) == 0 {
-		return gate.Scrub(html, "html:body")
-	}
-
-	var result strings.Builder
-	result.Grow(len(html))
-	lastEnd := 0
-
-	for _, loc := range locs {
-		result.WriteString(gate.Scrub(html[lastEnd:loc[0]], "html:body"))
-		result.WriteString(gate.Scrub(html[loc[2]:loc[3]], "html:script-tag"))
-		content := html[loc[4]:loc[5]]
-		result.Write(rewriteJS([]byte(content), gate, "html:script"))
-		result.WriteString(html[loc[6]:loc[7]])
-		lastEnd = loc[1]
-	}
-
-	result.WriteString(gate.Scrub(html[lastEnd:], "html:body"))
-	return result.String()
-}
-
-func replaceTextNodes(html string, gate *scrub.Gate) string {
-	var b strings.Builder
-	b.Grow(len(html))
-
-	inTag := false
-	textStart := 0
-
-	for i := 0; i < len(html); i++ {
-		if html[i] == '<' {
-			if !inTag && i > textStart {
-				text := html[textStart:i]
-				trimmed := strings.TrimSpace(text)
-				if len(trimmed) > 0 {
-					b.WriteString(loremForLength(len(trimmed)))
+		case html.TextToken:
+			text := string(append([]byte(nil), z.Text()...))
+			switch rawTextTag {
+			case "script":
+				out.Write(rewriteJS([]byte(text), gate, "html:script"))
+			case "style":
+				out.Write(rewriteCSS([]byte(text), gate, "html:style"))
+			case "title":
+				// Discarded; replacement emitted in the EndTagToken handler.
+			default:
+				if paranoid {
+					trimmed := strings.TrimSpace(text)
+					if len(trimmed) > 0 {
+						out.WriteString(loremForLength(len(trimmed)))
+					} else {
+						out.WriteString(text)
+					}
 				} else {
-					b.WriteString(text)
+					out.WriteString(html.EscapeString(gate.Scrub(text, "html:body")))
 				}
 			}
-			inTag = true
-			b.WriteByte('<')
-		} else if html[i] == '>' && inTag {
-			inTag = false
-			b.WriteByte('>')
-			textStart = i + 1
-		} else if inTag {
-			b.WriteByte(html[i])
+
+		case html.StartTagToken, html.SelfClosingTagToken:
+			tn, hasAttr := z.TagName()
+			tagName := string(tn)
+
+			if tagName == "script" || tagName == "style" || tagName == "title" {
+				rawTextTag = tagName
+			}
+
+			var attrs []tagAttr
+			if hasAttr {
+				attrs = collectTagAttrs(z)
+			}
+
+			out.WriteByte('<')
+			out.WriteString(tagName)
+			writeScrubbedAttrs(&out, tagName, attrs, gate)
+
+			if tt == html.SelfClosingTagToken {
+				out.WriteString(" /")
+			}
+			out.WriteByte('>')
+
+		case html.EndTagToken:
+			tn, _ := z.TagName()
+			tagName := string(tn)
+
+			if tagName == rawTextTag {
+				if tagName == "title" {
+					out.WriteString("[Blinder: title removed]")
+				}
+				rawTextTag = ""
+			}
+
+			out.WriteString("</")
+			out.WriteString(tagName)
+			out.WriteByte('>')
 		}
 	}
 
-	if textStart < len(html) && !inTag {
-		text := html[textStart:]
-		trimmed := strings.TrimSpace(text)
-		if len(trimmed) > 0 {
-			b.WriteString(loremForLength(len(trimmed)))
-		} else {
-			b.WriteString(text)
+	return out.Bytes()
+}
+
+type tagAttr struct {
+	key string
+	val string
+}
+
+func collectTagAttrs(z *html.Tokenizer) []tagAttr {
+	var attrs []tagAttr
+	for {
+		key, val, more := z.TagAttr()
+		attrs = append(attrs, tagAttr{key: string(key), val: string(val)})
+		if !more {
+			break
+		}
+	}
+	return attrs
+}
+
+func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate) {
+	relVal := ""
+	if tagName == "link" {
+		for _, a := range attrs {
+			if a.key == "rel" {
+				relVal = a.val
+				break
+			}
 		}
 	}
 
-	return b.String()
+	for _, a := range attrs {
+		out.WriteByte(' ')
+		out.WriteString(a.key)
+		out.WriteString(`="`)
+		out.WriteString(html.EscapeString(scrubAttrValue(tagName, a.key, a.val, relVal, gate)))
+		out.WriteByte('"')
+	}
+}
+
+func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate) string {
+	if tagName == "img" && attrName == "src" {
+		return transparentGifDataURI
+	}
+	if tagName == "img" && attrName == "alt" {
+		return "[image]"
+	}
+
+	ctx := "html:body"
+	switch {
+	case tagName == "base" && attrName == "href":
+		ctx = "html:base"
+	case tagName == "link" && attrName == "href" && strings.EqualFold(relVal, "canonical"):
+		ctx = "html:canonical"
+	case tagName == "meta" && attrName == "content":
+		ctx = "html:meta"
+	case strings.HasPrefix(attrName, "data-"):
+		ctx = "html:data-attr"
+	}
+
+	return gate.Scrub(attrVal, ctx)
 }
 
 func loremForLength(n int) string {

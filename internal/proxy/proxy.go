@@ -43,6 +43,7 @@ type Server struct {
 	harWriter *har.Writer
 	manifest  *manifest.Session
 	stats     Stats
+	done      chan struct{}
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -106,6 +107,11 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		wsProxy:   wsProxy,
 		harWriter: harWriter,
 		manifest:  session,
+		done:      make(chan struct{}),
+	}
+
+	if harWriter != nil && cfg.HAR != nil {
+		go s.periodicHARFlush()
 	}
 
 	mux := http.NewServeMux()
@@ -142,6 +148,7 @@ func (s *Server) ListenAndServeOnListener(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	close(s.done)
 	s.wsProxy.Close()
 	return s.server.Shutdown(ctx)
 }
@@ -192,11 +199,36 @@ func (s *Server) Manifest() *manifest.Session {
 	return s.manifest
 }
 
+func (s *Server) periodicHARFlush() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.FlushHAR(); err != nil {
+				log.Printf("[error] periodic HAR flush: %v", err)
+			}
+		case <-s.done:
+			return
+		}
+	}
+}
+
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.stats.Requests.Add(1)
 
 	if ws.IsUpgrade(r) {
-		if err := s.wsProxy.Handle(w, r); err != nil {
+		wsStart := time.Now()
+		err := s.wsProxy.Handle(w, r)
+		wsElapsed := time.Since(wsStart)
+		if s.harWriter != nil {
+			if err != nil {
+				s.harWriter.RecordError(r, nil, http.StatusBadGateway, err.Error(), wsElapsed)
+			} else {
+				s.harWriter.RecordUpgrade(r, wsElapsed)
+			}
+		}
+		if err != nil {
 			log.Printf("[error] websocket: %v", err)
 			s.stats.Errors.Add(1)
 		}
@@ -205,8 +237,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	gate := s.gate.ForRequest()
 	status := http.StatusOK
+	var leakCount int
 	defer func() {
-		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), -1)
+		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), leakCount)
 	}()
 
 	if r.ContentLength > maxRequestBody {
@@ -248,7 +281,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.transport.RoundTrip(upstreamReq)
 	if err != nil {
 		status = http.StatusBadGateway
+		elapsed := time.Since(requestStart)
 		log.Printf("[error] upstream: %v", err)
+		if s.harWriter != nil {
+			s.harWriter.RecordError(upstreamReq, reqBodyBuf, http.StatusBadGateway, err.Error(), elapsed)
+		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
 		return
@@ -258,7 +295,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	body, err := s.readResponseBody(resp)
 	if err != nil {
 		status = http.StatusBadGateway
+		elapsed := time.Since(requestStart)
 		log.Printf("[error] reading body: %v", err)
+		if s.harWriter != nil {
+			s.harWriter.RecordError(upstreamReq, reqBodyBuf, http.StatusBadGateway, err.Error(), elapsed)
+		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
 		return
@@ -277,6 +318,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid)
 	s.stats.Scrubbed.Add(1)
+	leakCount = gate.ResidualLeakCount(string(result.Body))
 
 	outHeaders := rewriter.RewriteResponseHeaders(
 		resp.Header,

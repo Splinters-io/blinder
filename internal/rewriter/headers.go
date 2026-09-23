@@ -151,7 +151,8 @@ func RewriteRequestHeaders(req *http.Request, targetHost string, gate *scrub.Gat
 		var parts []string
 		for _, c := range cookies {
 			originalName := gate.OriginalCookieName(c.Name)
-			parts = append(parts, originalName+"="+c.Value)
+			originalValue := gate.RestoreCookieValue(c.Name, c.Value)
+			parts = append(parts, originalName+"="+originalValue)
 		}
 		clone.Header.Set("Cookie", strings.Join(parts, "; "))
 	}
@@ -218,7 +219,9 @@ func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targe
 				cookieName := trimmed[:eqIdx]
 				cookieValue := trimmed[eqIdx+1:]
 				hashedName := gate.AliasCookieNameAndRecord(cookieName)
-				rewritten = append(rewritten, hashedName+"="+cookieValue)
+				scrubbed := gate.Scrub(cookieValue, "cookie:value")
+				gate.RecordCookieValue(hashedName, cookieValue, scrubbed)
+				rewritten = append(rewritten, hashedName+"="+scrubbed)
 				continue
 			}
 		}

@@ -123,6 +123,75 @@ func TestAliasDomain_DifferentInputs(t *testing.T) {
 	}
 }
 
+func TestGate_ResidualLeakCountZeroAfterScrub(t *testing.T) {
+	g := NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "target-001.local")
+	scrubbed := g.Scrub("Visit AcmeCorp at target.com", "test")
+	if count := g.ResidualLeakCount(scrubbed); count != 0 {
+		t.Errorf("scrubbed output should have 0 residual leaks, got %d (output: %q)", count, scrubbed)
+	}
+}
+
+func TestGate_ResidualLeakCountDetectsUnscrubbed(t *testing.T) {
+	g := NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "target-001.local")
+	if count := g.ResidualLeakCount("Visit AcmeCorp at target.com"); count != 2 {
+		t.Errorf("expected 2 residual leaks, got %d", count)
+	}
+}
+
+func TestGate_ResidualLeakCountIgnoresAliases(t *testing.T) {
+	g := NewGate([]string{"target.com"}, nil, "target-001.local")
+	alias := AliasDomain("target.com", "target-001.local")
+	if count := g.ResidualLeakCount("Visit " + alias); count != 0 {
+		t.Errorf("alias domain should not be counted as leak, got %d", count)
+	}
+}
+
+func TestGate_CookieValueRoundTrip(t *testing.T) {
+	g := NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "target-001.local")
+	aliased := g.AliasCookieNameAndRecord("session_id")
+
+	original := "tok-AcmeCorp-abc123"
+	scrubbed := g.Scrub(original, "cookie:value")
+	g.RecordCookieValue(aliased, original, scrubbed)
+
+	if scrubbed == original {
+		t.Fatal("scrub should have replaced identity token in cookie value")
+	}
+	if !strings.Contains(scrubbed, "[REDACTED]") {
+		t.Errorf("identity token should be replaced with [REDACTED], got: %s", scrubbed)
+	}
+
+	restored := g.RestoreCookieValue(aliased, scrubbed)
+	if restored != original {
+		t.Errorf("RestoreCookieValue should return original %q, got %q", original, restored)
+	}
+}
+
+func TestGate_CookieValueNoMatchPassesThrough(t *testing.T) {
+	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
+	aliased := g.AliasCookieNameAndRecord("pref")
+
+	g.RecordCookieValue(aliased, "original-val", "scrubbed-val")
+
+	result := g.RestoreCookieValue(aliased, "something-else")
+	if result != "something-else" {
+		t.Errorf("unmatched value should pass through, got: %s", result)
+	}
+}
+
+func TestGate_CookieValueChildDelegates(t *testing.T) {
+	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
+	child := g.ForRequest()
+
+	aliased := child.AliasCookieNameAndRecord("sess")
+	child.RecordCookieValue(aliased, "tok-AcmeCorp-1", "tok-[REDACTED]-1")
+
+	restored := child.RestoreCookieValue(aliased, "tok-[REDACTED]-1")
+	if restored != "tok-AcmeCorp-1" {
+		t.Errorf("child should delegate to parent, got: %s", restored)
+	}
+}
+
 func TestIsSafeDomain(t *testing.T) {
 	tests := []struct {
 		domain string

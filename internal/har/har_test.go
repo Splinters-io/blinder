@@ -343,6 +343,75 @@ func TestRecord_Headers(t *testing.T) {
 	}
 }
 
+func TestRecordError_CapturesFailedRequest(t *testing.T) {
+	w := NewWriter(10 * 1024 * 1024)
+
+	req, _ := http.NewRequest("GET", "https://example.com/broken", nil)
+	w.RecordError(req, nil, 502, "connection refused", 100*time.Millisecond)
+
+	if w.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", w.Len())
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "error.har")
+	w.Flush(path)
+
+	data, _ := os.ReadFile(path)
+	var harFile HARFile
+	json.Unmarshal(data, &harFile)
+
+	entry := harFile.Log.Entries[0]
+	if entry.Response.Status != 502 {
+		t.Errorf("expected status 502, got %d", entry.Response.Status)
+	}
+	if entry.Response.Content.Text != "connection refused" {
+		t.Errorf("expected error text, got %q", entry.Response.Content.Text)
+	}
+	if entry.Request.URL != "https://example.com/broken" {
+		t.Errorf("expected request URL preserved, got %q", entry.Request.URL)
+	}
+}
+
+func TestRecordUpgrade_CapturesWSHandshake(t *testing.T) {
+	w := NewWriter(10 * 1024 * 1024)
+
+	req, _ := http.NewRequest("GET", "https://example.com/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	w.RecordUpgrade(req, 50*time.Millisecond)
+
+	if w.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", w.Len())
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ws.har")
+	w.Flush(path)
+
+	data, _ := os.ReadFile(path)
+	var harFile HARFile
+	json.Unmarshal(data, &harFile)
+
+	entry := harFile.Log.Entries[0]
+	if entry.Response.Status != 101 {
+		t.Errorf("expected status 101, got %d", entry.Response.Status)
+	}
+	if entry.Response.StatusText != "Switching Protocols" {
+		t.Errorf("expected status text, got %q", entry.Response.StatusText)
+	}
+
+	foundUpgrade := false
+	for _, h := range entry.Response.Headers {
+		if h.Name == "Upgrade" && h.Value == "websocket" {
+			foundUpgrade = true
+		}
+	}
+	if !foundUpgrade {
+		t.Error("expected Upgrade: websocket header in response")
+	}
+}
+
 func TestFlush_EmptyWriter(t *testing.T) {
 	w := NewWriter(10 * 1024 * 1024)
 

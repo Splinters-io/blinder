@@ -39,7 +39,7 @@ func TestManifestCountsAreRequestLocalAndFlushIsIdempotent(t *testing.T) {
 		t.Fatalf("missing requests: %d", len(entries))
 	}
 	for _, entry := range entries {
-		if entry.ScrubCount != 2 || entry.LeakCount != -1 || entry.StatusCode != 200 {
+		if entry.ScrubCount != 2 || entry.LeakCount != 0 || entry.StatusCode != 200 {
 			t.Fatalf("incorrect request outcome: %+v", entry)
 		}
 	}
@@ -71,7 +71,7 @@ func TestManifestRecordsHTTPFailure(t *testing.T) {
 	req.ContentLength = maxRequestBody + 1
 	srv.ServeHTTP(httptest.NewRecorder(), req)
 	entries := srv.Manifest().Requests()
-	if len(entries) != 1 || entries[0].StatusCode != 413 || entries[0].ScrubCount != 0 || entries[0].LeakCount != -1 {
+	if len(entries) != 1 || entries[0].StatusCode != 413 || entries[0].ScrubCount != 0 || entries[0].LeakCount != 0 {
 		t.Fatalf("failure outcome missing or invented: %+v", entries)
 	}
 }

@@ -156,6 +156,79 @@ func TestRewriteBody_PDFMetadata(t *testing.T) {
 	}
 }
 
+func TestRewriteBody_HTMLEntityDecodesBeforeScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<p>Welcome to &#65;cmeCorp headquarters</p>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "AcmeCorp") || strings.Contains(resultStr, "&#65;cmeCorp") {
+		t.Errorf("HTML entity-encoded identity token should be decoded and scrubbed, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLEntityInAttribute(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<a href="https://target&#46;example&#46;com/login">login</a>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "target.example.com") || strings.Contains(resultStr, "target&#46;") {
+		t.Errorf("entity-encoded domain in attribute should be decoded and scrubbed, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLPreservesScriptLogic(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><script>var x = "AcmeCorp"; if(x) { console.log(x); }</script></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "AcmeCorp") {
+		t.Error("identity token in JS string should be scrubbed")
+	}
+	if !strings.Contains(resultStr, "console.log") {
+		t.Error("JS code structure should be preserved")
+	}
+}
+
+func TestRewriteBody_HTMLBaseHrefScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><head><base href="https://target.example.com/"></head></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if strings.Contains(string(result.Body), "target.example.com") {
+		t.Error("base href should be scrubbed")
+	}
+}
+
+func TestRewriteBody_HTMLCanonicalScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<link rel="canonical" href="https://target.example.com/page">`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if strings.Contains(string(result.Body), "target.example.com") {
+		t.Error("canonical link href should be scrubbed")
+	}
+}
+
+func TestRewriteBody_HTMLDataAttrScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<div data-company="AcmeCorp" data-domain="target.example.com">text</div>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "AcmeCorp") {
+		t.Errorf("data-attr identity token should be scrubbed, got: %s", resultStr)
+	}
+	if strings.Contains(resultStr, "target.example.com") {
+		t.Errorf("data-attr domain should be scrubbed, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLMetaContentScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<meta name="author" content="AcmeCorp Engineering Team">`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if strings.Contains(string(result.Body), "AcmeCorp") {
+		t.Error("meta content identity should be scrubbed")
+	}
+}
+
 func TestNormalizeContentType(t *testing.T) {
 	tests := []struct {
 		input  string

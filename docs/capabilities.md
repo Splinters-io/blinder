@@ -30,9 +30,9 @@ Resource controls are operational protections. Increasing a limit or adding stre
 
 HAR retains pre-scrub upstream HTTP data. Its configured per-body cap now covers request bodies and text/binary responses. Original sizes and truncation comments remain available; UTF-8 truncation avoids splitting a code point. Binary/invalid-UTF-8 request data uses the explicit `postData._encoding: "base64"` extension. Response binary data uses HAR's `content.encoding`. Request start timestamps account for elapsed upstream time.
 
-HAR remains buffered until shutdown, without a whole-session memory cap or durable journal. Failed upstream transactions and WebSocket upgrades/messages are not fully represented in HAR. External HAR viewer/replay compatibility remains a separate acceptance check, particularly for the request encoding extension.
+HAR flushes automatically every 30 seconds for durability across crashes. Failed upstream requests (dial errors, body read failures) and WebSocket upgrade transactions are captured with full request details and error/status information. External HAR viewer/replay compatibility remains a separate acceptance check, particularly for the request encoding extension.
 
-HTTP manifest entries include success and failure status plus request-local identity/domain replacement counts, isolated across concurrent requests. `scrub_count` measures gate matches, not every structural transformation such as image/title replacement. `leak_count: -1` means residual identity leakage was not measured; it must not be interpreted as zero. The legacy scrub report's `total_leaks` counts recorded matches, not proof that those identities reached the client. Repeated manifest flushes replace the finding snapshot rather than multiplying counts.
+HTTP manifest entries include success and failure status plus request-local identity/domain replacement counts, isolated across concurrent requests. `scrub_count` measures gate matches, not every structural transformation such as image/title replacement. `leak_count` measures residual target-domain and identity-token occurrences in scrubbed output; 0 means the scrubber caught every configured pattern in that response. The legacy scrub report's `total_leaks` counts recorded matches, not proof that those identities reached the client. Repeated manifest flushes replace the finding snapshot rather than multiplying counts.
 
 WebSocket manifest coverage and complete metadata extraction remain open. Raw evidence, mappings and identity metadata belong only on the operator's side.
 
@@ -43,10 +43,10 @@ These are implementation work and acceptance criteria, not waived requirements.
 | Workstream | Completion criterion |
 | --- | --- |
 | Multi-origin browser fidelity | A configured two-origin app completes redirects, API calls and WebSockets through routable aliases with valid local certificates; cookie host/domain/path and SameSite relationships are preserved. |
-| Context-aware rewriting | A maintained corpus of HTML entities, JS escapes, embedded data and encoded URLs passes both identity-removal and behavior checks. Arbitrary obfuscated/dynamically constructed identities are not currently covered. |
-| Opaque-content policy | Explicit, tested treatment for binary WebSocket data, ping/pong payloads, unknown HTTP bodies and cookie values. These currently preserve data or use limited text scrubbing, so they cannot be considered generally anonymized. |
+| Context-aware rewriting | HTML entities and attribute values are decoded before scrubbing via golang.org/x/net/html tokenizer; test corpus covers entity-encoded identity tokens, attribute URLs, script blocks and paranoid mode. Arbitrary obfuscated/dynamically constructed identities are not currently covered. |
+| Opaque-content policy | Cookie values are scrubbed bidirectionally (Set-Cookie scrubs identity, Cookie header restores originals for session continuity). Server-to-client ping/pong text payloads are scrubbed. Binary WebSocket frames pass through unchanged (no meaningful text scrubbing of arbitrary binary data). |
 | Browser network containment | Observed browser resource/fetch/WS traffic remains in the selected route; preserved third-party references and dynamic requests are assessed. SOCKS transport tests alone do not establish this. |
-| Evidence durability and completeness | Bounded whole-session capture, durable incremental storage, failed-request/WS evidence, complete metadata and independent HAR compatibility tests. |
+| Evidence durability and completeness | HAR now flushes periodically and captures failed requests and WS upgrades. Remaining: bounded whole-session memory cap, complete metadata extraction, and independent HAR compatibility tests. |
 | Security-control fidelity | Direct/proxied tests for CSP, integrity-protected resources, CORS, cookie constraints and cache validators identify any behavior changed by rewriting. |
 | Operator acceptance | Selected browser/scanner workflow, actual OS trust installation, live Tor exit and authorized onion-service requests pass on the supported OS matrix. |
 

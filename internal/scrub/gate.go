@@ -24,6 +24,11 @@ type LeakEntry struct {
 	Count   int
 }
 
+type cookieValueMapping struct {
+	original string
+	scrubbed string
+}
+
 type Gate struct {
 	parent         *Gate // Per-request counters; aliases and aggregate findings stay shared.
 	targetDomains  []string
@@ -33,8 +38,9 @@ type Gate struct {
 	aliasDomain    string
 	mu             sync.Mutex
 	leaks          map[string]*LeakEntry
-	aliases        map[string]string // alias → real domain
-	cookieAliases  map[string]string // alias → original cookie name
+	aliases        map[string]string              // alias → real domain
+	cookieAliases  map[string]string              // alias → original cookie name
+	cookieValues   map[string]cookieValueMapping   // aliased cookie name → value mapping
 }
 
 // ForRequest keeps replacement counts isolated from concurrent requests while
@@ -71,6 +77,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		leaks:          make(map[string]*LeakEntry),
 		aliases:        make(map[string]string),
 		cookieAliases:  make(map[string]string),
+		cookieValues:   make(map[string]cookieValueMapping),
 	}
 	for _, domain := range domains {
 		g.domainPatterns = append(g.domainPatterns, literalPattern(domain))
@@ -250,4 +257,41 @@ func (g *Gate) Aliases() map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) {
+	if g.parent != nil {
+		g.parent.RecordCookieValue(aliasedName, original, scrubbed)
+		return
+	}
+	g.mu.Lock()
+	g.cookieValues[aliasedName] = cookieValueMapping{original: original, scrubbed: scrubbed}
+	g.mu.Unlock()
+}
+
+func (g *Gate) ResidualLeakCount(scrubbed string) int {
+	count := 0
+	for _, pattern := range g.domainPatterns {
+		if pattern != nil {
+			count += len(pattern.FindAllString(scrubbed, -1))
+		}
+	}
+	for _, pattern := range g.tokenPatterns {
+		if pattern != nil {
+			count += len(pattern.FindAllString(scrubbed, -1))
+		}
+	}
+	return count
+}
+
+func (g *Gate) RestoreCookieValue(aliasedName, currentValue string) string {
+	if g.parent != nil {
+		return g.parent.RestoreCookieValue(aliasedName, currentValue)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if mapping, ok := g.cookieValues[aliasedName]; ok && currentValue == mapping.scrubbed {
+		return mapping.original
+	}
+	return currentValue
 }

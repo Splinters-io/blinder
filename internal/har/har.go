@@ -121,6 +121,61 @@ func (w *Writer) Record(req *http.Request, reqBody []byte, resp *http.Response, 
 	w.mu.Unlock()
 }
 
+func (w *Writer) RecordError(req *http.Request, reqBody []byte, statusCode int, errorText string, elapsed time.Duration) {
+	now := time.Now()
+
+	resp := Response{
+		Status:      statusCode,
+		StatusText:  http.StatusText(statusCode),
+		HTTPVersion: "HTTP/1.1",
+		Headers:     []NameValue{},
+		Content:     Content{Size: len(errorText), MimeType: "text/plain", Text: errorText},
+		HeadersSize: -1,
+		BodySize:    len(errorText),
+	}
+
+	entry := Entry{
+		StartedDateTime: now.Add(-elapsed).Format(time.RFC3339Nano),
+		Time:            float64(elapsed.Milliseconds()),
+		Request:         w.buildRequest(req, reqBody),
+		Response:        resp,
+		Timings:         buildTimings(elapsed),
+	}
+
+	w.mu.Lock()
+	w.entries = append(w.entries, entry)
+	w.mu.Unlock()
+}
+
+func (w *Writer) RecordUpgrade(req *http.Request, elapsed time.Duration) {
+	now := time.Now()
+
+	resp := Response{
+		Status:      http.StatusSwitchingProtocols,
+		StatusText:  "Switching Protocols",
+		HTTPVersion: "HTTP/1.1",
+		Headers: []NameValue{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+		},
+		Content:     Content{Size: 0, MimeType: "application/octet-stream"},
+		HeadersSize: -1,
+		BodySize:    0,
+	}
+
+	entry := Entry{
+		StartedDateTime: now.Add(-elapsed).Format(time.RFC3339Nano),
+		Time:            float64(elapsed.Milliseconds()),
+		Request:         w.buildRequest(req, nil),
+		Response:        resp,
+		Timings:         buildTimings(elapsed),
+	}
+
+	w.mu.Lock()
+	w.entries = append(w.entries, entry)
+	w.mu.Unlock()
+}
+
 func (w *Writer) Flush(path string) error {
 	w.mu.Lock()
 	entries := make([]Entry, len(w.entries))
