@@ -27,15 +27,15 @@ const maxRequestBody = 50 * 1024 * 1024
 const maxResponseBody = 50 * 1024 * 1024
 
 type Stats struct {
-	Requests  atomic.Int64
-	Bytes     atomic.Int64
-	Errors    atomic.Int64
-	Scrubbed  atomic.Int64
+	Requests atomic.Int64
+	Bytes    atomic.Int64
+	Errors   atomic.Int64
+	Scrubbed atomic.Int64
 }
 
 type Server struct {
-	cfg      *config.Config
-	gate     *scrub.Gate
+	cfg       *config.Config
+	gate      *scrub.Gate
 	transport http.RoundTripper
 	server    *http.Server
 	wsProxy   *ws.Proxy
@@ -134,6 +134,7 @@ func (s *Server) ListenAndServeOnListener(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.wsProxy.Close()
 	return s.server.Shutdown(ctx)
 }
 
@@ -221,6 +222,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.RequestURI = ""
 
 	requestStart := time.Now()
+	upstreamCtx, cancel := context.WithTimeout(upstreamReq.Context(), time.Duration(s.cfg.UpstreamTimeout)*time.Second)
+	defer cancel()
+	upstreamReq = upstreamReq.WithContext(upstreamCtx)
 
 	resp, err := s.transport.RoundTrip(upstreamReq)
 	if err != nil {
@@ -267,8 +271,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.Metadata != nil {
-		metaJSON := s.gate.Scrub(result.Metadata.TechnicalJSON(), "metadata")
-		w.Header().Set("X-Blinder-Meta", metaJSON)
+		// Scrub decoded values before JSON escaping, while retaining the schema.
+		meta := *result.Metadata
+		meta.Producer = s.gate.Scrub(meta.Producer, "metadata:producer")
+		meta.PDFVersion = s.gate.Scrub(meta.PDFVersion, "metadata:pdf-version")
+		meta.FtypBrand = s.gate.Scrub(meta.FtypBrand, "metadata:brand")
+		meta.ChunkTypes = append([]string(nil), meta.ChunkTypes...)
+		for i, chunk := range meta.ChunkTypes {
+			meta.ChunkTypes[i] = s.gate.Scrub(chunk, "metadata:chunk")
+		}
+		w.Header().Set("X-Blinder-Meta", meta.TechnicalJSON())
 		s.manifest.RecordIdentity(path, result.Metadata)
 	}
 
@@ -285,18 +297,26 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) readResponseBody(resp *http.Response) ([]byte, error) {
 	var reader io.Reader = resp.Body
 
-	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+	encoding := strings.ToLower(strings.TrimSpace(strings.Join(resp.Header.Values("Content-Encoding"), ",")))
+	switch encoding {
+	case "", "identity":
+	case "gzip":
 		gz, err := gzip.NewReader(resp.Body)
 		if err != nil {
 			return nil, fmt.Errorf("gzip decode: %w", err)
 		}
 		defer gz.Close()
 		reader = gz
+	default:
+		return nil, fmt.Errorf("unsupported response encoding")
 	}
 
-	body, err := io.ReadAll(io.LimitReader(reader, maxResponseBody))
+	body, err := io.ReadAll(io.LimitReader(reader, maxResponseBody+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxResponseBody {
+		return nil, fmt.Errorf("response body too large")
 	}
 
 	return body, nil

@@ -7,6 +7,14 @@ Standalone content-blind reverse proxy for exposure-protected security scanning.
 **Author:** carroll@splinters.io
 **Date:** 2026-09-23
 
+**Implementation status:** This is a draft design, including goals that are not
+fully implemented. See [README.md](README.md) for the current boundaries and
+known limitations. In particular, oversized HTTP responses are rejected with
+502 rather than streamed; unsupported content encodings are rejected; malformed
+or ambiguous JSON is replaced with `null`; and WebSocket binary/control payloads
+are not a universal anonymization boundary. The “zero leaks” principle below is
+a design goal, not a verified claim about arbitrary input.
+
 ---
 
 ## 1. Problem Statement

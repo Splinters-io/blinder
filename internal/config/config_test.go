@@ -158,3 +158,19 @@ func TestNew_HARConfig(t *testing.T) {
 		t.Errorf("expected default max body size 10MB, got %d", cfg.HAR.MaxBodySize)
 	}
 }
+
+func TestOnionValidationNormalizesHost(t *testing.T) {
+	for _, target := range []string{"http://EXAMPLE.ONION", "http://example.onion."} {
+		if _, err := New(target, "", "", nil, true, false, false, "", "", 0, "", "", 0, 0); err != ErrOnionRequiresTor {
+			t.Fatalf("%s: %v", target, err)
+		}
+	}
+}
+
+func TestIdentityTokenValidationUsesCharacters(t *testing.T) {
+	for _, token := range []string{"猫", string([]byte{0xff, 0xff, 0xff})} {
+		if _, err := New("https://example.com", "", "", []string{token}, true, false, false, "", "", 0, "", "", 0, 0); err == nil {
+			t.Fatalf("accepted token %q", token)
+		}
+	}
+}

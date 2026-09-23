@@ -2,9 +2,10 @@ package ws
 
 import (
 	"bufio"
-	crand "crypto/rand"
+	"context"
+	"crypto/sha1"
 	"crypto/tls"
-	"encoding/binary"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
+	socks "golang.org/x/net/proxy"
 )
 
 const (
@@ -32,8 +35,8 @@ const (
 )
 
 var (
-	ErrNotWebSocket  = errors.New("not a websocket upgrade request")
-	ErrUpstreamDial  = errors.New("failed to dial upstream for websocket")
+	ErrNotWebSocket   = errors.New("not a websocket upgrade request")
+	ErrUpstreamDial   = errors.New("failed to dial upstream for websocket")
 	ErrUpgradeRefused = errors.New("upstream refused websocket upgrade")
 )
 
@@ -46,12 +49,18 @@ type Proxy struct {
 	verifyTLS   bool
 	socksAddr   string
 	idleTimeout time.Duration
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	active      map[net.Conn]struct{}
+	closed      bool
 }
 
 func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useTLS, verifyTLS bool, socksAddr string, idleTimeout time.Duration) *Proxy {
 	if idleTimeout <= 0 {
 		idleTimeout = 5 * time.Minute
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Proxy{
 		gate:        gate,
 		aliasDomain: aliasDomain,
@@ -61,12 +70,15 @@ func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useT
 		verifyTLS:   verifyTLS,
 		socksAddr:   socksAddr,
 		idleTimeout: idleTimeout,
+		ctx:         ctx,
+		cancel:      cancel,
+		active:      make(map[net.Conn]struct{}),
 	}
 }
 
 func IsUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+		hasHeaderToken(r.Header, "Connection", "upgrade")
 }
 
 func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
@@ -74,13 +86,26 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 		return ErrNotWebSocket
 	}
 
+	key, err := base64.StdEncoding.DecodeString(r.Header.Get("Sec-WebSocket-Key"))
+	if r.Method != http.MethodGet || r.ContentLength > 0 || len(r.TransferEncoding) != 0 ||
+		r.Header.Get("Sec-WebSocket-Version") != "13" || err != nil || len(key) != 16 {
+		http.Error(w, "invalid websocket handshake", http.StatusBadRequest)
+		return ErrNotWebSocket
+	}
 	upstreamConn, err := p.dialUpstream()
 	if err != nil {
 		http.Error(w, "websocket upstream error", http.StatusBadGateway)
 		return fmt.Errorf("%w: %v", ErrUpstreamDial, err)
 	}
 
-	upgradeReq := buildUpgradeRequest(r, p.targetHost, p.aliasDomain)
+	if !p.track(upstreamConn) {
+		upstreamConn.Close()
+		http.Error(w, "websocket shutting down", http.StatusServiceUnavailable)
+		return errors.New("websocket proxy closed")
+	}
+	defer p.release(upstreamConn)
+	upstreamConn.SetDeadline(time.Now().Add(30 * time.Second))
+	upgradeReq := buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, p.targetHost, p.aliasDomain, p.gate), p.targetHost, p.aliasDomain)
 	if err := upgradeReq.Write(upstreamConn); err != nil {
 		upstreamConn.Close()
 		http.Error(w, "websocket upstream error", http.StatusBadGateway)
@@ -101,6 +126,15 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("%w: got %d", ErrUpgradeRefused, upstreamResp.StatusCode)
 	}
 
+	if !validUpgradeResponse(upstreamResp, upgradeReq) {
+		http.Error(w, "invalid websocket upstream handshake", http.StatusBadGateway)
+		return errors.New("invalid upstream websocket handshake")
+	}
+	protocol := upstreamResp.Header.Get("Sec-WebSocket-Protocol")
+	if p.gate.Scrub(protocol, "ws:protocol") != protocol {
+		http.Error(w, "unsupported websocket subprotocol", http.StatusBadGateway)
+		return errors.New("identity-bearing websocket subprotocol")
+	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		upstreamConn.Close()
@@ -114,6 +148,12 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("hijack: %w", err)
 	}
 
+	if !p.track(clientConn) {
+		clientConn.Close()
+		return errors.New("websocket proxy closed")
+	}
+	defer p.release(clientConn)
+	clientConn.SetWriteDeadline(time.Now().Add(p.idleTimeout))
 	switchResp := fmt.Sprintf("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n")
 	if secAccept := upstreamResp.Header.Get("Sec-WebSocket-Accept"); secAccept != "" {
 		switchResp += fmt.Sprintf("Sec-WebSocket-Accept: %s\r\n", secAccept)
@@ -136,269 +176,156 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (p *Proxy) relay(clientConn net.Conn, clientBuf *bufio.ReadWriter, upstreamConn net.Conn, upstreamBuf *bufio.Reader) {
+	clientConn.SetDeadline(time.Time{})
+	upstreamConn.SetDeadline(time.Time{})
+	activity := &relayActivity{conns: []net.Conn{clientConn, upstreamConn}, timeout: p.idleTimeout}
+	activity.touch()
 	var wg sync.WaitGroup
 	wg.Add(2)
-
-	go func() {
+	run := func(src io.Reader, dst net.Conn, serverToClient bool) {
 		defer wg.Done()
-		p.relayFrames(upstreamBuf, clientConn, true)
-		clientConn.Close()
-	}()
-
-	go func() {
-		defer wg.Done()
-		p.relayFrames(clientBuf.Reader, upstreamConn, false)
-		upstreamConn.Close()
-	}()
-
+		defer clientConn.Close()
+		defer upstreamConn.Close()
+		reader := bufio.NewReader(&idleReader{src, activity})
+		p.relayFrames(reader, dst, serverToClient)
+	}
+	go run(upstreamBuf, clientConn, true)
+	go run(clientBuf.Reader, upstreamConn, false)
 	wg.Wait()
 }
 
-func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool) {
-	var textBuf []byte
-	inTextMessage := false
+type idleReader struct {
+	reader   io.Reader
+	activity *relayActivity
+}
 
-	for {
-		dst.SetWriteDeadline(time.Now().Add(p.idleTimeout))
+func (r *idleReader) Read(b []byte) (int, error) {
+	n, err := r.reader.Read(b)
+	if n > 0 {
+		r.activity.touch()
+	}
+	return n, err
+}
 
-		header := make([]byte, 2)
-		if _, err := io.ReadFull(src, header); err != nil {
-			return
-		}
+type relayActivity struct {
+	mu      sync.Mutex
+	conns   []net.Conn
+	timeout time.Duration
+}
 
-		fin := (header[0] & finBit) != 0
-		opcode := header[0] & 0x0F
-		masked := (header[1] & maskBit) != 0
-		payloadLen := uint64(header[1] & 0x7F)
-
-		switch payloadLen {
-		case 126:
-			ext := make([]byte, 2)
-			if _, err := io.ReadFull(src, ext); err != nil {
-				return
-			}
-			payloadLen = uint64(binary.BigEndian.Uint16(ext))
-		case 127:
-			ext := make([]byte, 8)
-			if _, err := io.ReadFull(src, ext); err != nil {
-				return
-			}
-			payloadLen = binary.BigEndian.Uint64(ext)
-		}
-
-		if payloadLen > maxFrameSize {
-			return
-		}
-
-		var maskKey [4]byte
-		if masked {
-			if _, err := io.ReadFull(src, maskKey[:]); err != nil {
-				return
-			}
-		}
-
-		payload := make([]byte, payloadLen)
-		if payloadLen > 0 {
-			if _, err := io.ReadFull(src, payload); err != nil {
-				return
-			}
-		}
-
-		if masked {
-			for i := range payload {
-				payload[i] ^= maskKey[i%4]
-			}
-		}
-
-		if opcode >= 0x8 {
-			needMask := !serverToClient
-			if err := writeFrame(dst, header[0], payload, needMask); err != nil {
-				return
-			}
-			if opcode == opcodeClose {
-				return
-			}
-			continue
-		}
-
-		if opcode == opcodeText {
-			inTextMessage = true
-		} else if opcode == opcodeBin {
-			inTextMessage = false
-			textBuf = nil
-		}
-
-		isTextContent := inTextMessage && (opcode == opcodeText || opcode == 0)
-
-		if isTextContent {
-			if uint64(len(textBuf))+payloadLen > maxFrameSize {
-				return
-			}
-			textBuf = append(textBuf, payload...)
-			if fin {
-				if serverToClient {
-					textBuf = p.gate.ScrubBytes(textBuf, "ws:text")
-				} else {
-					textBuf = []byte(strings.ReplaceAll(string(textBuf), p.aliasDomain, p.targetHost))
-				}
-				needMask := !serverToClient
-				if err := writeFrame(dst, finBit|opcodeText, textBuf, needMask); err != nil {
-					return
-				}
-				textBuf = nil
-				inTextMessage = false
-			}
-			continue
-		}
-
-		needMask := !serverToClient
-		if err := writeFrame(dst, header[0], payload, needMask); err != nil {
-			return
-		}
+// Activity in either direction keeps a one-way stream alive.
+func (a *relayActivity) touch() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	deadline := time.Now().Add(a.timeout)
+	for _, conn := range a.conns {
+		conn.SetReadDeadline(deadline)
 	}
 }
 
-func writeFrame(w io.Writer, firstByte byte, payload []byte, mask bool) error {
-	frame := []byte{firstByte}
-
-	length := len(payload)
-	var lenByte byte
-	switch {
-	case length <= 125:
-		lenByte = byte(length)
-	case length <= 65535:
-		lenByte = 126
-	default:
-		lenByte = 127
+func (p *Proxy) track(conn net.Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
 	}
-	if mask {
-		lenByte |= maskBit
-	}
-	frame = append(frame, lenByte)
+	p.active[conn] = struct{}{}
+	return true
+}
+func (p *Proxy) release(conn net.Conn) {
+	conn.Close()
+	p.mu.Lock()
+	delete(p.active, conn)
+	p.mu.Unlock()
+}
 
-	switch {
-	case length > 125 && length <= 65535:
-		ext := make([]byte, 2)
-		binary.BigEndian.PutUint16(ext, uint16(length))
-		frame = append(frame, ext...)
-	case length > 65535:
-		ext := make([]byte, 8)
-		binary.BigEndian.PutUint64(ext, uint64(length))
-		frame = append(frame, ext...)
+// Close also cancels pending dials. net/http's Shutdown does not close hijacked connections.
+func (p *Proxy) Close() {
+	p.mu.Lock()
+	p.closed = true
+	p.cancel()
+	for conn := range p.active {
+		conn.Close()
 	}
-
-	if mask {
-		var key [4]byte
-		crand.Read(key[:])
-		frame = append(frame, key[:]...)
-		masked := make([]byte, len(payload))
-		for i, b := range payload {
-			masked[i] = b ^ key[i%4]
-		}
-		frame = append(frame, masked...)
-	} else {
-		frame = append(frame, payload...)
-	}
-
-	_, err := w.Write(frame)
-	return err
+	p.mu.Unlock()
+}
+func (p *Proxy) dealiasText(text string) string {
+	return strings.ReplaceAll(text, p.aliasDomain, p.targetHost)
 }
 
 func (p *Proxy) dialUpstream() (net.Conn, error) {
 	addr := p.targetAddr
-	if !strings.Contains(addr, ":") {
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		port := "80"
 		if p.useTLS {
-			addr += ":443"
-		} else {
-			addr += ":80"
+			port = "443"
 		}
+		addr = net.JoinHostPort(strings.Trim(addr, "[]"), port)
 	}
-
+	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	var conn net.Conn
 	var err error
-
 	if p.socksAddr != "" {
-		conn, err = dialSOCKS5(p.socksAddr, addr)
+		var d socks.Dialer
+		d, err = socks.SOCKS5("tcp", p.socksAddr, nil, dialer)
+		if err == nil {
+			cd, ok := d.(socks.ContextDialer)
+			if !ok {
+				return nil, errors.New("SOCKS5 dialer lacks context support")
+			}
+			conn, err = cd.DialContext(ctx, "tcp", addr)
+		}
 	} else {
-		conn, err = net.DialTimeout("tcp", addr, 30*time.Second)
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
 		return nil, err
 	}
-
 	if p.useTLS {
 		host, _, _ := net.SplitHostPort(addr)
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: !p.verifyTLS,
-			MinVersion:         tls.VersionTLS12,
-		})
-		if err := tlsConn.Handshake(); err != nil {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: !p.verifyTLS, MinVersion: tls.VersionTLS12})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("tls handshake: %w", err)
 		}
 		return tlsConn, nil
 	}
-
 	return conn, nil
 }
 
-func dialSOCKS5(socksAddr, target string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", socksAddr, 10*time.Second)
-	if err != nil {
-		return nil, err
+func hasHeaderToken(h http.Header, name, want string) bool {
+	for _, value := range h.Values(name) {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), want) {
+				return true
+			}
+		}
 	}
+	return false
+}
 
-	host, portStr, err := net.SplitHostPort(target)
-	if err != nil {
-		conn.Close()
-		return nil, err
+func validUpgradeResponse(resp *http.Response, req *http.Request) bool {
+	if resp.StatusCode != http.StatusSwitchingProtocols || !hasHeaderToken(resp.Header, "Upgrade", "websocket") || !hasHeaderToken(resp.Header, "Connection", "upgrade") || len(resp.Header.Values("Sec-WebSocket-Extensions")) != 0 {
+		return false
 	}
-	port := 0
-	fmt.Sscanf(portStr, "%d", &port)
-
-	conn.Write([]byte{0x05, 0x01, 0x00})
-
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 greeting: %w", err)
+	hash := sha1.Sum([]byte(req.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	if resp.Header.Get("Sec-WebSocket-Accept") != base64.StdEncoding.EncodeToString(hash[:]) {
+		return false
 	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 auth rejected: %x", resp)
+	selected := resp.Header.Get("Sec-WebSocket-Protocol")
+	if selected == "" {
+		return true
 	}
-
-	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
-	req = append(req, []byte(host)...)
-	req = append(req, byte(port>>8), byte(port&0xFF))
-	conn.Write(req)
-
-	connResp := make([]byte, 4)
-	if _, err := io.ReadFull(conn, connResp); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 connect: %w", err)
+	for _, value := range req.Header.Values("Sec-WebSocket-Protocol") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.TrimSpace(token) == selected {
+				return true
+			}
+		}
 	}
-	if connResp[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 connect failed: status %d", connResp[1])
-	}
-
-	switch connResp[3] {
-	case 0x01:
-		discard := make([]byte, 4+2)
-		io.ReadFull(conn, discard)
-	case 0x03:
-		lenByte := make([]byte, 1)
-		io.ReadFull(conn, lenByte)
-		discard := make([]byte, int(lenByte[0])+2)
-		io.ReadFull(conn, discard)
-	case 0x04:
-		discard := make([]byte, 16+2)
-		io.ReadFull(conn, discard)
-	}
-
-	return conn, nil
+	return false
 }
 
 func buildUpgradeRequest(r *http.Request, targetHost, aliasDomain string) *http.Request {
@@ -413,6 +340,7 @@ func buildUpgradeRequest(r *http.Request, targetHost, aliasDomain string) *http.
 	}
 
 	outReq.Header.Del("Accept-Encoding")
+	outReq.Header.Del("Sec-WebSocket-Extensions")
 
 	return outReq
 }

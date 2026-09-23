@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 type TorConfig struct {
@@ -34,12 +35,12 @@ type Config struct {
 }
 
 var (
-	ErrNoTarget        = errors.New("--target is required")
-	ErrBadScheme       = errors.New("target must use http or https scheme")
+	ErrNoTarget         = errors.New("--target is required")
+	ErrBadScheme        = errors.New("target must use http or https scheme")
 	ErrOnionRequiresTor = errors.New(".onion targets require --tor")
-	ErrShortToken      = errors.New("identity tokens must be at least 3 characters")
-	ErrTooManyTokens   = errors.New("maximum 100 identity tokens")
-	ErrNonLoopback     = errors.New("binding to non-loopback address requires --bind-all")
+	ErrShortToken       = errors.New("identity tokens must be at least 3 characters")
+	ErrTooManyTokens    = errors.New("maximum 100 identity tokens")
+	ErrNonLoopback      = errors.New("binding to non-loopback address requires --bind-all")
 )
 
 var allowedSchemes = map[string]bool{
@@ -75,8 +76,11 @@ func New(
 	if !allowedSchemes[u.Scheme] {
 		return nil, ErrBadScheme
 	}
+	if u.Hostname() == "" || u.Opaque != "" || !utf8.ValidString(u.Hostname()) {
+		return nil, errors.New("target must include a hostname")
+	}
 
-	isOnion := strings.HasSuffix(u.Hostname(), ".onion")
+	isOnion := strings.HasSuffix(strings.ToLower(strings.TrimSuffix(u.Hostname(), ".")), ".onion")
 	if isOnion && torAddr == "" {
 		return nil, ErrOnionRequiresTor
 	}
@@ -85,7 +89,10 @@ func New(
 		return nil, ErrTooManyTokens
 	}
 	for _, t := range tokens {
-		if len(t) < 3 {
+		if !utf8.ValidString(t) {
+			return nil, errors.New("identity tokens must be valid UTF-8")
+		}
+		if utf8.RuneCountInString(t) < 3 {
 			return nil, fmt.Errorf("%w: %q", ErrShortToken, t)
 		}
 	}
@@ -157,7 +164,7 @@ func New(
 }
 
 func (c *Config) IsOnion() bool {
-	return strings.HasSuffix(c.TargetURL.Hostname(), ".onion")
+	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(c.TargetURL.Hostname(), ".")), ".onion")
 }
 
 func (c *Config) UseTor() bool {
