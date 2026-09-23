@@ -14,8 +14,8 @@ import (
 type RequestEntry struct {
 	Path       string `json:"path"`
 	StatusCode int    `json:"status_code"`
-	ScrubCount int    `json:"scrub_count"`
-	LeakCount  int    `json:"leak_count"`
+	ScrubCount int    `json:"scrub_count"` // Identity/domain matches replaced for this request.
+	LeakCount  int    `json:"leak_count"`  // -1 when residual identity leakage has not been measured.
 	Timestamp  string `json:"timestamp"`
 }
 
@@ -107,6 +107,14 @@ func (s *Session) RecordLeak(leakType, context, value string) {
 
 	s.mu.Lock()
 	s.leaks = append(s.leaks, entry)
+	s.mu.Unlock()
+}
+
+// ReplaceLeaks installs the current gate snapshot, so repeated flushes do not
+// multiply findings that were already written.
+func (s *Session) ReplaceLeaks(entries []LeakEntry) {
+	s.mu.Lock()
+	s.leaks = append([]LeakEntry(nil), entries...)
 	s.mu.Unlock()
 }
 

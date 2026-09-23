@@ -8,8 +8,9 @@ import (
 )
 
 type BodyResult struct {
-	Body     []byte
-	Metadata *metadata.Result
+	Body        []byte
+	Metadata    *metadata.Result
+	ContentType string // Nonempty when a replacement changes the media type.
 }
 
 func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate, paranoid bool) BodyResult {
@@ -28,7 +29,7 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 		return BodyResult{Body: gate.ScrubBytes(body, "body:xml:"+path)}
 	case isBinaryContent(ct):
 		meta := metadata.Extract(body)
-		return BodyResult{Body: rewriteBinaryImage(ct), Metadata: &meta}
+		return BodyResult{Body: rewriteBinaryImage(ct), Metadata: &meta, ContentType: "image/gif"}
 	case strings.HasPrefix(ct, "text/"):
 		return BodyResult{Body: gate.ScrubBytes(body, "body:text:"+path)}
 	default:

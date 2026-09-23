@@ -69,6 +69,8 @@ type Content struct {
 type PostData struct {
 	MimeType string `json:"mimeType"`
 	Text     string `json:"text"`
+	Comment  string `json:"comment,omitempty"`
+	Encoding string `json:"_encoding,omitempty"` // Extension for original binary request bytes.
 }
 
 type NameValue struct {
@@ -89,6 +91,9 @@ type Writer struct {
 }
 
 func NewWriter(maxBodySize int64) *Writer {
+	if maxBodySize <= 0 {
+		maxBodySize = 10 * 1024 * 1024
+	}
 	return &Writer{
 		maxBodySize: maxBodySize,
 	}
@@ -104,9 +109,9 @@ func (w *Writer) Record(req *http.Request, reqBody []byte, resp *http.Response, 
 	now := time.Now()
 
 	entry := Entry{
-		StartedDateTime: now.Format(time.RFC3339Nano),
+		StartedDateTime: now.Add(-elapsed).Format(time.RFC3339Nano),
 		Time:            float64(elapsed.Milliseconds()),
-		Request:         buildRequest(req, reqBody),
+		Request:         w.buildRequest(req, reqBody),
 		Response:        w.buildResponse(resp, respBody),
 		Timings:         buildTimings(elapsed),
 	}
@@ -164,7 +169,7 @@ func (w *Writer) Flush(path string) error {
 	return nil
 }
 
-func buildRequest(req *http.Request, body []byte) Request {
+func (w *Writer) buildRequest(req *http.Request, body []byte) Request {
 	r := Request{
 		Method:      req.Method,
 		URL:         req.URL.String(),
@@ -180,10 +185,8 @@ func buildRequest(req *http.Request, body []byte) Request {
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		r.PostData = &PostData{
-			MimeType: ct,
-			Text:     string(body),
-		}
+		text, encoding, comment := w.captureBody(body, isTextContent(ct))
+		r.PostData = &PostData{MimeType: ct, Text: text, Encoding: encoding, Comment: comment}
 	}
 
 	return r
@@ -213,19 +216,28 @@ func (w *Writer) buildResponse(resp *http.Response, body []byte) Response {
 		return r
 	}
 
-	if isTextContent(ct) {
-		r.Content.Text = string(body)
-	} else if int64(len(body)) > w.maxBodySize {
-		truncated := body[:w.maxBodySize]
-		r.Content.Text = base64.StdEncoding.EncodeToString(truncated)
-		r.Content.Encoding = "base64"
-		r.Content.Comment = fmt.Sprintf("truncated at %d bytes (max %d)", len(body), w.maxBodySize)
-	} else {
-		r.Content.Text = base64.StdEncoding.EncodeToString(body)
-		r.Content.Encoding = "base64"
-	}
+	r.Content.Text, r.Content.Encoding, r.Content.Comment = w.captureBody(body, isTextContent(ct))
 
 	return r
+}
+
+func (w *Writer) captureBody(body []byte, textContent bool) (text, encoding, comment string) {
+	captured := body
+	textContent = textContent && utf8.Valid(body)
+	if int64(len(captured)) > w.maxBodySize {
+		captured = captured[:w.maxBodySize]
+		if textContent {
+			// Do not introduce replacement runes by cutting a UTF-8 character.
+			for !utf8.Valid(captured) {
+				captured = captured[:len(captured)-1]
+			}
+		}
+		comment = fmt.Sprintf("truncated: captured %d of %d bytes (limit %d)", len(captured), len(body), w.maxBodySize)
+	}
+	if textContent {
+		return string(captured), "", comment
+	}
+	return base64.StdEncoding.EncodeToString(captured), "base64", comment
 }
 
 func buildTimings(elapsed time.Duration) Timings {
@@ -283,6 +295,7 @@ func isTextContent(ct string) bool {
 	}
 
 	textTypes := []string{
+		"application/x-www-form-urlencoded",
 		"application/json",
 		"application/javascript",
 		"application/xml",

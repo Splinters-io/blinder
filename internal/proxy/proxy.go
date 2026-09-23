@@ -36,6 +36,7 @@ type Stats struct {
 type Server struct {
 	cfg       *config.Config
 	gate      *scrub.Gate
+	origins   *rewriter.OriginMapper
 	transport http.RoundTripper
 	server    *http.Server
 	wsProxy   *ws.Proxy
@@ -45,10 +46,20 @@ type Server struct {
 }
 
 func New(cfg *config.Config) (*Server, error) {
+	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("local TLS: %w", err)
+	}
+	return NewWithCertificate(cfg, localTLS.Certificate)
+}
+
+// NewWithCertificate uses the exact identity inspected during CLI preflight.
+func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, error) {
 	targetHost := cfg.TargetURL.Hostname()
 	targetDomains := append([]string{targetHost}, extractSubdomains(targetHost)...)
 
 	gate := scrub.NewGate(targetDomains, cfg.IdentityTokens, cfg.AliasDomain)
+	origins := rewriter.NewOriginMapper(cfg.TargetURL, cfg.ListenAddr, cfg.AliasDomain)
 
 	upstreamTimeout := time.Duration(cfg.UpstreamTimeout) * time.Second
 
@@ -77,6 +88,7 @@ func New(cfg *config.Config) (*Server, error) {
 		cfg.VerifyTargetTLS,
 		socksAddr,
 		5*time.Minute,
+		origins,
 	)
 
 	var harWriter *har.Writer
@@ -89,6 +101,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s := &Server{
 		cfg:       cfg,
 		gate:      gate,
+		origins:   origins,
 		transport: transport,
 		wsProxy:   wsProxy,
 		harWriter: harWriter,
@@ -97,11 +110,6 @@ func New(cfg *config.Config) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRequest)
-
-	cert, err := blindertls.GenerateSelfSigned(cfg.AliasDomain)
-	if err != nil {
-		return nil, fmt.Errorf("tls cert: %w", err)
-	}
 
 	clientTimeout := time.Duration(cfg.ClientTimeout) * time.Second
 
@@ -169,11 +177,13 @@ func (s *Server) FlushManifest() error {
 		s.manifest.RecordDomainAlias(real, alias)
 	}
 
+	var findings []manifest.LeakEntry
 	for _, leak := range s.gate.Leaks() {
 		for i := 0; i < leak.Count; i++ {
-			s.manifest.RecordLeak(leak.Type, leak.Context, leak.Detail)
+			findings = append(findings, manifest.LeakEntry{Type: leak.Type, Context: leak.Context, Value: leak.Detail})
 		}
 	}
+	s.manifest.ReplaceLeaks(findings)
 
 	return s.manifest.Flush(s.cfg.OutputDir)
 }
@@ -193,7 +203,14 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	gate := s.gate.ForRequest()
+	status := http.StatusOK
+	defer func() {
+		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), -1)
+	}()
+
 	if r.ContentLength > maxRequestBody {
+		status = http.StatusRequestEntityTooLarge
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		s.stats.Errors.Add(1)
 		return
@@ -204,11 +221,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		var readErr error
 		reqBodyBuf, readErr = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
 		if readErr != nil {
+			status = http.StatusBadRequest
 			http.Error(w, "request read error", http.StatusBadRequest)
 			s.stats.Errors.Add(1)
 			return
 		}
 		if int64(len(reqBodyBuf)) > maxRequestBody {
+			status = http.StatusRequestEntityTooLarge
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			s.stats.Errors.Add(1)
 			return
@@ -216,7 +235,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(reqBodyBuf))
 	}
 
-	upstreamReq := rewriter.RewriteRequestHeaders(r, s.cfg.TargetURL.Host, s.cfg.AliasDomain, s.gate)
+	upstreamReq := rewriter.RewriteRequestHeaders(r, s.cfg.TargetURL.Host, gate, s.origins)
 	upstreamReq.URL.Scheme = s.cfg.TargetURL.Scheme
 	upstreamReq.URL.Host = s.cfg.TargetURL.Host
 	upstreamReq.RequestURI = ""
@@ -228,6 +247,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.transport.RoundTrip(upstreamReq)
 	if err != nil {
+		status = http.StatusBadGateway
 		log.Printf("[error] upstream: %v", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
@@ -237,6 +257,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	body, err := s.readResponseBody(resp)
 	if err != nil {
+		status = http.StatusBadGateway
 		log.Printf("[error] reading body: %v", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
@@ -254,12 +275,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	contentType := resp.Header.Get("Content-Type")
 	path := r.URL.Path
 
-	result := rewriter.RewriteBody(body, contentType, path, s.gate, s.cfg.Paranoid)
+	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid)
 	s.stats.Scrubbed.Add(1)
 
 	outHeaders := rewriter.RewriteResponseHeaders(
 		resp.Header,
-		s.gate,
+		gate,
 		s.cfg.AliasDomain,
 		s.cfg.TargetURL.Host,
 	)
@@ -273,19 +294,22 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if result.Metadata != nil {
 		// Scrub decoded values before JSON escaping, while retaining the schema.
 		meta := *result.Metadata
-		meta.Producer = s.gate.Scrub(meta.Producer, "metadata:producer")
-		meta.PDFVersion = s.gate.Scrub(meta.PDFVersion, "metadata:pdf-version")
-		meta.FtypBrand = s.gate.Scrub(meta.FtypBrand, "metadata:brand")
+		meta.Producer = gate.Scrub(meta.Producer, "metadata:producer")
+		meta.PDFVersion = gate.Scrub(meta.PDFVersion, "metadata:pdf-version")
+		meta.FtypBrand = gate.Scrub(meta.FtypBrand, "metadata:brand")
 		meta.ChunkTypes = append([]string(nil), meta.ChunkTypes...)
 		for i, chunk := range meta.ChunkTypes {
-			meta.ChunkTypes[i] = s.gate.Scrub(chunk, "metadata:chunk")
+			meta.ChunkTypes[i] = gate.Scrub(chunk, "metadata:chunk")
 		}
 		w.Header().Set("X-Blinder-Meta", meta.TechnicalJSON())
 		s.manifest.RecordIdentity(path, result.Metadata)
 	}
 
-	s.manifest.RecordRequest(path, resp.StatusCode, 1, 0)
+	status = resp.StatusCode
 
+	if result.ContentType != "" {
+		w.Header().Set("Content-Type", result.ContentType)
+	}
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.Body)))
 	w.Header().Del("Content-Encoding")
 	w.Header().Del("Transfer-Encoding")

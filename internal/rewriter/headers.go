@@ -70,17 +70,17 @@ var scrubHeaders = map[string]bool{
 	"link":             true,
 	"refresh":          true,
 	"p3p":              true,
-	"x-redirect-by":   true,
+	"x-redirect-by":    true,
 }
 
 var cspKeywords = map[string]bool{
-	"'self'":           true,
-	"'unsafe-inline'":  true,
-	"'unsafe-eval'":    true,
-	"'strict-dynamic'": true,
-	"'none'":           true,
+	"'self'":             true,
+	"'unsafe-inline'":    true,
+	"'unsafe-eval'":      true,
+	"'strict-dynamic'":   true,
+	"'none'":             true,
 	"'wasm-unsafe-eval'": true,
-	"'unsafe-hashes'":  true,
+	"'unsafe-hashes'":    true,
 }
 
 var cspSchemes = map[string]bool{
@@ -143,7 +143,7 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 	return out
 }
 
-func RewriteRequestHeaders(req *http.Request, targetHost string, aliasDomain string, gate *scrub.Gate) *http.Request {
+func RewriteRequestHeaders(req *http.Request, targetHost string, gate *scrub.Gate, origins *OriginMapper) *http.Request {
 	clone := req.Clone(req.Context())
 	clone.Host = targetHost
 
@@ -156,11 +156,11 @@ func RewriteRequestHeaders(req *http.Request, targetHost string, aliasDomain str
 		clone.Header.Set("Cookie", strings.Join(parts, "; "))
 	}
 
-	if ref := clone.Header.Get("Referer"); ref != "" {
-		clone.Header.Set("Referer", strings.ReplaceAll(ref, aliasDomain, targetHost))
+	if values := clone.Header.Values("Referer"); len(values) == 1 {
+		clone.Header.Set("Referer", origins.Rewrite(values[0], false))
 	}
-	if origin := clone.Header.Get("Origin"); origin != "" {
-		clone.Header.Set("Origin", strings.ReplaceAll(origin, aliasDomain, targetHost))
+	if values := clone.Header.Values("Origin"); len(values) == 1 {
+		clone.Header.Set("Origin", origins.Rewrite(values[0], true))
 	}
 
 	clone.Header.Del("Accept-Encoding")

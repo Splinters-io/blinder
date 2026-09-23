@@ -57,7 +57,7 @@ func TestRelayIdleTimeoutClosesBothDirections(t *testing.T) {
 	upstream, relayUpstream := net.Pipe()
 	defer upstream.Close()
 	defer relayUpstream.Close()
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 20*time.Millisecond)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 20*time.Millisecond, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -120,7 +120,7 @@ func TestUpgradeDoesNotOfferUnsupportedCompression(t *testing.T) {
 }
 
 func TestCloseCancelsRelayConnections(t *testing.T) {
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", time.Second)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", time.Second, nil)
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -160,7 +160,7 @@ func TestRelayOneWayActivityKeepsConnectionAlive(t *testing.T) {
 	upstream, relayUpstream := net.Pipe()
 	defer upstream.Close()
 	defer relayUpstream.Close()
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 100*time.Millisecond)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 100*time.Millisecond, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

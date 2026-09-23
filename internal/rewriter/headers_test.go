@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -11,10 +12,10 @@ import (
 func TestRewriteResponseHeaders_PassthroughTechHeaders(t *testing.T) {
 	gate := scrub.NewGate([]string{"target.com"}, nil, "alias.local")
 	headers := http.Header{
-		"Server":                 {"nginx/1.25"},
-		"X-Powered-By":          {"Express"},
-		"X-Content-Type-Options": {"nosniff"},
-		"X-Frame-Options":       {"DENY"},
+		"Server":                    {"nginx/1.25"},
+		"X-Powered-By":              {"Express"},
+		"X-Content-Type-Options":    {"nosniff"},
+		"X-Frame-Options":           {"DENY"},
 		"Strict-Transport-Security": {"max-age=31536000"},
 	}
 
@@ -134,7 +135,7 @@ func TestRewriteResponseHeaders_MultiValueHeaders(t *testing.T) {
 func TestRewriteResponseHeaders_DropsUnknownHeaders(t *testing.T) {
 	gate := scrub.NewGate(nil, nil, "alias.local")
 	headers := http.Header{
-		"Server":                 {"nginx"},
+		"Server":                {"nginx"},
 		"X-Custom-Internal":     {"secret-value"},
 		"X-Internal-Request-Id": {"12345"},
 	}
@@ -159,7 +160,7 @@ func TestRewriteRequestHeaders(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 
 	gate := scrub.NewGate(nil, nil, "alias.local")
-	rewritten := RewriteRequestHeaders(req, "target.com", "alias.local", gate)
+	rewritten := RewriteRequestHeaders(req, "target.com", gate, NewOriginMapper(&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:443", "alias.local"))
 
 	if rewritten.Host != "target.com" {
 		t.Errorf("host should be target, got: %s", rewritten.Host)

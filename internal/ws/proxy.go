@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ var (
 
 type Proxy struct {
 	gate        *scrub.Gate
+	origins     *rewriter.OriginMapper
 	aliasDomain string
 	targetHost  string
 	targetAddr  string
@@ -56,13 +58,21 @@ type Proxy struct {
 	closed      bool
 }
 
-func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useTLS, verifyTLS bool, socksAddr string, idleTimeout time.Duration) *Proxy {
+func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useTLS, verifyTLS bool, socksAddr string, idleTimeout time.Duration, origins *rewriter.OriginMapper) *Proxy {
 	if idleTimeout <= 0 {
 		idleTimeout = 5 * time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	if origins == nil {
+		scheme := "http"
+		if useTLS {
+			scheme = "https"
+		}
+		origins = rewriter.NewOriginMapper(&url.URL{Scheme: scheme, Host: targetHost}, "", aliasDomain)
+	}
 	return &Proxy{
 		gate:        gate,
+		origins:     origins,
 		aliasDomain: aliasDomain,
 		targetHost:  targetHost,
 		targetAddr:  targetAddr,
@@ -105,7 +115,7 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer p.release(upstreamConn)
 	upstreamConn.SetDeadline(time.Now().Add(30 * time.Second))
-	upgradeReq := buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, p.targetHost, p.aliasDomain, p.gate), p.targetHost, p.aliasDomain)
+	upgradeReq := buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, p.targetHost, p.gate, p.origins), p.targetHost, p.aliasDomain)
 	if err := upgradeReq.Write(upstreamConn); err != nil {
 		upstreamConn.Close()
 		http.Error(w, "websocket upstream error", http.StatusBadGateway)
@@ -334,10 +344,6 @@ func buildUpgradeRequest(r *http.Request, targetHost, aliasDomain string) *http.
 	outReq.URL.Host = targetHost
 	outReq.URL.Scheme = "http"
 	outReq.RequestURI = r.URL.RequestURI()
-
-	if ref := outReq.Header.Get("Origin"); ref != "" {
-		outReq.Header.Set("Origin", strings.ReplaceAll(ref, aliasDomain, targetHost))
-	}
 
 	outReq.Header.Del("Accept-Encoding")
 	outReq.Header.Del("Sec-WebSocket-Extensions")

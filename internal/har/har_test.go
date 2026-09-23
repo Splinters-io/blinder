@@ -232,7 +232,7 @@ func TestFlush_MultipleEntries(t *testing.T) {
 func TestRecord_StartedDateTime(t *testing.T) {
 	w := NewWriter(10 * 1024 * 1024)
 
-	before := time.Now()
+	before := time.Now().Add(-10 * time.Millisecond)
 	req, _ := http.NewRequest("GET", "https://example.com/", nil)
 	resp := &http.Response{
 		StatusCode: 200,
@@ -241,7 +241,7 @@ func TestRecord_StartedDateTime(t *testing.T) {
 		Header:     http.Header{},
 	}
 	w.Record(req, nil, resp, nil, 10*time.Millisecond)
-	after := time.Now()
+	after := time.Now().Add(-10 * time.Millisecond)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "time.har")

@@ -25,6 +25,7 @@ type LeakEntry struct {
 }
 
 type Gate struct {
+	parent         *Gate // Per-request counters; aliases and aggregate findings stay shared.
 	targetDomains  []string
 	identityTokens []string
 	domainPatterns []*regexp.Regexp
@@ -34,6 +35,26 @@ type Gate struct {
 	leaks          map[string]*LeakEntry
 	aliases        map[string]string // alias → real domain
 	cookieAliases  map[string]string // alias → original cookie name
+}
+
+// ForRequest keeps replacement counts isolated from concurrent requests while
+// retaining session-wide domain and cookie mappings.
+func (g *Gate) ForRequest() *Gate {
+	return &Gate{
+		parent: g, targetDomains: g.targetDomains, identityTokens: g.identityTokens,
+		domainPatterns: g.domainPatterns, tokenPatterns: g.tokenPatterns,
+		aliasDomain: g.aliasDomain, leaks: make(map[string]*LeakEntry),
+	}
+}
+
+func (g *Gate) ReplacementCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	total := 0
+	for _, entry := range g.leaks {
+		total += entry.Count
+	}
+	return total
 }
 
 func NewGate(targetDomains []string, identityTokens []string, aliasDomain string) *Gate {
@@ -168,7 +189,6 @@ func (g *Gate) Leaks() []LeakEntry {
 func (g *Gate) recordLeak(context, typ, detail string) {
 	key := context + "|" + typ + "|" + detail
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if entry, ok := g.leaks[key]; ok {
 		entry.Count++
 	} else {
@@ -179,9 +199,16 @@ func (g *Gate) recordLeak(context, typ, detail string) {
 			Count:   1,
 		}
 	}
+	g.mu.Unlock()
+	if g.parent != nil {
+		g.parent.recordLeak(context, typ, detail)
+	}
 }
 
 func (g *Gate) aliasDomainAndRecord(domain string) string {
+	if g.parent != nil {
+		return g.parent.aliasDomainAndRecord(domain)
+	}
 	alias := AliasDomain(domain, g.aliasDomain)
 	g.mu.Lock()
 	g.aliases[alias] = strings.ToLower(domain)
@@ -190,6 +217,9 @@ func (g *Gate) aliasDomainAndRecord(domain string) string {
 }
 
 func (g *Gate) AliasCookieNameAndRecord(name string) string {
+	if g.parent != nil {
+		return g.parent.AliasCookieNameAndRecord(name)
+	}
 	alias := AliasCookieName(name)
 	g.mu.Lock()
 	g.cookieAliases[alias] = name
@@ -198,6 +228,9 @@ func (g *Gate) AliasCookieNameAndRecord(name string) string {
 }
 
 func (g *Gate) OriginalCookieName(alias string) string {
+	if g.parent != nil {
+		return g.parent.OriginalCookieName(alias)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if original, ok := g.cookieAliases[alias]; ok {
@@ -207,6 +240,9 @@ func (g *Gate) OriginalCookieName(alias string) string {
 }
 
 func (g *Gate) Aliases() map[string]string {
+	if g.parent != nil {
+		return g.parent.Aliases()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	result := make(map[string]string, len(g.aliases))

@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/proxy"
+	blindertls "github.com/Splinters-io/blinder/internal/tls"
 )
 
 var version = "dev"
@@ -27,6 +32,10 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	var (
 		target      string
 		listen      string
@@ -42,9 +51,12 @@ func main() {
 		outputDir   string
 		certDir     string
 		showVersion bool
+		preflight   bool
+		trustCert   bool
+		ephemeral   bool
 	)
 
-	flag.StringVar(&target, "target", "", "Real target URL (required)")
+	flag.StringVar(&target, "target", "", "Real target URL (required unless running certificate setup)")
 	flag.StringVar(&target, "t", "", "Real target URL (shorthand)")
 	flag.StringVar(&listen, "listen", "127.0.0.1:8099", "Listen address")
 	flag.StringVar(&listen, "l", "127.0.0.1:8099", "Listen address (shorthand)")
@@ -57,17 +69,28 @@ func main() {
 	flag.BoolVar(&paranoid, "paranoid", false, "Maximum scrubbing mode")
 	flag.BoolVar(&bindAll, "bind-all", false, "Allow binding to non-loopback addresses")
 	flag.StringVar(&harPath, "har", "", "Write HAR 1.2 file with real (pre-scrub) transactions")
-	flag.Int64Var(&harMaxBody, "har-max-body", 10*1024*1024, "Max body size to capture in HAR")
+	flag.Int64Var(&harMaxBody, "har-max-body", 10*1024*1024, "Max bytes per request/response body captured in HAR")
 	flag.StringVar(&outputDir, "output", "", "Output directory for manifest and reports")
 	flag.StringVar(&outputDir, "o", "", "Output directory (shorthand)")
-	flag.StringVar(&certDir, "cert-dir", "", "Persist generated cert/key to this directory")
+	flag.StringVar(&certDir, "cert-dir", "", "Private certificate directory (default: per-endpoint user configuration directory)")
+	flag.BoolVar(&preflight, "preflight", false, "Prepare/check local certificate and platform trust, then exit (2 if trust is needed)")
+	flag.BoolVar(&trustCert, "trust-cert", false, "Prepare certificate, request approval for macOS user trust, then exit")
+	flag.BoolVar(&ephemeral, "ephemeral-cert", false, "Use an in-memory certificate for this run; do not save or install trust")
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
 
 	flag.Parse()
 
 	if showVersion {
 		fmt.Printf("blinder %s (%s)\n", version, commit)
-		os.Exit(0)
+		return 0
+	}
+	if ephemeral && (certDir != "" || trustCert) {
+		fmt.Fprintln(os.Stderr, "error: --ephemeral-cert cannot be combined with --cert-dir or --trust-cert")
+		return 1
+	}
+	if target == "" && (preflight || trustCert) {
+		// Certificate-only setup does not construct a proxy or contact a target.
+		target = "https://localhost"
 	}
 
 	effectiveTorAddr := ""
@@ -92,55 +115,101 @@ func main() {
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return 1
+	}
+
+	if !ephemeral && cfg.CertDir == "" {
+		cfg.CertDir, err = blindertls.DefaultDir(cfg.AliasDomain, cfg.ListenAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
+	}
+	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "certificate setup failed: %v\n", err)
+		return 1
+	}
+	guidance := certificateGuidance{
+		platform:   detectCertificatePlatform(runtime.GOOS, os.ReadFile),
+		executable: os.Args[0],
+		alias:      cfg.AliasDomain,
+		listen:     cfg.ListenAddr,
+	}
+	trustErr := printCertificateStatus(os.Stdout, localTLS, guidance)
+	if trustCert {
+		return requestCertificateTrust(localTLS, trustErr, os.Stdin, os.Stdout, guidance)
+	}
+	if preflight {
+		if trustErr != nil {
+			return 2
+		}
+		return 0
 	}
 
 	printBanner(cfg)
-
-	srv, err := proxy.New(cfg)
+	srv, err := proxy.NewWithCertificate(cfg, localTLS.Certificate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		log.Printf("  Listen failed: %v", err)
+		return 1
+	}
+	defer ln.Close()
+	log.Printf("  Proxy listening on https://%s", ln.Addr())
+	serverErr := make(chan error, 1)
 
 	go func() {
-		log.Printf("  Proxy listening on https://%s", cfg.ListenAddr)
-		if err := srv.ListenAndServe(); err != nil {
-			log.Printf("  Server stopped: %v", err)
-		}
+		serverErr <- srv.ListenAndServeOnListener(ln)
 	}()
 
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
+	exitCode := 0
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+running:
+	for {
+		select {
+		case sig := <-sigCh:
+			log.Printf("\n  Received %v, shutting down...", sig)
+			break running
+		case err := <-serverErr:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("  Server stopped: %v", err)
+				exitCode = 1
+			}
+			break running
+		case <-ticker.C:
 			requests, bytes, errors, scrubbed := srv.GetStats()
 			log.Printf("  [stats] requests=%d bytes=%d errors=%d scrubbed=%d leaks=%d",
 				requests, bytes, errors, scrubbed, len(srv.Gate().Leaks()))
 		}
-	}()
-
-	sig := <-sigCh
-	log.Printf("\n  Received %v, shutting down...", sig)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("  Shutdown error: %v", err)
+		exitCode = 1
 	}
 
 	if err := srv.FlushHAR(); err != nil {
 		log.Printf("  HAR flush error: %v", err)
+		exitCode = 1
 	} else if cfg.HAR != nil {
 		log.Printf("  HAR written: %s", cfg.HAR.FilePath)
 	}
 
 	if err := srv.FlushManifest(); err != nil {
 		log.Printf("  Manifest flush error: %v", err)
+		exitCode = 1
 	} else if cfg.OutputDir != "" {
 		log.Printf("  Manifest written: %s/", cfg.OutputDir)
 	}
@@ -158,6 +227,7 @@ func main() {
 	fmt.Printf("  Leaks caught: %d\n", len(leaks))
 	fmt.Printf("  Aliases:   %d\n", len(aliases))
 	fmt.Println()
+	return exitCode
 }
 
 func printBanner(cfg *config.Config) {
