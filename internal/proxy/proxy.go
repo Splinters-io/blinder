@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/har"
 	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
@@ -36,6 +37,7 @@ type Server struct {
 	transport http.RoundTripper
 	server    *http.Server
 	wsProxy   *ws.Proxy
+	harWriter *har.Writer
 	stats     Stats
 }
 
@@ -74,11 +76,17 @@ func New(cfg *config.Config) (*Server, error) {
 		5*time.Minute,
 	)
 
+	var harWriter *har.Writer
+	if cfg.HAR != nil {
+		harWriter = har.NewWriter(cfg.HAR.MaxBodySize)
+	}
+
 	s := &Server{
 		cfg:       cfg,
 		gate:      gate,
 		transport: transport,
 		wsProxy:   wsProxy,
+		harWriter: harWriter,
 	}
 
 	mux := http.NewServeMux()
@@ -138,6 +146,13 @@ func (s *Server) GetStats() (requests, bytes, errors, scrubbed int64) {
 		s.stats.Scrubbed.Load()
 }
 
+func (s *Server) FlushHAR() error {
+	if s.harWriter == nil || s.cfg.HAR == nil {
+		return nil
+	}
+	return s.harWriter.Flush(s.cfg.HAR.FilePath)
+}
+
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.stats.Requests.Add(1)
 
@@ -160,6 +175,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.URL.Host = s.cfg.TargetURL.Host
 	upstreamReq.RequestURI = ""
 
+	requestStart := time.Now()
+
 	resp, err := s.transport.RoundTrip(upstreamReq)
 	if err != nil {
 		log.Printf("[error] upstream: %v", err)
@@ -175,6 +192,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
 		return
+	}
+
+	elapsed := time.Since(requestStart)
+
+	if s.harWriter != nil {
+		var reqBody []byte
+		if r.Body != nil {
+			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
+		}
+		s.harWriter.Record(r, reqBody, resp, body, elapsed)
 	}
 
 	s.stats.Bytes.Add(int64(len(body)))
