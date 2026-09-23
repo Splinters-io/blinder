@@ -30,6 +30,7 @@ type Gate struct {
 	aliasDomain    string
 	mu             sync.Mutex
 	leaks          map[string]*LeakEntry
+	aliases        map[string]string // alias → real domain
 }
 
 func NewGate(targetDomains []string, identityTokens []string, aliasDomain string) *Gate {
@@ -44,6 +45,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		identityTokens: tokens,
 		aliasDomain:    aliasDomain,
 		leaks:          make(map[string]*LeakEntry),
+		aliases:        make(map[string]string),
 	}
 }
 
@@ -51,18 +53,16 @@ func (g *Gate) Scrub(input string, context string) string {
 	result := input
 
 	for _, domain := range g.targetDomains {
-		lower := strings.ToLower(result)
 		domainLower := strings.ToLower(domain)
 		for {
 			idx := strings.Index(strings.ToLower(result), domainLower)
 			if idx < 0 {
 				break
 			}
-			alias := AliasDomain(domain, g.aliasDomain)
+			alias := g.aliasDomainAndRecord(domain)
 			g.recordLeak(context, "target_domain", domain)
 			result = result[:idx] + alias + result[idx+len(domain):]
 		}
-		_ = lower
 	}
 
 	for _, token := range g.identityTokens {
@@ -89,7 +89,7 @@ func (g *Gate) Scrub(input string, context string) string {
 			return email
 		}
 		g.recordLeak(context, "email", email)
-		alias := AliasDomain(domain, g.aliasDomain)
+		alias := g.aliasDomainAndRecord(domain)
 		return "user@" + alias
 	})
 
@@ -125,7 +125,7 @@ func (g *Gate) Scrub(input string, context string) string {
 			return domain
 		}
 		g.recordLeak(context, "domain", domain)
-		return AliasDomain(domain, g.aliasDomain)
+		return g.aliasDomainAndRecord(domain)
 	})
 
 	return result
@@ -165,4 +165,22 @@ func (g *Gate) recordLeak(context, typ, detail string) {
 			Count:   1,
 		}
 	}
+}
+
+func (g *Gate) aliasDomainAndRecord(domain string) string {
+	alias := AliasDomain(domain, g.aliasDomain)
+	g.mu.Lock()
+	g.aliases[alias] = strings.ToLower(domain)
+	g.mu.Unlock()
+	return alias
+}
+
+func (g *Gate) Aliases() map[string]string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	result := make(map[string]string, len(g.aliases))
+	for k, v := range g.aliases {
+		result[k] = v
+	}
+	return result
 }

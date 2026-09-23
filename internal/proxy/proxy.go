@@ -15,6 +15,7 @@ import (
 
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/har"
+	"github.com/Splinters-io/blinder/internal/manifest"
 	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
@@ -32,12 +33,13 @@ type Stats struct {
 }
 
 type Server struct {
-	cfg       *config.Config
-	gate      *scrub.Gate
+	cfg      *config.Config
+	gate     *scrub.Gate
 	transport http.RoundTripper
 	server    *http.Server
 	wsProxy   *ws.Proxy
 	harWriter *har.Writer
+	manifest  *manifest.Session
 	stats     Stats
 }
 
@@ -81,12 +83,15 @@ func New(cfg *config.Config) (*Server, error) {
 		harWriter = har.NewWriter(cfg.HAR.MaxBodySize)
 	}
 
+	session := manifest.NewSession(cfg.AliasDomain, cfg.TargetURL.String())
+
 	s := &Server{
 		cfg:       cfg,
 		gate:      gate,
 		transport: transport,
 		wsProxy:   wsProxy,
 		harWriter: harWriter,
+		manifest:  session,
 	}
 
 	mux := http.NewServeMux()
@@ -151,6 +156,28 @@ func (s *Server) FlushHAR() error {
 		return nil
 	}
 	return s.harWriter.Flush(s.cfg.HAR.FilePath)
+}
+
+func (s *Server) FlushManifest() error {
+	if s.cfg.OutputDir == "" {
+		return nil
+	}
+
+	for alias, real := range s.gate.Aliases() {
+		s.manifest.RecordDomainAlias(real, alias)
+	}
+
+	for _, leak := range s.gate.Leaks() {
+		for i := 0; i < leak.Count; i++ {
+			s.manifest.RecordLeak(leak.Type, leak.Context, leak.Detail)
+		}
+	}
+
+	return s.manifest.Flush(s.cfg.OutputDir)
+}
+
+func (s *Server) Manifest() *manifest.Session {
+	return s.manifest
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +254,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	if result.Metadata != nil {
 		w.Header().Set("X-Blinder-Meta", result.Metadata.TechnicalJSON())
+		s.manifest.RecordIdentity(path, result.Metadata)
 	}
+
+	s.manifest.RecordRequest(path, resp.StatusCode, 1, 0)
 
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.Body)))
 	w.Header().Del("Content-Encoding")

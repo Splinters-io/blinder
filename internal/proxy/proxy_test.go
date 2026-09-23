@@ -308,6 +308,91 @@ func TestProxy_PreservesFormStructure(t *testing.T) {
 	}
 }
 
+func TestProxy_MetadataHeader(t *testing.T) {
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Write([]byte("%PDF-1.7\n/JavaScript (alert)\n%%EOF"))
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	_, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/doc.pdf")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	meta := resp.Header.Get("X-Blinder-Meta")
+	if meta == "" {
+		t.Fatal("expected X-Blinder-Meta header for PDF content")
+	}
+	if !strings.Contains(meta, `"pdf"`) {
+		t.Errorf("expected format 'pdf' in metadata, got: %s", meta)
+	}
+	if !strings.Contains(meta, `"has_javascript":true`) {
+		t.Errorf("expected has_javascript:true in metadata, got: %s", meta)
+	}
+}
+
+func TestProxy_ManifestRecordsRequest(t *testing.T) {
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "ok")
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	srv, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/check")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	reqs := srv.Manifest().Requests()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 manifest request, got %d", len(reqs))
+	}
+	if reqs[0].Path != "/check" {
+		t.Errorf("expected path '/check', got %q", reqs[0].Path)
+	}
+}
+
+func TestProxy_AliasTracking(t *testing.T) {
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>Visit megacorp.io today</body></html>`)
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	srv, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	aliases := srv.Gate().Aliases()
+	if len(aliases) == 0 {
+		t.Error("expected at least one domain alias to be tracked")
+	}
+
+	foundMegacorp := false
+	for _, real := range aliases {
+		if real == "megacorp.io" {
+			foundMegacorp = true
+		}
+	}
+	if !foundMegacorp {
+		t.Errorf("expected megacorp.io in alias map, got: %v", aliases)
+	}
+}
+
 func TestExtractSubdomains(t *testing.T) {
 	tests := []struct {
 		host   string

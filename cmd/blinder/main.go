@@ -133,8 +133,21 @@ func main() {
 		log.Printf("  Shutdown error: %v", err)
 	}
 
+	if err := srv.FlushHAR(); err != nil {
+		log.Printf("  HAR flush error: %v", err)
+	} else if cfg.HAR != nil {
+		log.Printf("  HAR written: %s", cfg.HAR.FilePath)
+	}
+
+	if err := srv.FlushManifest(); err != nil {
+		log.Printf("  Manifest flush error: %v", err)
+	} else if cfg.OutputDir != "" {
+		log.Printf("  Manifest written: %s/", cfg.OutputDir)
+	}
+
 	requests, bytes, errors, scrubbed := srv.GetStats()
 	leaks := srv.Gate().Leaks()
+	aliases := srv.Gate().Aliases()
 
 	fmt.Println()
 	fmt.Println("  ── Session Summary ──")
@@ -143,6 +156,7 @@ func main() {
 	fmt.Printf("  Errors:    %d\n", errors)
 	fmt.Printf("  Scrubbed:  %d\n", scrubbed)
 	fmt.Printf("  Leaks caught: %d\n", len(leaks))
+	fmt.Printf("  Aliases:   %d\n", len(aliases))
 	fmt.Println()
 }
 
@@ -172,6 +186,9 @@ func printBanner(cfg *config.Config) {
 	}
 	if cfg.HAR != nil {
 		fmt.Printf("  HAR:     %s\n", cfg.HAR.FilePath)
+	}
+	if cfg.OutputDir != "" {
+		fmt.Printf("  Output:  %s/\n", cfg.OutputDir)
 	}
 	if len(cfg.IdentityTokens) > 0 {
 		fmt.Printf("  Scrub:   %d identity token(s)\n", len(cfg.IdentityTokens))
