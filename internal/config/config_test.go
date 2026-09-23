@@ -1,0 +1,160 @@
+package config
+
+import (
+	"testing"
+)
+
+func TestNew_ValidHTTPS(t *testing.T) {
+	cfg, err := New(
+		"https://example.com",
+		"127.0.0.1:8099",
+		"target-001.local",
+		[]string{"ExampleOrg"},
+		true, false, false,
+		"", "", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TargetURL.Host != "example.com" {
+		t.Errorf("expected host example.com, got %s", cfg.TargetURL.Host)
+	}
+	if cfg.ListenAddr != "127.0.0.1:8099" {
+		t.Errorf("expected listen 127.0.0.1:8099, got %s", cfg.ListenAddr)
+	}
+}
+
+func TestNew_NoTarget(t *testing.T) {
+	_, err := New("", "", "", nil, true, false, false, "", "", 0, "", "", 0, 0)
+	if err != ErrNoTarget {
+		t.Errorf("expected ErrNoTarget, got %v", err)
+	}
+}
+
+func TestNew_BadScheme(t *testing.T) {
+	_, err := New("file:///etc/passwd", "", "", nil, true, false, false, "", "", 0, "", "", 0, 0)
+	if err != ErrBadScheme {
+		t.Errorf("expected ErrBadScheme, got %v", err)
+	}
+}
+
+func TestNew_OnionWithoutTor(t *testing.T) {
+	_, err := New(
+		"http://facebookwkhpilnemxj7asber7.onion",
+		"", "", nil, true, false, false,
+		"", "", 0, "", "", 0, 0,
+	)
+	if err != ErrOnionRequiresTor {
+		t.Errorf("expected ErrOnionRequiresTor, got %v", err)
+	}
+}
+
+func TestNew_OnionWithTor(t *testing.T) {
+	cfg, err := New(
+		"http://facebookwkhpilnemxj7asber7.onion",
+		"", "", nil, true, false, false,
+		"127.0.0.1:9050", "", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.IsOnion() {
+		t.Error("expected IsOnion() to be true")
+	}
+	if !cfg.UseTor() {
+		t.Error("expected UseTor() to be true")
+	}
+}
+
+func TestNew_ShortToken(t *testing.T) {
+	_, err := New(
+		"https://example.com", "", "", []string{"ab"},
+		true, false, false, "", "", 0, "", "", 0, 0,
+	)
+	if err == nil {
+		t.Error("expected error for short token")
+	}
+}
+
+func TestNew_NonLoopbackWithoutBindAll(t *testing.T) {
+	_, err := New(
+		"https://example.com",
+		"0.0.0.0:8099", "", nil,
+		true, false, false,
+		"", "", 0, "", "", 0, 0,
+	)
+	if err != ErrNonLoopback {
+		t.Errorf("expected ErrNonLoopback, got %v", err)
+	}
+}
+
+func TestNew_NonLoopbackWithBindAll(t *testing.T) {
+	cfg, err := New(
+		"https://example.com",
+		"0.0.0.0:8099", "", nil,
+		true, false, true,
+		"", "", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ListenAddr != "0.0.0.0:8099" {
+		t.Errorf("expected 0.0.0.0:8099, got %s", cfg.ListenAddr)
+	}
+}
+
+func TestNew_Defaults(t *testing.T) {
+	cfg, err := New(
+		"https://example.com",
+		"", "", nil,
+		true, false, false,
+		"", "", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ListenAddr != "127.0.0.1:8099" {
+		t.Errorf("expected default listen addr, got %s", cfg.ListenAddr)
+	}
+	if cfg.AliasDomain != "target-001.local" {
+		t.Errorf("expected default alias, got %s", cfg.AliasDomain)
+	}
+	if cfg.UpstreamTimeout != 30 {
+		t.Errorf("expected upstream timeout 30, got %d", cfg.UpstreamTimeout)
+	}
+	if cfg.ClientTimeout != 60 {
+		t.Errorf("expected client timeout 60, got %d", cfg.ClientTimeout)
+	}
+}
+
+func TestNew_TokensAreCopied(t *testing.T) {
+	tokens := []string{"ExampleOrg", "Example Inc"}
+	cfg, err := New(
+		"https://example.com", "", "", tokens,
+		true, false, false, "", "", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tokens[0] = "MUTATED"
+	if cfg.IdentityTokens[0] == "MUTATED" {
+		t.Error("tokens should be copied, not shared")
+	}
+}
+
+func TestNew_HARConfig(t *testing.T) {
+	cfg, err := New(
+		"https://example.com", "", "", nil,
+		true, false, false,
+		"", "/tmp/test.har", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.HAR == nil {
+		t.Fatal("expected HAR config")
+	}
+	if cfg.HAR.MaxBodySize != 10*1024*1024 {
+		t.Errorf("expected default max body size 10MB, got %d", cfg.HAR.MaxBodySize)
+	}
+}
