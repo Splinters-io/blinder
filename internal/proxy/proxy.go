@@ -17,6 +17,7 @@ import (
 	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
+	"github.com/Splinters-io/blinder/internal/ws"
 )
 
 const maxRequestBody = 50 * 1024 * 1024
@@ -34,6 +35,7 @@ type Server struct {
 	gate      *scrub.Gate
 	transport http.RoundTripper
 	server    *http.Server
+	wsProxy   *ws.Proxy
 	stats     Stats
 }
 
@@ -56,10 +58,27 @@ func New(cfg *config.Config) (*Server, error) {
 		transport = NewDirectTransport(cfg.VerifyTargetTLS, upstreamTimeout)
 	}
 
+	var socksAddr string
+	if cfg.UseTor() {
+		socksAddr = cfg.Tor.SOCKSAddr
+	}
+
+	wsProxy := ws.NewProxy(
+		gate,
+		cfg.AliasDomain,
+		cfg.TargetURL.Host,
+		cfg.TargetURL.Host,
+		cfg.TargetURL.Scheme == "https",
+		cfg.VerifyTargetTLS,
+		socksAddr,
+		5*time.Minute,
+	)
+
 	s := &Server{
 		cfg:       cfg,
 		gate:      gate,
 		transport: transport,
+		wsProxy:   wsProxy,
 	}
 
 	mux := http.NewServeMux()
@@ -121,6 +140,14 @@ func (s *Server) GetStats() (requests, bytes, errors, scrubbed int64) {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.stats.Requests.Add(1)
+
+	if ws.IsUpgrade(r) {
+		if err := s.wsProxy.Handle(w, r); err != nil {
+			log.Printf("[error] websocket: %v", err)
+			s.stats.Errors.Add(1)
+		}
+		return
+	}
 
 	if r.ContentLength > maxRequestBody {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
