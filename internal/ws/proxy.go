@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bufio"
+	crand "crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -26,6 +27,8 @@ const (
 
 	finBit  = 0x80
 	maskBit = 0x80
+
+	maxFrameSize = 16 * 1024 * 1024
 )
 
 var (
@@ -151,7 +154,9 @@ func (p *Proxy) relay(clientConn net.Conn, clientBuf *bufio.ReadWriter, upstream
 	wg.Wait()
 }
 
-func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, scrubTextFrames bool) {
+func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool) {
+	inTextMessage := false
+
 	for {
 		dst.SetWriteDeadline(time.Now().Add(p.idleTimeout))
 
@@ -160,6 +165,7 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, scrubTextFrames boo
 			return
 		}
 
+		fin := (header[0] & finBit) != 0
 		opcode := header[0] & 0x0F
 		masked := (header[1] & maskBit) != 0
 		payloadLen := uint64(header[1] & 0x7F)
@@ -177,6 +183,10 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, scrubTextFrames boo
 				return
 			}
 			payloadLen = binary.BigEndian.Uint64(ext)
+		}
+
+		if payloadLen > maxFrameSize {
+			return
 		}
 
 		var maskKey [4]byte
@@ -199,17 +209,30 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, scrubTextFrames boo
 			}
 		}
 
-		if scrubTextFrames && opcode == opcodeText {
+		if opcode == opcodeText {
+			inTextMessage = true
+		} else if opcode == opcodeBin {
+			inTextMessage = false
+		}
+
+		isTextContent := opcode == opcodeText || (opcode == 0 && inTextMessage)
+
+		if serverToClient && isTextContent {
 			payload = p.gate.ScrubBytes(payload, "ws:text")
 		}
 
-		if !scrubTextFrames && opcode == opcodeText {
+		if !serverToClient && isTextContent {
 			text := string(payload)
 			text = strings.ReplaceAll(text, p.aliasDomain, p.targetHost)
 			payload = []byte(text)
 		}
 
-		if err := writeFrame(dst, header[0]&0xF0|opcode, payload); err != nil {
+		if fin && (opcode == opcodeText || opcode == 0) {
+			inTextMessage = false
+		}
+
+		needMask := !serverToClient
+		if err := writeFrame(dst, header[0], payload, needMask); err != nil {
 			return
 		}
 
@@ -219,26 +242,48 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, scrubTextFrames boo
 	}
 }
 
-func writeFrame(w io.Writer, firstByte byte, payload []byte) error {
-	frame := []byte{firstByte | finBit}
+func writeFrame(w io.Writer, firstByte byte, payload []byte, mask bool) error {
+	frame := []byte{firstByte}
 
 	length := len(payload)
+	var lenByte byte
 	switch {
 	case length <= 125:
-		frame = append(frame, byte(length))
+		lenByte = byte(length)
 	case length <= 65535:
-		frame = append(frame, 126)
+		lenByte = 126
+	default:
+		lenByte = 127
+	}
+	if mask {
+		lenByte |= maskBit
+	}
+	frame = append(frame, lenByte)
+
+	switch {
+	case length > 125 && length <= 65535:
 		ext := make([]byte, 2)
 		binary.BigEndian.PutUint16(ext, uint16(length))
 		frame = append(frame, ext...)
-	default:
-		frame = append(frame, 127)
+	case length > 65535:
 		ext := make([]byte, 8)
 		binary.BigEndian.PutUint64(ext, uint64(length))
 		frame = append(frame, ext...)
 	}
 
-	frame = append(frame, payload...)
+	if mask {
+		var key [4]byte
+		crand.Read(key[:])
+		frame = append(frame, key[:]...)
+		masked := make([]byte, len(payload))
+		for i, b := range payload {
+			masked[i] = b ^ key[i%4]
+		}
+		frame = append(frame, masked...)
+	} else {
+		frame = append(frame, payload...)
+	}
+
 	_, err := w.Write(frame)
 	return err
 }

@@ -19,9 +19,9 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 	case strings.HasPrefix(ct, "text/html"):
 		return BodyResult{Body: rewriteHTML(body, gate, paranoid)}
 	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
-		return BodyResult{Body: gate.ScrubBytes(body, "body:json:"+path)}
+		return BodyResult{Body: scrubJSON(body, gate, "body:json:"+path)}
 	case strings.HasPrefix(ct, "text/javascript") || ct == "application/javascript":
-		return BodyResult{Body: gate.ScrubBytes(body, "body:js:"+path)}
+		return BodyResult{Body: rewriteJS(body, gate, path)}
 	case strings.HasPrefix(ct, "text/css"):
 		return BodyResult{Body: rewriteCSS(body, gate, path)}
 	case strings.HasPrefix(ct, "text/xml") || ct == "application/xml" || strings.HasSuffix(ct, "+xml"):

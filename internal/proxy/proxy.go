@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -197,7 +198,18 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamReq := rewriter.RewriteRequestHeaders(r, s.cfg.TargetURL.Host, s.cfg.AliasDomain)
+	var reqBodyBuf []byte
+	if r.Body != nil {
+		reqBodyBuf, _ = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+		if int64(len(reqBodyBuf)) > maxRequestBody {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			s.stats.Errors.Add(1)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(reqBodyBuf))
+	}
+
+	upstreamReq := rewriter.RewriteRequestHeaders(r, s.cfg.TargetURL.Host, s.cfg.AliasDomain, s.gate)
 	upstreamReq.URL.Scheme = s.cfg.TargetURL.Scheme
 	upstreamReq.URL.Host = s.cfg.TargetURL.Host
 	upstreamReq.RequestURI = ""
@@ -224,11 +236,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	elapsed := time.Since(requestStart)
 
 	if s.harWriter != nil {
-		var reqBody []byte
-		if r.Body != nil {
-			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
-		}
-		s.harWriter.Record(r, reqBody, resp, body, elapsed)
+		s.harWriter.Record(upstreamReq, reqBodyBuf, resp, body, elapsed)
 	}
 
 	s.stats.Bytes.Add(int64(len(body)))
@@ -253,7 +261,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.Metadata != nil {
-		w.Header().Set("X-Blinder-Meta", result.Metadata.TechnicalJSON())
+		metaJSON := s.gate.Scrub(result.Metadata.TechnicalJSON(), "metadata")
+		w.Header().Set("X-Blinder-Meta", metaJSON)
 		s.manifest.RecordIdentity(path, result.Metadata)
 	}
 

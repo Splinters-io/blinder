@@ -99,14 +99,14 @@ func handleWSConn(conn net.Conn) {
 		}
 
 		if opcode == opcodeClose {
-			writeFrame(conn, opcodeClose, payload)
+			writeFrame(conn, opcodeClose, payload, false)
 			return
 		}
 		if opcode == opcodeText {
-			writeFrame(conn, opcodeText, payload)
+			writeFrame(conn, opcodeText, payload, false)
 		}
 		if opcode == opcodePing {
-			writeFrame(conn, opcodePong, payload)
+			writeFrame(conn, opcodePong, payload, false)
 		}
 	}
 }
@@ -268,7 +268,7 @@ func TestWriteFrame(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			err := writeFrame(&buf, finBit|opcodeText, []byte(tt.payload))
+			err := writeFrame(&buf, finBit|opcodeText, []byte(tt.payload), false)
 			if err != nil {
 				t.Fatalf("writeFrame: %v", err)
 			}

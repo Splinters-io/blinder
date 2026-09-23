@@ -161,7 +161,8 @@ func TestRewriteRequestHeaders(t *testing.T) {
 	req.Header.Set("Origin", "https://alias.local")
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 
-	rewritten := RewriteRequestHeaders(req, "target.com", "alias.local")
+	gate := scrub.NewGate(nil, nil, "alias.local")
+	rewritten := RewriteRequestHeaders(req, "target.com", "alias.local", gate)
 
 	if rewritten.Host != "target.com" {
 		t.Errorf("host should be target, got: %s", rewritten.Host)

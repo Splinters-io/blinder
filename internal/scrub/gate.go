@@ -31,6 +31,7 @@ type Gate struct {
 	mu             sync.Mutex
 	leaks          map[string]*LeakEntry
 	aliases        map[string]string // alias → real domain
+	cookieAliases  map[string]string // alias → original cookie name
 }
 
 func NewGate(targetDomains []string, identityTokens []string, aliasDomain string) *Gate {
@@ -46,6 +47,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		aliasDomain:    aliasDomain,
 		leaks:          make(map[string]*LeakEntry),
 		aliases:        make(map[string]string),
+		cookieAliases:  make(map[string]string),
 	}
 }
 
@@ -66,17 +68,24 @@ func (g *Gate) Scrub(input string, context string) string {
 	}
 
 	for _, token := range g.identityTokens {
-		lower := strings.ToLower(result)
 		tokenLower := strings.ToLower(token)
+		var b strings.Builder
+		b.Grow(len(result))
+		remaining := result
+		remainingLower := strings.ToLower(remaining)
 		for {
-			idx := strings.Index(lower, tokenLower)
+			idx := strings.Index(remainingLower, tokenLower)
 			if idx < 0 {
+				b.WriteString(remaining)
 				break
 			}
 			g.recordLeak(context, "identity_token", token)
-			result = result[:idx] + "[REDACTED]" + result[idx+len(token):]
-			lower = strings.ToLower(result)
+			b.WriteString(remaining[:idx])
+			b.WriteString("[REDACTED]")
+			remaining = remaining[idx+len(token):]
+			remainingLower = remainingLower[idx+len(token):]
 		}
+		result = b.String()
 	}
 
 	result = emailRe.ReplaceAllStringFunc(result, func(email string) string {
@@ -172,6 +181,23 @@ func (g *Gate) aliasDomainAndRecord(domain string) string {
 	g.mu.Lock()
 	g.aliases[alias] = strings.ToLower(domain)
 	g.mu.Unlock()
+	return alias
+}
+
+func (g *Gate) AliasCookieNameAndRecord(name string) string {
+	alias := AliasCookieName(name)
+	g.mu.Lock()
+	g.cookieAliases[alias] = name
+	g.mu.Unlock()
+	return alias
+}
+
+func (g *Gate) OriginalCookieName(alias string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if original, ok := g.cookieAliases[alias]; ok {
+		return original
+	}
 	return alias
 }
 

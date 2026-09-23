@@ -86,9 +86,8 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool) []byte {
 
 	if paranoid {
 		s = replaceTextNodes(s, gate)
-	} else {
-		s = gate.Scrub(s, "html:body")
 	}
+	s = gate.Scrub(s, "html:body")
 
 	return []byte(s)
 }
