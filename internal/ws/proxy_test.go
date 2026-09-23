@@ -18,7 +18,7 @@ import (
 )
 
 func wsAcceptKey(key string) string {
-	const magic = "258EAFA5-E914-47DA-95CA-5AB53F90BE37"
+	const magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 	h := sha1.New()
 	h.Write([]byte(key + magic))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
@@ -257,9 +257,9 @@ func TestProxy_BinaryFramePassthrough(t *testing.T) {
 
 func TestWriteFrame(t *testing.T) {
 	tests := []struct {
-		name       string
-		payload    string
-		expectLen  int
+		name      string
+		payload   string
+		expectLen int
 	}{
 		{"small", "hello", 2 + 5},
 		{"medium", strings.Repeat("x", 200), 2 + 2 + 200},

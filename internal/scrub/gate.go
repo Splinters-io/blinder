@@ -27,6 +27,8 @@ type LeakEntry struct {
 type Gate struct {
 	targetDomains  []string
 	identityTokens []string
+	domainPatterns []*regexp.Regexp
+	tokenPatterns  []*regexp.Regexp
 	aliasDomain    string
 	mu             sync.Mutex
 	leaks          map[string]*LeakEntry
@@ -41,7 +43,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 	tokens := make([]string, len(identityTokens))
 	copy(tokens, identityTokens)
 
-	return &Gate{
+	g := &Gate{
 		targetDomains:  domains,
 		identityTokens: tokens,
 		aliasDomain:    aliasDomain,
@@ -49,43 +51,46 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		aliases:        make(map[string]string),
 		cookieAliases:  make(map[string]string),
 	}
+	for _, domain := range domains {
+		g.domainPatterns = append(g.domainPatterns, literalPattern(domain))
+	}
+	for _, token := range tokens {
+		g.tokenPatterns = append(g.tokenPatterns, literalPattern(token))
+	}
+	return g
+}
+
+func literalPattern(value string) *regexp.Regexp {
+	if value == "" {
+		return nil
+	}
+	// Match against the original UTF-8 bytes. Lowercasing can change byte
+	// lengths, so offsets from a lowercased copy cannot safely slice the input.
+	return regexp.MustCompile("(?i)" + regexp.QuoteMeta(value))
 }
 
 func (g *Gate) Scrub(input string, context string) string {
 	result := input
 
-	for _, domain := range g.targetDomains {
-		domainLower := strings.ToLower(domain)
-		for {
-			idx := strings.Index(strings.ToLower(result), domainLower)
-			if idx < 0 {
-				break
-			}
-			alias := g.aliasDomainAndRecord(domain)
-			g.recordLeak(context, "target_domain", domain)
-			result = result[:idx] + alias + result[idx+len(domain):]
+	for i, pattern := range g.domainPatterns {
+		if pattern == nil {
+			continue
 		}
+		domain := g.targetDomains[i]
+		result = pattern.ReplaceAllStringFunc(result, func(string) string {
+			g.recordLeak(context, "target_domain", domain)
+			return g.aliasDomainAndRecord(domain)
+		})
 	}
 
-	for _, token := range g.identityTokens {
-		tokenLower := strings.ToLower(token)
-		var b strings.Builder
-		b.Grow(len(result))
-		remaining := result
-		remainingLower := strings.ToLower(remaining)
-		for {
-			idx := strings.Index(remainingLower, tokenLower)
-			if idx < 0 {
-				b.WriteString(remaining)
-				break
-			}
-			g.recordLeak(context, "identity_token", token)
-			b.WriteString(remaining[:idx])
-			b.WriteString("[REDACTED]")
-			remaining = remaining[idx+len(token):]
-			remainingLower = remainingLower[idx+len(token):]
+	for _, pattern := range g.tokenPatterns {
+		if pattern == nil {
+			continue
 		}
-		result = b.String()
+		result = pattern.ReplaceAllStringFunc(result, func(string) string {
+			g.recordLeak(context, "identity_token", "[configured token]")
+			return "[REDACTED]"
+		})
 	}
 
 	result = emailRe.ReplaceAllStringFunc(result, func(email string) string {
