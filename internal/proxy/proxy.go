@@ -182,7 +182,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	contentType := resp.Header.Get("Content-Type")
 	path := r.URL.Path
 
-	finalBody := rewriter.RewriteBody(body, contentType, path, s.gate, s.cfg.Paranoid)
+	result := rewriter.RewriteBody(body, contentType, path, s.gate, s.cfg.Paranoid)
 	s.stats.Scrubbed.Add(1)
 
 	outHeaders := rewriter.RewriteResponseHeaders(
@@ -198,12 +198,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalBody)))
+	if result.Metadata != nil {
+		w.Header().Set("X-Blinder-Meta", result.Metadata.TechnicalJSON())
+	}
+
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result.Body)))
 	w.Header().Del("Content-Encoding")
 	w.Header().Del("Transfer-Encoding")
 
 	w.WriteHeader(resp.StatusCode)
-	w.Write(finalBody)
+	w.Write(result.Body)
 }
 
 func (s *Server) readResponseBody(resp *http.Response) ([]byte, error) {
