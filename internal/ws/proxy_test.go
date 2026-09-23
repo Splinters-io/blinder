@@ -99,14 +99,14 @@ func handleWSConn(conn net.Conn) {
 		}
 
 		if opcode == opcodeClose {
-			writeFrame(conn, opcodeClose, payload, false)
+			writeFrame(conn, finBit|opcodeClose, payload, false)
 			return
 		}
 		if opcode == opcodeText {
-			writeFrame(conn, opcodeText, payload, false)
+			writeFrame(conn, finBit|opcodeText, payload, false)
 		}
 		if opcode == opcodePing {
-			writeFrame(conn, opcodePong, payload, false)
+			writeFrame(conn, finBit|opcodePong, payload, false)
 		}
 	}
 }

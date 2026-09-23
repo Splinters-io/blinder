@@ -17,6 +17,7 @@ var (
 
 	baseHrefRe     = regexp.MustCompile(`(?i)(<base[^>]*\bhref\s*=\s*")((?:[^"\\]|\\.)*)("[^>]*>)`)
 	linkCanonRe    = regexp.MustCompile(`(?i)(<link[^>]*\brel\s*=\s*"canonical"[^>]*\bhref\s*=\s*")((?:[^"\\]|\\.)*)("[^>]*>)`)
+	scriptBlockRe  = regexp.MustCompile(`(?i)(<script\b[^>]*>)([\s\S]*?)(</script>)`)
 )
 
 const loremText = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
@@ -87,9 +88,32 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool) []byte {
 	if paranoid {
 		s = replaceTextNodes(s, gate)
 	}
-	s = gate.Scrub(s, "html:body")
+	s = scrubHTMLWithScriptProtection(s, gate)
 
 	return []byte(s)
+}
+
+func scrubHTMLWithScriptProtection(html string, gate *scrub.Gate) string {
+	locs := scriptBlockRe.FindAllStringSubmatchIndex(html, -1)
+	if len(locs) == 0 {
+		return gate.Scrub(html, "html:body")
+	}
+
+	var result strings.Builder
+	result.Grow(len(html))
+	lastEnd := 0
+
+	for _, loc := range locs {
+		result.WriteString(gate.Scrub(html[lastEnd:loc[0]], "html:body"))
+		result.WriteString(gate.Scrub(html[loc[2]:loc[3]], "html:script-tag"))
+		content := html[loc[4]:loc[5]]
+		result.Write(rewriteJS([]byte(content), gate, "html:script"))
+		result.WriteString(html[loc[6]:loc[7]])
+		lastEnd = loc[1]
+	}
+
+	result.WriteString(gate.Scrub(html[lastEnd:], "html:body"))
+	return result.String()
 }
 
 func replaceTextNodes(html string, gate *scrub.Gate) string {

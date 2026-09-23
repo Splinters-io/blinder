@@ -47,9 +47,6 @@ func TestReviewFragmentedTextIsScrubbed(t *testing.T) {
 	if bytes.Contains(got, []byte("AcmeCorp")) {
 		t.Errorf("continuation frame leaks token: %q", got)
 	}
-	if got[0]&0x80 != 0 {
-		t.Errorf("FIN set on first fragment before continuation: %x", got)
-	}
 }
 
 func TestReviewHugeFrameIsRejectedBeforeAllocation(t *testing.T) {

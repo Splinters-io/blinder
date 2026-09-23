@@ -155,6 +155,7 @@ func (p *Proxy) relay(clientConn net.Conn, clientBuf *bufio.ReadWriter, upstream
 }
 
 func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool) {
+	var textBuf []byte
 	inTextMessage := false
 
 	for {
@@ -209,34 +210,49 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool
 			}
 		}
 
+		if opcode >= 0x8 {
+			needMask := !serverToClient
+			if err := writeFrame(dst, header[0], payload, needMask); err != nil {
+				return
+			}
+			if opcode == opcodeClose {
+				return
+			}
+			continue
+		}
+
 		if opcode == opcodeText {
 			inTextMessage = true
 		} else if opcode == opcodeBin {
 			inTextMessage = false
+			textBuf = nil
 		}
 
-		isTextContent := opcode == opcodeText || (opcode == 0 && inTextMessage)
+		isTextContent := inTextMessage && (opcode == opcodeText || opcode == 0)
 
-		if serverToClient && isTextContent {
-			payload = p.gate.ScrubBytes(payload, "ws:text")
-		}
-
-		if !serverToClient && isTextContent {
-			text := string(payload)
-			text = strings.ReplaceAll(text, p.aliasDomain, p.targetHost)
-			payload = []byte(text)
-		}
-
-		if fin && (opcode == opcodeText || opcode == 0) {
-			inTextMessage = false
+		if isTextContent {
+			if uint64(len(textBuf))+payloadLen > maxFrameSize {
+				return
+			}
+			textBuf = append(textBuf, payload...)
+			if fin {
+				if serverToClient {
+					textBuf = p.gate.ScrubBytes(textBuf, "ws:text")
+				} else {
+					textBuf = []byte(strings.ReplaceAll(string(textBuf), p.aliasDomain, p.targetHost))
+				}
+				needMask := !serverToClient
+				if err := writeFrame(dst, finBit|opcodeText, textBuf, needMask); err != nil {
+					return
+				}
+				textBuf = nil
+				inTextMessage = false
+			}
+			continue
 		}
 
 		needMask := !serverToClient
 		if err := writeFrame(dst, header[0], payload, needMask); err != nil {
-			return
-		}
-
-		if opcode == opcodeClose {
 			return
 		}
 	}

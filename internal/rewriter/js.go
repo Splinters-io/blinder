@@ -87,19 +87,25 @@ func writeScrubbedJSTemplate(s string, pos int, gate *scrub.Gate, path string, o
 			pos += 2
 			depth := 1
 			for pos < len(s) && depth > 0 {
-				switch s[pos] {
-				case '{':
+				switch {
+				case s[pos] == '\'' || s[pos] == '"':
+					pos = writeScrubbedJSString(s, pos, gate, path, out)
+				case s[pos] == '`':
+					pos = writeScrubbedJSTemplate(s, pos, gate, path, out)
+				case s[pos] == '{':
 					depth++
 					out.WriteByte(s[pos])
-				case '}':
+					pos++
+				case s[pos] == '}':
 					depth--
 					if depth > 0 {
 						out.WriteByte(s[pos])
 					}
+					pos++
 				default:
 					out.WriteByte(s[pos])
+					pos++
 				}
-				pos++
 			}
 			out.WriteByte('}')
 			textStart = pos

@@ -52,6 +52,18 @@ var passthroughHeaders = map[string]bool{
 	"via":                                 true,
 }
 
+var identityRiskHeaders = map[string]bool{
+	"server":                      true,
+	"x-powered-by":                true,
+	"x-aspnet-version":            true,
+	"x-aspnetmvc-version":         true,
+	"x-generator":                 true,
+	"x-served-by":                 true,
+	"www-authenticate":            true,
+	"access-control-allow-origin": true,
+	"via":                         true,
+}
+
 var scrubHeaders = map[string]bool{
 	"location":         true,
 	"content-location": true,
@@ -97,11 +109,15 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 				out[name] = scrubbed
 				continue
 			}
-			scrubbed := make([]string, len(values))
-			for i, v := range values {
-				scrubbed[i] = gate.Scrub(v, "header:"+lower)
+			if identityRiskHeaders[lower] {
+				scrubbed := make([]string, len(values))
+				for i, v := range values {
+					scrubbed[i] = gate.Scrub(v, "header:"+lower)
+				}
+				out[name] = scrubbed
+				continue
 			}
-			out[name] = scrubbed
+			out[name] = copyValues(values)
 			continue
 		}
 
@@ -193,7 +209,6 @@ func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targe
 		lower := strings.ToLower(trimmed)
 
 		if strings.HasPrefix(lower, "domain=") {
-			rewritten = append(rewritten, " Domain="+aliasDomain)
 			continue
 		}
 

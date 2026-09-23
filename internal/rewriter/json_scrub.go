@@ -1,14 +1,20 @@
 package rewriter
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
 func scrubJSON(body []byte, gate *scrub.Gate, context string) []byte {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var parsed interface{}
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := dec.Decode(&parsed); err != nil {
+		return gate.ScrubBytes(body, context)
+	}
+	if dec.More() {
 		return gate.ScrubBytes(body, context)
 	}
 	scrubbed := scrubJSONValue(parsed, gate, context)
@@ -26,7 +32,8 @@ func scrubJSONValue(v interface{}, gate *scrub.Gate, context string) interface{}
 	case map[string]interface{}:
 		result := make(map[string]interface{}, len(val))
 		for k, child := range val {
-			result[k] = scrubJSONValue(child, gate, context)
+			scrubbedKey := gate.Scrub(k, context)
+			result[scrubbedKey] = scrubJSONValue(child, gate, context)
 		}
 		return result
 	case []interface{}:

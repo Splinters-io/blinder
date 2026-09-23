@@ -200,7 +200,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	var reqBodyBuf []byte
 	if r.Body != nil {
-		reqBodyBuf, _ = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+		var readErr error
+		reqBodyBuf, readErr = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+		if readErr != nil {
+			http.Error(w, "request read error", http.StatusBadRequest)
+			s.stats.Errors.Add(1)
+			return
+		}
 		if int64(len(reqBodyBuf)) > maxRequestBody {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			s.stats.Errors.Add(1)

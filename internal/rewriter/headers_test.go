@@ -99,11 +99,8 @@ func TestRewriteResponseHeaders_SetCookie(t *testing.T) {
 	if !strings.Contains(cookie, "ck_") {
 		t.Errorf("cookie name should start with ck_, got: %s", cookie)
 	}
-	if strings.Contains(cookie, "Domain=target.com") {
-		t.Error("cookie domain should be rewritten")
-	}
-	if !strings.Contains(cookie, "Domain=alias.local") {
-		t.Errorf("cookie domain should be alias, got: %s", cookie)
+	if strings.Contains(cookie, "Domain=") {
+		t.Errorf("cookie Domain should be stripped for loopback compatibility, got: %s", cookie)
 	}
 	if !strings.Contains(cookie, "HttpOnly") {
 		t.Error("cookie flags should be preserved")
