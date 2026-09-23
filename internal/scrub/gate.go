@@ -11,9 +11,11 @@ var (
 	domainRe = regexp.MustCompile(`\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b`)
 	emailRe  = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
 	ipv4Re   = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	ipv6Re   = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b|(?i)\b(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}\b|(?i)::(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,5}::\b`)
 )
 
-const testNetIP = "203.0.113.1"
+const testNetIPv4 = "203.0.113.1"
+const testNetIPv6 = "2001:db8::1"
 
 type LeakEntry struct {
 	Context string
@@ -91,6 +93,30 @@ func (g *Gate) Scrub(input string, context string) string {
 		return "user@" + alias
 	})
 
+	result = ipv4Re.ReplaceAllStringFunc(result, func(ipStr string) string {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return ipStr
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return ipStr
+		}
+		g.recordLeak(context, "public_ipv4", ipStr)
+		return testNetIPv4
+	})
+
+	result = ipv6Re.ReplaceAllStringFunc(result, func(ipStr string) string {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return ipStr
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return ipStr
+		}
+		g.recordLeak(context, "public_ipv6", ipStr)
+		return testNetIPv6
+	})
+
 	result = domainRe.ReplaceAllStringFunc(result, func(domain string) string {
 		if IsSafeDomain(domain) {
 			return domain
@@ -100,18 +126,6 @@ func (g *Gate) Scrub(input string, context string) string {
 		}
 		g.recordLeak(context, "domain", domain)
 		return AliasDomain(domain, g.aliasDomain)
-	})
-
-	result = ipv4Re.ReplaceAllStringFunc(result, func(ipStr string) string {
-		ip := net.ParseIP(ipStr)
-		if ip == nil {
-			return ipStr
-		}
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return ipStr
-		}
-		g.recordLeak(context, "public_ip", ipStr)
-		return testNetIP
 	})
 
 	return result

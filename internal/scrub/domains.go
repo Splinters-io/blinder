@@ -54,3 +54,8 @@ func AliasDomain(domain string, aliasSuffix string) string {
 	h := sha256.Sum256([]byte(strings.ToLower(domain)))
 	return fmt.Sprintf("host-%x.%s", h[:4], aliasSuffix)
 }
+
+func AliasCookieName(name string) string {
+	h := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("ck_%x", h[:4])
+}

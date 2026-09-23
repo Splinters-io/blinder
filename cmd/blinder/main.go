@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/proxy"
 )
 
 var version = "dev"
@@ -91,9 +97,53 @@ func main() {
 
 	printBanner(cfg)
 
-	// TODO: start proxy server
-	_ = cfg
-	fmt.Println("proxy not yet implemented")
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("  Proxy listening on https://%s", cfg.ListenAddr)
+		if err := srv.ListenAndServe(); err != nil {
+			log.Printf("  Server stopped: %v", err)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			requests, bytes, errors, scrubbed := srv.GetStats()
+			log.Printf("  [stats] requests=%d bytes=%d errors=%d scrubbed=%d leaks=%d",
+				requests, bytes, errors, scrubbed, len(srv.Gate().Leaks()))
+		}
+	}()
+
+	sig := <-sigCh
+	log.Printf("\n  Received %v, shutting down...", sig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("  Shutdown error: %v", err)
+	}
+
+	requests, bytes, errors, scrubbed := srv.GetStats()
+	leaks := srv.Gate().Leaks()
+
+	fmt.Println()
+	fmt.Println("  ── Session Summary ──")
+	fmt.Printf("  Requests:  %d\n", requests)
+	fmt.Printf("  Bytes:     %d\n", bytes)
+	fmt.Printf("  Errors:    %d\n", errors)
+	fmt.Printf("  Scrubbed:  %d\n", scrubbed)
+	fmt.Printf("  Leaks caught: %d\n", len(leaks))
+	fmt.Println()
 }
 
 func printBanner(cfg *config.Config) {
@@ -107,7 +157,7 @@ func printBanner(cfg *config.Config) {
 	fmt.Println()
 	fmt.Printf("  Content-blind reverse proxy v%s\n", version)
 	fmt.Println()
-	fmt.Printf("  Listen:  %s\n", cfg.ListenAddr)
+	fmt.Printf("  Listen:  https://%s\n", cfg.ListenAddr)
 	fmt.Printf("  Alias:   %s\n", cfg.AliasDomain)
 
 	if cfg.UseTor() {
@@ -126,5 +176,10 @@ func printBanner(cfg *config.Config) {
 	if len(cfg.IdentityTokens) > 0 {
 		fmt.Printf("  Scrub:   %d identity token(s)\n", len(cfg.IdentityTokens))
 	}
+
+	if !cfg.VerifyTargetTLS {
+		fmt.Println("  Warning: TLS verification disabled for upstream target")
+	}
+
 	fmt.Println()
 }

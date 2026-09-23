@@ -1,0 +1,208 @@
+package rewriter
+
+import (
+	"net/http"
+	"regexp"
+	"strings"
+
+	"github.com/Splinters-io/blinder/internal/scrub"
+)
+
+var passthroughHeaders = map[string]bool{
+	"content-type":                        true,
+	"content-length":                      true,
+	"content-encoding":                    true,
+	"transfer-encoding":                   true,
+	"cache-control":                       true,
+	"pragma":                              true,
+	"expires":                             true,
+	"etag":                                true,
+	"vary":                                true,
+	"x-content-type-options":              true,
+	"x-frame-options":                     true,
+	"x-xss-protection":                    true,
+	"x-powered-by":                        true,
+	"x-aspnet-version":                    true,
+	"x-aspnetmvc-version":                 true,
+	"x-generator":                         true,
+	"x-drupal-cache":                      true,
+	"x-varnish":                           true,
+	"x-cache":                             true,
+	"x-cache-hits":                        true,
+	"x-served-by":                         true,
+	"x-runtime":                           true,
+	"x-request-id":                        true,
+	"content-security-policy":             true,
+	"content-security-policy-report-only": true,
+	"strict-transport-security":           true,
+	"access-control-allow-origin":         true,
+	"access-control-allow-methods":        true,
+	"access-control-allow-headers":        true,
+	"access-control-expose-headers":       true,
+	"access-control-max-age":              true,
+	"access-control-allow-credentials":    true,
+	"permissions-policy":                  true,
+	"referrer-policy":                     true,
+	"cross-origin-opener-policy":          true,
+	"cross-origin-embedder-policy":        true,
+	"cross-origin-resource-policy":        true,
+	"www-authenticate":                    true,
+	"retry-after":                         true,
+	"server":                              true,
+	"via":                                 true,
+}
+
+var scrubHeaders = map[string]bool{
+	"location":         true,
+	"content-location": true,
+	"link":             true,
+	"refresh":          true,
+	"p3p":              true,
+	"x-redirect-by":   true,
+}
+
+var cspKeywords = map[string]bool{
+	"'self'":           true,
+	"'unsafe-inline'":  true,
+	"'unsafe-eval'":    true,
+	"'strict-dynamic'": true,
+	"'none'":           true,
+	"'wasm-unsafe-eval'": true,
+	"'unsafe-hashes'":  true,
+}
+
+var cspSchemes = map[string]bool{
+	"data:":  true,
+	"blob:":  true,
+	"https:": true,
+	"http:":  true,
+	"ws:":    true,
+	"wss:":   true,
+}
+
+var cspNonceHashRe = regexp.MustCompile(`^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/=]+'$`)
+
+func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain string, targetHost string) http.Header {
+	out := make(http.Header)
+
+	for name, values := range resp {
+		lower := strings.ToLower(name)
+
+		if passthroughHeaders[lower] {
+			if lower == "content-security-policy" || lower == "content-security-policy-report-only" {
+				scrubbed := make([]string, len(values))
+				for i, v := range values {
+					scrubbed[i] = rewriteCSP(v, gate, aliasDomain)
+				}
+				out[name] = scrubbed
+				continue
+			}
+			out[name] = copyValues(values)
+			continue
+		}
+
+		if scrubHeaders[lower] {
+			scrubbed := make([]string, len(values))
+			for i, v := range values {
+				scrubbed[i] = gate.Scrub(v, "header:"+lower)
+			}
+			out[name] = scrubbed
+			continue
+		}
+
+		if lower == "set-cookie" {
+			scrubbed := make([]string, len(values))
+			for i, v := range values {
+				scrubbed[i] = rewriteSetCookie(v, gate, aliasDomain, targetHost)
+			}
+			out[name] = scrubbed
+			continue
+		}
+	}
+
+	return out
+}
+
+func RewriteRequestHeaders(req *http.Request, targetHost string, aliasDomain string) *http.Request {
+	clone := req.Clone(req.Context())
+	clone.Host = targetHost
+
+	if ref := clone.Header.Get("Referer"); ref != "" {
+		clone.Header.Set("Referer", strings.ReplaceAll(ref, aliasDomain, targetHost))
+	}
+	if origin := clone.Header.Get("Origin"); origin != "" {
+		clone.Header.Set("Origin", strings.ReplaceAll(origin, aliasDomain, targetHost))
+	}
+
+	clone.Header.Del("Accept-Encoding")
+
+	return clone
+}
+
+func rewriteCSP(csp string, gate *scrub.Gate, aliasDomain string) string {
+	directives := strings.Split(csp, ";")
+	rewritten := make([]string, 0, len(directives))
+
+	for _, directive := range directives {
+		directive = strings.TrimSpace(directive)
+		if directive == "" {
+			continue
+		}
+
+		tokens := strings.Fields(directive)
+		if len(tokens) == 0 {
+			continue
+		}
+
+		name := tokens[0]
+		scrubbed := []string{name}
+
+		for _, token := range tokens[1:] {
+			if cspKeywords[token] || cspSchemes[token] || cspNonceHashRe.MatchString(token) || token == "*" {
+				scrubbed = append(scrubbed, token)
+			} else {
+				scrubbed = append(scrubbed, gate.Scrub(token, "csp"))
+			}
+		}
+
+		rewritten = append(rewritten, strings.Join(scrubbed, " "))
+	}
+
+	return strings.Join(rewritten, "; ")
+}
+
+func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targetHost string) string {
+	parts := strings.Split(cookie, ";")
+	rewritten := make([]string, 0, len(parts))
+
+	for i, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		lower := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lower, "domain=") {
+			rewritten = append(rewritten, " Domain="+aliasDomain)
+			continue
+		}
+
+		if i == 0 {
+			eqIdx := strings.IndexByte(trimmed, '=')
+			if eqIdx > 0 {
+				cookieName := trimmed[:eqIdx]
+				cookieValue := trimmed[eqIdx+1:]
+				hashedName := scrub.AliasCookieName(cookieName)
+				rewritten = append(rewritten, hashedName+"="+cookieValue)
+				continue
+			}
+		}
+
+		rewritten = append(rewritten, part)
+	}
+
+	return strings.Join(rewritten, ";")
+}
+
+func copyValues(vals []string) []string {
+	out := make([]string, len(vals))
+	copy(out, vals)
+	return out
+}

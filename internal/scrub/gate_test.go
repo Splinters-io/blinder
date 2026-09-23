@@ -1,6 +1,7 @@
 package scrub
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -39,19 +40,19 @@ func TestGate_PreservesSafeEmail(t *testing.T) {
 	}
 }
 
-func TestGate_ScrubsPublicIP(t *testing.T) {
+func TestGate_ScrubsPublicIPv4(t *testing.T) {
 	g := NewGate(nil, nil, "target-001.local")
 	result := g.Scrub("Server at 93.184.216.34", "test")
 	if result != "Server at 203.0.113.1" {
-		t.Errorf("public IP should be replaced, got: %s", result)
+		t.Errorf("public IPv4 should be replaced, got: %s", result)
 	}
 }
 
-func TestGate_PreservesPrivateIP(t *testing.T) {
+func TestGate_PreservesPrivateIPv4(t *testing.T) {
 	g := NewGate(nil, nil, "target-001.local")
 	result := g.Scrub("Local server at 192.168.1.1", "test")
 	if result != "Local server at 192.168.1.1" {
-		t.Errorf("private IP should be preserved, got: %s", result)
+		t.Errorf("private IPv4 should be preserved, got: %s", result)
 	}
 }
 
@@ -60,6 +61,33 @@ func TestGate_PreservesLoopback(t *testing.T) {
 	result := g.Scrub("Connect to 127.0.0.1:8080", "test")
 	if result != "Connect to 127.0.0.1:8080" {
 		t.Errorf("loopback should be preserved, got: %s", result)
+	}
+}
+
+func TestGate_ScrubsPublicIPv6(t *testing.T) {
+	g := NewGate(nil, nil, "target-001.local")
+	result := g.Scrub("Server at 2607:f8b0:4004:800::200e", "test")
+	if result == "Server at 2607:f8b0:4004:800::200e" {
+		t.Error("public IPv6 should be replaced")
+	}
+	if !strings.Contains(result, "2001:db8::1") {
+		t.Errorf("public IPv6 should be replaced with doc prefix, got: %s", result)
+	}
+}
+
+func TestGate_PreservesLoopbackIPv6(t *testing.T) {
+	g := NewGate(nil, nil, "target-001.local")
+	result := g.Scrub("Connect to ::1", "test")
+	if result != "Connect to ::1" {
+		t.Errorf("IPv6 loopback should be preserved, got: %s", result)
+	}
+}
+
+func TestGate_ScrubsFullIPv6(t *testing.T) {
+	g := NewGate(nil, nil, "target-001.local")
+	result := g.Scrub("Addr: 2001:0db8:85a3:0000:0000:8a2e:0370:7334", "test")
+	if strings.Contains(result, "2001:0db8:85a3") {
+		t.Errorf("full IPv6 should be replaced, got: %s", result)
 	}
 }
 
