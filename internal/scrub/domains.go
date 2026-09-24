@@ -55,6 +55,20 @@ func AliasDomain(domain string, aliasSuffix string) string {
 	return fmt.Sprintf("host-%x.%s", h[:4], aliasSuffix)
 }
 
+func AliasOrigin(scheme, host, port, aliasSuffix string) string {
+	origin := strings.ToLower(scheme) + "\x00" + strings.ToLower(host)
+	if port != "" && !isDefaultPort(scheme, port) {
+		origin += "\x00" + port
+	}
+	h := sha256.Sum256([]byte(origin))
+	return fmt.Sprintf("host-%x.%s", h[:4], aliasSuffix)
+}
+
+func isDefaultPort(scheme, port string) bool {
+	return (strings.EqualFold(scheme, "https") && port == "443") ||
+		(strings.EqualFold(scheme, "http") && port == "80")
+}
+
 func AliasCookieName(name string) string {
 	h := sha256.Sum256([]byte(name))
 	return fmt.Sprintf("ck_%x", h[:4])

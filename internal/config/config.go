@@ -20,6 +20,7 @@ type HARConfig struct {
 
 type Config struct {
 	TargetURL       *url.URL
+	ExtraOrigins    []*url.URL
 	ListenAddr      string
 	AliasDomain     string
 	IdentityTokens  []string
@@ -63,6 +64,7 @@ func New(
 	certDir string,
 	upstreamTimeout int,
 	clientTimeout int,
+	extraOrigins ...string,
 ) (*Config, error) {
 	if target == "" {
 		return nil, ErrNoTarget
@@ -139,6 +141,25 @@ func New(
 		}
 	}
 
+	var extras []*url.URL
+	for _, raw := range extraOrigins {
+		eu, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid extra origin %q: %w", raw, parseErr)
+		}
+		if !allowedSchemes[eu.Scheme] {
+			return nil, fmt.Errorf("extra origin must use http or https: %s", raw)
+		}
+		if eu.Hostname() == "" || eu.Opaque != "" || !utf8.ValidString(eu.Hostname()) {
+			return nil, fmt.Errorf("extra origin must include a valid hostname: %s", raw)
+		}
+		extraOnion := strings.HasSuffix(strings.ToLower(strings.TrimSuffix(eu.Hostname(), ".")), ".onion")
+		if extraOnion && torAddr == "" {
+			return nil, ErrOnionRequiresTor
+		}
+		extras = append(extras, eu)
+	}
+
 	if upstreamTimeout <= 0 {
 		upstreamTimeout = 30
 	}
@@ -148,6 +169,7 @@ func New(
 
 	return &Config{
 		TargetURL:       u,
+		ExtraOrigins:    extras,
 		ListenAddr:      listen,
 		AliasDomain:     alias,
 		IdentityTokens:  tokensCopy,

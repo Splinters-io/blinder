@@ -55,3 +55,32 @@ func TestGenerateSelfSigned(t *testing.T) {
 		t.Errorf("expected ECDSA, got %v", parsed.PublicKeyAlgorithm)
 	}
 }
+
+func TestGenerateSelfSigned_ExtraSANs(t *testing.T) {
+	cert, err := GenerateSelfSigned("target-001.local", "host-abcd1234.target-001.local", "host-ef567890.target-001.local")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("failed to parse cert: %v", err)
+	}
+
+	want := map[string]bool{
+		"target-001.local":                  false,
+		"localhost":                          false,
+		"host-abcd1234.target-001.local":    false,
+		"host-ef567890.target-001.local":    false,
+	}
+	for _, name := range parsed.DNSNames {
+		if _, ok := want[name]; ok {
+			want[name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("expected %s in SAN DNS names, got: %v", name, parsed.DNSNames)
+		}
+	}
+}

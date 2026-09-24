@@ -192,6 +192,80 @@ func TestGate_CookieValueChildDelegates(t *testing.T) {
 	}
 }
 
+func TestCookieValueRestoration_MultipleValues(t *testing.T) {
+	g := NewGate(nil, []string{"Alice", "Bobby"}, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+
+	scrubbed1 := g.Scrub("Alice", "cookie:value")
+	actual1 := g.RecordCookieValue(aliased, "Alice", scrubbed1)
+
+	scrubbed2 := g.Scrub("Bobby", "cookie:value")
+	actual2 := g.RecordCookieValue(aliased, "Bobby", scrubbed2)
+
+	if actual1 == actual2 {
+		t.Fatalf("disambiguated scrubbed values must differ, both are %q", actual1)
+	}
+
+	restored1 := g.RestoreCookieValue(aliased, actual1)
+	if restored1 != "Alice" {
+		t.Errorf("first cookie value should be restored, got %q (scrubbed was %q)", restored1, actual1)
+	}
+
+	restored2 := g.RestoreCookieValue(aliased, actual2)
+	if restored2 != "Bobby" {
+		t.Errorf("second cookie value should be restored, got %q (scrubbed was %q)", restored2, actual2)
+	}
+}
+
+func TestCookieValueRestoration_SameValueIdempotent(t *testing.T) {
+	g := NewGate(nil, nil, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+
+	actual1 := g.RecordCookieValue(aliased, "samevalue", "samevalue")
+	actual2 := g.RecordCookieValue(aliased, "samevalue", "samevalue")
+	if actual1 != actual2 {
+		t.Errorf("same original should return same scrubbed: %q vs %q", actual1, actual2)
+	}
+
+	restored := g.RestoreCookieValue(aliased, actual1)
+	if restored != "samevalue" {
+		t.Errorf("should restore, got %q", restored)
+	}
+}
+
+func TestCookieValueRestoration_LiteralCollisionWithHash(t *testing.T) {
+	g := NewGate(nil, []string{"Alice", "Bobby"}, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+
+	scrubAlice := g.Scrub("Alice", "cookie:value")
+	actualAlice := g.RecordCookieValue(aliased, "Alice", scrubAlice)
+
+	scrubBobby := g.Scrub("Bobby", "cookie:value")
+	actualBobby := g.RecordCookieValue(aliased, "Bobby", scrubBobby)
+
+	// Now record a third value whose scrubbed form is crafted to equal one of
+	// the existing scrubbed values (simulating the literal collision).
+	actualThird := g.RecordCookieValue(aliased, "Charlie", actualBobby)
+
+	if actualThird == actualBobby {
+		t.Fatalf("literal collision: third value's handle %q equals Bobby's %q", actualThird, actualBobby)
+	}
+	if actualThird == actualAlice {
+		t.Fatalf("literal collision: third value's handle %q equals Alice's %q", actualThird, actualAlice)
+	}
+
+	// All three must restore correctly.
+	if r := g.RestoreCookieValue(aliased, actualAlice); r != "Alice" {
+		t.Errorf("Alice restore failed: got %q", r)
+	}
+	if r := g.RestoreCookieValue(aliased, actualBobby); r != "Bobby" {
+		t.Errorf("Bobby restore failed: got %q", r)
+	}
+	if r := g.RestoreCookieValue(aliased, actualThird); r != "Charlie" {
+		t.Errorf("Charlie restore failed: got %q", r)
+	}
+}
+
 func TestIsSafeDomain(t *testing.T) {
 	tests := []struct {
 		domain string

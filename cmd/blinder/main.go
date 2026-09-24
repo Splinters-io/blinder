@@ -17,6 +17,7 @@ import (
 
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/proxy"
+	"github.com/Splinters-io/blinder/internal/scrub"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
 )
 
@@ -41,6 +42,7 @@ func run() int {
 		listen      string
 		alias       string
 		identity    stringSlice
+		extraOrigin stringSlice
 		tor         bool
 		torAddr     string
 		noVerifyTLS bool
@@ -63,6 +65,8 @@ func run() int {
 	flag.StringVar(&alias, "alias", "target-001.local", "Alias domain the client sees")
 	flag.Var(&identity, "identity", "Identity tokens to scrub (repeatable)")
 	flag.Var(&identity, "i", "Identity tokens to scrub (shorthand, repeatable)")
+	flag.Var(&extraOrigin, "extra-origin", "Additional upstream origin (repeatable)")
+	flag.Var(&extraOrigin, "X", "Additional upstream origin (shorthand, repeatable)")
 	flag.BoolVar(&tor, "tor", false, "Route upstream through Tor SOCKS5 proxy")
 	flag.StringVar(&torAddr, "tor-addr", "127.0.0.1:9050", "Tor SOCKS5 address")
 	flag.BoolVar(&noVerifyTLS, "no-verify-tls", false, "Skip TLS verification on target")
@@ -112,20 +116,26 @@ func run() int {
 		outputDir,
 		certDir,
 		0, 0,
+		[]string(extraOrigin)...,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 
+	var extraAliases []string
+	for _, u := range cfg.ExtraOrigins {
+		extraAliases = append(extraAliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
+	}
+
 	if !ephemeral && cfg.CertDir == "" {
-		cfg.CertDir, err = blindertls.DefaultDir(cfg.AliasDomain, cfg.ListenAddr)
+		cfg.CertDir, err = blindertls.DefaultDir(cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1
 		}
 	}
-	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr)
+	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "certificate setup failed: %v\n", err)
 		return 1
@@ -243,6 +253,14 @@ func printBanner(cfg *config.Config) {
 	fmt.Println()
 	fmt.Printf("  Listen:  https://%s\n", cfg.ListenAddr)
 	fmt.Printf("  Alias:   %s\n", cfg.AliasDomain)
+
+	if len(cfg.ExtraOrigins) > 0 {
+		fmt.Printf("  Origins: %d extra\n", len(cfg.ExtraOrigins))
+		for _, u := range cfg.ExtraOrigins {
+			a := scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain)
+			fmt.Printf("           %s -> %s\n", a, u.Host)
+		}
+	}
 
 	if cfg.UseTor() {
 		fmt.Printf("  Tor:     %s\n", cfg.Tor.SOCKSAddr)

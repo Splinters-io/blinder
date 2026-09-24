@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewWriter(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	w := NewWriter("", 10*1024*1024, 0)
 
 	if w == nil {
 		t.Fatal("expected non-nil writer")
@@ -19,7 +19,7 @@ func TestNewWriter(t *testing.T) {
 }
 
 func TestRecord_BasicEntry(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	w := NewWriter("", 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/api/users", nil)
 	req.Header.Set("Accept", "application/json")
@@ -43,7 +43,9 @@ func TestRecord_BasicEntry(t *testing.T) {
 }
 
 func TestFlush_ValidHAR(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("POST", "https://example.com/login", strings.NewReader("user=admin&pass=secret"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -60,10 +62,7 @@ func TestFlush_ValidHAR(t *testing.T) {
 
 	w.Record(req, []byte("user=admin&pass=secret"), resp, []byte("<html>redirect</html>"), 200*time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.har")
-
-	err := w.Flush(path)
+	err := w.Flush()
 	if err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -105,7 +104,9 @@ func TestFlush_ValidHAR(t *testing.T) {
 }
 
 func TestFlush_BinaryBodyBase64(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/image.png", nil)
 	resp := &http.Response{
@@ -118,9 +119,7 @@ func TestFlush_BinaryBodyBase64(t *testing.T) {
 	binaryBody := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00}
 	w.Record(req, nil, resp, binaryBody, 50*time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "binary.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -134,7 +133,9 @@ func TestFlush_BinaryBodyBase64(t *testing.T) {
 
 func TestFlush_TruncatedBody(t *testing.T) {
 	maxBody := int64(32)
-	w := NewWriter(maxBody)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "truncated.har")
+	w := NewWriter(path, maxBody, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/big", nil)
 	resp := &http.Response{
@@ -150,9 +151,7 @@ func TestFlush_TruncatedBody(t *testing.T) {
 	}
 	w.Record(req, nil, resp, bigBody, 100*time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "truncated.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -168,7 +167,9 @@ func TestFlush_TruncatedBody(t *testing.T) {
 }
 
 func TestFlush_AtomicWrite(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "atomic.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/", nil)
 	resp := &http.Response{
@@ -179,17 +180,12 @@ func TestFlush_AtomicWrite(t *testing.T) {
 	}
 	w.Record(req, nil, resp, []byte("<html></html>"), 10*time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "atomic.har")
+	w.Flush()
 
-	w.Flush(path)
-
-	// Verify file exists at final path
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("expected file at final path: %v", err)
 	}
 
-	// Verify no temp files left
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".blinder-har-") {
@@ -199,7 +195,9 @@ func TestFlush_AtomicWrite(t *testing.T) {
 }
 
 func TestFlush_MultipleEntries(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "multi.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	for i := 0; i < 5; i++ {
 		req, _ := http.NewRequest("GET", "https://example.com/page", nil)
@@ -216,9 +214,7 @@ func TestFlush_MultipleEntries(t *testing.T) {
 		t.Errorf("expected 5 entries, got %d", w.Len())
 	}
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "multi.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -230,7 +226,9 @@ func TestFlush_MultipleEntries(t *testing.T) {
 }
 
 func TestRecord_StartedDateTime(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "time.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	before := time.Now().Add(-10 * time.Millisecond)
 	req, _ := http.NewRequest("GET", "https://example.com/", nil)
@@ -243,9 +241,7 @@ func TestRecord_StartedDateTime(t *testing.T) {
 	w.Record(req, nil, resp, nil, 10*time.Millisecond)
 	after := time.Now().Add(-10 * time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "time.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -262,7 +258,9 @@ func TestRecord_StartedDateTime(t *testing.T) {
 }
 
 func TestRecord_QueryString(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "qs.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/search?q=test&page=2", nil)
 	resp := &http.Response{
@@ -273,9 +271,7 @@ func TestRecord_QueryString(t *testing.T) {
 	}
 	w.Record(req, nil, resp, nil, 10*time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "qs.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -299,7 +295,9 @@ func TestRecord_QueryString(t *testing.T) {
 }
 
 func TestRecord_Headers(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "headers.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/", nil)
 	req.Header.Set("Accept", "text/html")
@@ -316,9 +314,7 @@ func TestRecord_Headers(t *testing.T) {
 	}
 	w.Record(req, nil, resp, []byte("ok"), 10*time.Millisecond)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "headers.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -344,7 +340,9 @@ func TestRecord_Headers(t *testing.T) {
 }
 
 func TestRecordError_CapturesFailedRequest(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "error.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/broken", nil)
 	w.RecordError(req, nil, 502, "connection refused", 100*time.Millisecond)
@@ -353,9 +351,7 @@ func TestRecordError_CapturesFailedRequest(t *testing.T) {
 		t.Fatalf("expected 1 entry, got %d", w.Len())
 	}
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "error.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -374,7 +370,9 @@ func TestRecordError_CapturesFailedRequest(t *testing.T) {
 }
 
 func TestRecordUpgrade_CapturesWSHandshake(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ws.har")
+	w := NewWriter(path, 10*1024*1024, 0)
 
 	req, _ := http.NewRequest("GET", "https://example.com/ws", nil)
 	req.Header.Set("Upgrade", "websocket")
@@ -385,9 +383,7 @@ func TestRecordUpgrade_CapturesWSHandshake(t *testing.T) {
 		t.Fatalf("expected 1 entry, got %d", w.Len())
 	}
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ws.har")
-	w.Flush(path)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
@@ -412,22 +408,407 @@ func TestRecordUpgrade_CapturesWSHandshake(t *testing.T) {
 	}
 }
 
-func TestFlush_EmptyWriter(t *testing.T) {
-	w := NewWriter(10 * 1024 * 1024)
+func TestFlush_PreservesEntriesOnWriteFailure(t *testing.T) {
+	w := NewWriter("/nonexistent/dir/test.har", 10*1024*1024, 0)
+
+	req, _ := http.NewRequest("GET", "https://example.com/", nil)
+	resp := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/1.1",
+		Header:     http.Header{"Content-Type": {"text/plain"}},
+	}
+	w.Record(req, nil, resp, []byte("hello"), 10*time.Millisecond)
+
+	err := w.Flush()
+	if err == nil {
+		t.Fatal("expected error flushing to nonexistent directory")
+	}
+
+	if w.Len() != 1 {
+		t.Fatalf("entries should be preserved after failed flush, got %d", w.Len())
+	}
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.har")
+	w.path = filepath.Join(dir, "test.har")
+	err = w.Flush()
+	if err != nil {
+		t.Fatalf("retry flush should succeed: %v", err)
+	}
 
-	err := w.Flush(path)
+	if w.Len() != 0 {
+		t.Fatalf("entries should be cleared after successful flush, got %d", w.Len())
+	}
+
+	data, _ := os.ReadFile(w.path)
+	var harFile HARFile
+	json.Unmarshal(data, &harFile)
+	if len(harFile.Log.Entries) != 1 {
+		t.Fatalf("expected 1 entry in HAR file, got %d", len(harFile.Log.Entries))
+	}
+}
+
+func TestFlush_PreservesCorruptPriorHAR(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.har")
+
+	os.WriteFile(path, []byte("not valid json{{{"), 0644)
+
+	w := NewWriter(path, 10*1024*1024, 0)
+	req, _ := http.NewRequest("GET", "https://example.com/", nil)
+	resp := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/1.1",
+		Header:     http.Header{"Content-Type": {"text/plain"}},
+	}
+	w.Record(req, nil, resp, []byte("hello"), 10*time.Millisecond)
+
+	err := w.Flush()
+	if err != nil {
+		t.Fatalf("flush should succeed: %v", err)
+	}
+
+	entries, _ := os.ReadDir(dir)
+	foundBackup := false
+	for _, f := range entries {
+		if strings.HasPrefix(f.Name(), "test.har.corrupt.") {
+			foundBackup = true
+		}
+	}
+	if !foundBackup {
+		t.Error("corrupt prior HAR should be preserved as backup")
+	}
+}
+
+func TestFlush_EmptyWriter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.har")
+	w := NewWriter(path, 10*1024*1024, 0)
+
+	err := w.Flush()
 	if err != nil {
 		t.Fatalf("flush empty writer: %v", err)
 	}
+}
+
+func TestFlush_MergesWithExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "merge.har")
+	w := NewWriter(path, 10*1024*1024, 0)
+
+	req, _ := http.NewRequest("GET", "https://example.com/first", nil)
+	resp := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/1.1",
+		Header:     http.Header{"Content-Type": {"text/html"}},
+	}
+	w.Record(req, nil, resp, []byte("first"), 10*time.Millisecond)
+	w.Flush()
+
+	req2, _ := http.NewRequest("GET", "https://example.com/second", nil)
+	w.Record(req2, nil, resp, []byte("second"), 10*time.Millisecond)
+	w.Flush()
 
 	data, _ := os.ReadFile(path)
 	var harFile HARFile
 	json.Unmarshal(data, &harFile)
 
-	if len(harFile.Log.Entries) != 0 {
-		t.Errorf("expected 0 entries, got %d", len(harFile.Log.Entries))
+	if len(harFile.Log.Entries) != 2 {
+		t.Fatalf("expected 2 merged entries, got %d", len(harFile.Log.Entries))
+	}
+	if harFile.Log.Entries[0].Request.URL != "https://example.com/first" {
+		t.Errorf("first entry URL wrong: %s", harFile.Log.Entries[0].Request.URL)
+	}
+	if harFile.Log.Entries[1].Request.URL != "https://example.com/second" {
+		t.Errorf("second entry URL wrong: %s", harFile.Log.Entries[1].Request.URL)
+	}
+}
+
+func TestFlush_ClearsMemory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clear.har")
+	w := NewWriter(path, 10*1024*1024, 0)
+
+	req, _ := http.NewRequest("GET", "https://example.com/", nil)
+	resp := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/1.1",
+		Header:     http.Header{},
+	}
+	w.Record(req, nil, resp, nil, 10*time.Millisecond)
+
+	if w.Len() != 1 {
+		t.Fatalf("expected 1 entry before flush, got %d", w.Len())
+	}
+
+	w.Flush()
+
+	if w.Len() != 0 {
+		t.Errorf("expected 0 entries after flush, got %d", w.Len())
+	}
+}
+
+func TestMemoryCap_AutoFlushOnOverflow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cap.har")
+	w := NewWriter(path, 10*1024*1024, 5)
+
+	resp := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/1.1",
+		Header:     http.Header{"Content-Type": {"text/plain"}},
+	}
+
+	for i := 0; i < 8; i++ {
+		req, _ := http.NewRequest("GET", "https://example.com/page", nil)
+		w.Record(req, nil, resp, []byte("ok"), 10*time.Millisecond)
+	}
+
+	if w.Len() > 5 {
+		t.Errorf("memory should be bounded by cap, got %d entries", w.Len())
+	}
+
+	jpath := path + ".journal"
+	if _, err := os.Stat(jpath); err != nil {
+		t.Fatalf("auto-flush should have written journal file: %v", err)
+	}
+
+	w.Flush()
+
+	data, _ := os.ReadFile(path)
+	var harFile HARFile
+	json.Unmarshal(data, &harFile)
+	if len(harFile.Log.Entries) != 8 {
+		t.Errorf("all 8 entries should be on disk after final flush, got %d", len(harFile.Log.Entries))
+	}
+
+	if _, err := os.Stat(jpath); err == nil {
+		t.Error("journal file should be removed after materialization")
+	}
+}
+
+func TestJournal_PartialRecordRecovery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "recover.har")
+	jpath := path + ".journal"
+
+	entry1, _ := json.Marshal(Entry{
+		StartedDateTime: "2026-01-01T00:00:00Z",
+		Request:         Request{Method: "GET", URL: "https://example.com/first"},
+		Response:        Response{Status: 200, StatusText: "OK"},
+	})
+	partial := []byte(`{"startedDateTime":"2026-01-01T00:00:01Z","request":{"met`)
+	entry3, _ := json.Marshal(Entry{
+		StartedDateTime: "2026-01-01T00:00:02Z",
+		Request:         Request{Method: "GET", URL: "https://example.com/third"},
+		Response:        Response{Status: 200, StatusText: "OK"},
+	})
+
+	journal := append(entry1, '\n')
+	journal = append(journal, partial...)
+	journal = append(journal, '\n')
+	journal = append(journal, entry3...)
+	journal = append(journal, '\n')
+
+	os.WriteFile(jpath, journal, 0600)
+
+	w := NewWriter(path, 10*1024*1024, 0)
+	err := w.Flush()
+	if err == nil {
+		t.Fatal("Flush should report error when journal has unreadable records")
+	}
+	if !strings.Contains(err.Error(), "1 record(s) unreadable") {
+		t.Errorf("error should report count of lost records, got: %v", err)
+	}
+
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("HAR file should still be written: %v", readErr)
+	}
+	var harFile HARFile
+	json.Unmarshal(data, &harFile)
+	if len(harFile.Log.Entries) != 2 {
+		t.Fatalf("should recover 2 valid entries, got %d", len(harFile.Log.Entries))
+	}
+	if harFile.Log.Entries[0].Request.URL != "https://example.com/first" {
+		t.Errorf("first entry lost: %s", harFile.Log.Entries[0].Request.URL)
+	}
+	if harFile.Log.Entries[1].Request.URL != "https://example.com/third" {
+		t.Errorf("third entry lost: %s", harFile.Log.Entries[1].Request.URL)
+	}
+
+	// Corrupt journal should be preserved as backup
+	entries, _ := os.ReadDir(dir)
+	foundBackup := false
+	for _, f := range entries {
+		if strings.Contains(f.Name(), ".journal.corrupt.") {
+			foundBackup = true
+		}
+	}
+	if !foundBackup {
+		t.Error("corrupt journal should be preserved as backup")
+	}
+}
+
+func TestJournal_CompleteRecoveryDeletesJournal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clean.har")
+	jpath := path + ".journal"
+
+	entry, _ := json.Marshal(Entry{
+		StartedDateTime: "2026-01-01T00:00:00Z",
+		Request:         Request{Method: "GET", URL: "https://example.com/ok"},
+		Response:        Response{Status: 200, StatusText: "OK"},
+	})
+	os.WriteFile(jpath, append(entry, '\n'), 0600)
+
+	w := NewWriter(path, 10*1024*1024, 0)
+	err := w.Flush()
+	if err != nil {
+		t.Fatalf("Flush with valid journal should succeed: %v", err)
+	}
+
+	if _, err := os.Stat(jpath); err == nil {
+		t.Error("journal should be deleted after successful complete recovery")
+	}
+}
+
+func TestJournal_Permissions0600(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "perm.har")
+	w := NewWriter(path, 10*1024*1024, 5)
+
+	resp := &http.Response{
+		StatusCode: 200, Status: "200 OK", Proto: "HTTP/1.1",
+		Header: http.Header{"Content-Type": {"text/plain"}},
+	}
+	for i := 0; i < 7; i++ {
+		req, _ := http.NewRequest("GET", "https://example.com/p", nil)
+		w.Record(req, nil, resp, []byte("x"), 10*time.Millisecond)
+	}
+
+	jpath := path + ".journal"
+	info, err := os.Stat(jpath)
+	if err != nil {
+		t.Fatalf("journal should exist after auto-flush: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("journal permissions should be 0600, got %04o", perm)
+	}
+}
+
+func TestJournal_TightensExistingPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.har")
+	jpath := path + ".journal"
+
+	os.WriteFile(jpath, []byte{}, 0644)
+	info, _ := os.Stat(jpath)
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("precondition: journal should start as 0644")
+	}
+
+	w := NewWriter(path, 10*1024*1024, 5)
+	resp := &http.Response{
+		StatusCode: 200, Status: "200 OK", Proto: "HTTP/1.1",
+		Header: http.Header{"Content-Type": {"text/plain"}},
+	}
+	for i := 0; i < 7; i++ {
+		req, _ := http.NewRequest("GET", "https://example.com/p", nil)
+		w.Record(req, nil, resp, []byte("x"), 10*time.Millisecond)
+	}
+
+	info, _ = os.Stat(jpath)
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("existing journal should be tightened to 0600, got %04o", perm)
+	}
+}
+
+func TestFlush_StreamingProducesValidHAR(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.har")
+	w := NewWriter(path, 10*1024*1024, 5)
+
+	resp := &http.Response{
+		StatusCode: 200, Status: "200 OK", Proto: "HTTP/1.1",
+		Header: http.Header{"Content-Type": {"text/plain"}},
+	}
+	for i := 0; i < 20; i++ {
+		req, _ := http.NewRequest("GET", "https://example.com/page", nil)
+		w.Record(req, nil, resp, []byte("ok"), 10*time.Millisecond)
+	}
+
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	var harFile HARFile
+	if err := json.Unmarshal(data, &harFile); err != nil {
+		t.Fatalf("streamed HAR is not valid JSON: %v", err)
+	}
+	if len(harFile.Log.Entries) != 20 {
+		t.Errorf("expected 20 entries, got %d", len(harFile.Log.Entries))
+	}
+}
+
+func TestFlush_CaptureBudgetTruncates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "budget.har")
+	w := NewWriter(path, 10*1024*1024, 0)
+	w.SetCaptureBudget(3)
+
+	resp := &http.Response{
+		StatusCode: 200, Status: "200 OK", Proto: "HTTP/1.1",
+		Header: http.Header{"Content-Type": {"text/plain"}},
+	}
+	for i := 0; i < 10; i++ {
+		req, _ := http.NewRequest("GET", "https://example.com/page", nil)
+		w.Record(req, nil, resp, []byte("ok"), 10*time.Millisecond)
+	}
+
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	var harFile HARFile
+	if err := json.Unmarshal(data, &harFile); err != nil {
+		t.Fatalf("budgeted HAR is not valid JSON: %v", err)
+	}
+	if len(harFile.Log.Entries) != 3 {
+		t.Errorf("capture budget should limit to 3 entries, got %d", len(harFile.Log.Entries))
+	}
+}
+
+func TestFlushTo_SnapshotWithoutClear(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapshot.har")
+	w := NewWriter("", 10*1024*1024, 0)
+
+	req, _ := http.NewRequest("GET", "https://example.com/", nil)
+	resp := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/1.1",
+		Header:     http.Header{},
+	}
+	w.Record(req, nil, resp, nil, 10*time.Millisecond)
+
+	w.FlushTo(path)
+
+	if w.Len() != 1 {
+		t.Errorf("FlushTo should not clear memory, got %d entries", w.Len())
+	}
+
+	data, _ := os.ReadFile(path)
+	var harFile HARFile
+	json.Unmarshal(data, &harFile)
+	if len(harFile.Log.Entries) != 1 {
+		t.Errorf("expected 1 entry in snapshot, got %d", len(harFile.Log.Entries))
 	}
 }

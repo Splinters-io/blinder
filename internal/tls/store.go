@@ -42,10 +42,11 @@ func EndpointHost(listen string) (string, error) {
 	return host, nil
 }
 
-func certificateNames(alias, host string) []string {
+func certificateNames(alias, host string, extra ...string) []string {
 	var names []string
 	seen := make(map[string]bool)
-	for _, name := range []string{"localhost", "127.0.0.1", "::1", alias, host} {
+	base := append([]string{"localhost", "127.0.0.1", "::1", alias, host}, extra...)
+	for _, name := range base {
 		if name != "" && !seen[name] {
 			names = append(names, name)
 			seen[name] = true
@@ -54,7 +55,7 @@ func certificateNames(alias, host string) []string {
 	return names
 }
 
-func DefaultDir(alias, listen string) (string, error) {
+func DefaultDir(alias, listen string, extraNames ...string) (string, error) {
 	host, err := EndpointHost(listen)
 	if err != nil {
 		return "", err
@@ -63,24 +64,28 @@ func DefaultDir(alias, listen string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("locate certificate directory: use --cert-dir: %w", err)
 	}
-	key := sha256.Sum256([]byte(alias + "\x00" + host))
+	input := alias + "\x00" + host
+	for _, name := range extraNames {
+		input += "\x00" + name
+	}
+	key := sha256.Sum256([]byte(input))
 	return filepath.Join(base, "blinder", "certs", hex.EncodeToString(key[:12])), nil
 }
 
 // Prepare creates a private store, reuses a valid identity, and renews it near
 // expiry. A corrupt identity fails explicitly; it is never silently discarded.
 // The combined PEM is the canonical atomic record; the public PEM is repairable.
-func Prepare(dir, alias, listen string) (*Material, error) {
-	return prepare(dir, alias, listen, time.Now())
+func Prepare(dir, alias, listen string, extraNames ...string) (*Material, error) {
+	return prepare(dir, alias, listen, time.Now(), extraNames...)
 }
 
-func prepare(dir, alias, listen string, now time.Time) (*Material, error) {
+func prepare(dir, alias, listen string, now time.Time, extraNames ...string) (*Material, error) {
 	host, err := EndpointHost(listen)
 	if err != nil {
 		return nil, err
 	}
 	if dir == "" {
-		cert, _, err := generate(alias, host, now, 24*time.Hour)
+		cert, _, err := generate(alias, host, now, 24*time.Hour, extraNames...)
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +148,7 @@ func prepare(dir, alias, listen string, now time.Time) (*Material, error) {
 		if !now.Add(renewBefore).Before(leaf.NotAfter) {
 			action = "renewed"
 		}
-		for _, name := range certificateNames(alias, host) {
+		for _, name := range certificateNames(alias, host, extraNames...) {
 			if leaf.VerifyHostname(name) != nil {
 				action = "reissued for endpoint names"
 			}
@@ -157,7 +162,7 @@ func prepare(dir, alias, listen string, now time.Time) (*Material, error) {
 				return nil, err
 			}
 		}
-		cert, data, err = generate(alias, host, now, persistentLifetime)
+		cert, data, err = generate(alias, host, now, persistentLifetime, extraNames...)
 		if err != nil {
 			return nil, err
 		}

@@ -13,12 +13,12 @@ import (
 	"time"
 )
 
-func GenerateSelfSigned(aliasDomain string) (tls.Certificate, error) {
-	cert, _, err := generate(aliasDomain, "127.0.0.1", time.Now(), 24*time.Hour)
+func GenerateSelfSigned(aliasDomain string, extraNames ...string) (tls.Certificate, error) {
+	cert, _, err := generate(aliasDomain, "127.0.0.1", time.Now(), 24*time.Hour, extraNames...)
 	return cert, err
 }
 
-func generate(aliasDomain, host string, now time.Time, lifetime time.Duration) (tls.Certificate, []byte, error) {
+func generate(aliasDomain, host string, now time.Time, lifetime time.Duration, extraNames ...string) (tls.Certificate, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, nil, err
@@ -41,7 +41,7 @@ func generate(aliasDomain, host string, now time.Time, lifetime time.Duration) (
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
-	for _, name := range certificateNames(aliasDomain, host) {
+	for _, name := range certificateNames(aliasDomain, host, extraNames...) {
 		if ip := net.ParseIP(name); ip != nil {
 			template.IPAddresses = append(template.IPAddresses, ip)
 		} else {

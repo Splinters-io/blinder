@@ -94,7 +94,18 @@ var cspSchemes = map[string]bool{
 
 var cspNonceHashRe = regexp.MustCompile(`^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/=]+'$`)
 
-func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain string, targetHost string) http.Header {
+type ResponseHeaderOpts struct {
+	OriginMapper   *OriginMapper
+	RequestOrigin  string
+}
+
+func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain string, targetHost string, opts ...ResponseHeaderOpts) http.Header {
+	var originMapper *OriginMapper
+	var requestOrigin string
+	if len(opts) > 0 {
+		originMapper = opts[0].OriginMapper
+		requestOrigin = opts[0].RequestOrigin
+	}
 	out := make(http.Header)
 
 	for name, values := range resp {
@@ -105,6 +116,14 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 				scrubbed := make([]string, len(values))
 				for i, v := range values {
 					scrubbed[i] = rewriteCSP(v, gate, aliasDomain)
+				}
+				out[name] = scrubbed
+				continue
+			}
+			if lower == "access-control-allow-origin" && originMapper != nil {
+				scrubbed := make([]string, len(values))
+				for i, v := range values {
+					scrubbed[i] = originMapper.RewriteResponseOrigin(v, requestOrigin)
 				}
 				out[name] = scrubbed
 				continue
@@ -124,7 +143,12 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 		if scrubHeaders[lower] {
 			scrubbed := make([]string, len(values))
 			for i, v := range values {
-				scrubbed[i] = gate.Scrub(v, "header:"+lower)
+				if (lower == "location" || lower == "content-location") && originMapper != nil {
+					rewritten := originMapper.RewriteUpstreamURL(v)
+					scrubbed[i] = gate.Scrub(rewritten, "header:"+lower)
+				} else {
+					scrubbed[i] = gate.Scrub(v, "header:"+lower)
+				}
 			}
 			out[name] = scrubbed
 			continue
@@ -220,8 +244,8 @@ func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targe
 				cookieValue := trimmed[eqIdx+1:]
 				hashedName := gate.AliasCookieNameAndRecord(cookieName)
 				scrubbed := gate.Scrub(cookieValue, "cookie:value")
-				gate.RecordCookieValue(hashedName, cookieValue, scrubbed)
-				rewritten = append(rewritten, hashedName+"="+scrubbed)
+				actual := gate.RecordCookieValue(hashedName, cookieValue, scrubbed)
+				rewritten = append(rewritten, hashedName+"="+actual)
 				continue
 			}
 		}

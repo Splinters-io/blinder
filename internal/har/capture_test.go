@@ -21,7 +21,7 @@ func TestCaptureLimitsApplyToRequestsAndEveryResponseType(t *testing.T) {
 		{"invalid text", "text/plain", []byte{0xff, 1, 2, 3, 4, 5}, []byte{0xff, 1, 2, 3, 4}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewWriter(5)
+			w := NewWriter("", 5, 0)
 			req, _ := http.NewRequest("POST", "https://example.test/", nil)
 			req.Header.Set("Content-Type", tc.mime)
 			resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {tc.mime}}}

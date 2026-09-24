@@ -1,10 +1,13 @@
 package rewriter
 
 import (
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Splinters-io/blinder/internal/metadata"
 	"github.com/Splinters-io/blinder/internal/scrub"
+	"github.com/Splinters-io/blinder/internal/sri"
 )
 
 type BodyResult struct {
@@ -13,12 +16,33 @@ type BodyResult struct {
 	ContentType string // Nonempty when a replacement changes the media type.
 }
 
-func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate, paranoid bool) BodyResult {
+type RewriteOpts struct {
+	Origins      *OriginMapper
+	SRIPipeline  *sri.Pipeline
+	UpstreamBase *url.URL
+	BaseRequest  *http.Request
+}
+
+func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate, paranoid bool, opts ...RewriteOpts) BodyResult {
 	ct := normalizeContentType(contentType)
+
+	var opt RewriteOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 
 	switch {
 	case strings.HasPrefix(ct, "text/html"):
-		return BodyResult{Body: rewriteHTML(body, gate, paranoid)}
+		meta := extractHTMLMetadata(body)
+		var sr *sriRewriter
+		if opt.SRIPipeline != nil {
+			sr = &sriRewriter{
+				pipeline:     opt.SRIPipeline,
+				upstreamBase: opt.UpstreamBase,
+				baseReq:      opt.BaseRequest,
+			}
+		}
+		return BodyResult{Body: rewriteHTML(body, gate, paranoid, opt.Origins, sr), Metadata: meta}
 	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
 		return BodyResult{Body: scrubJSON(body, gate, "body:json:"+path)}
 	case strings.HasPrefix(ct, "text/javascript") || ct == "application/javascript":

@@ -393,6 +393,48 @@ func TestProxy_AliasTracking(t *testing.T) {
 	}
 }
 
+func TestProxy_MultiOriginRouting(t *testing.T) {
+	primaryTarget := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "primary:"+r.Host)
+	})
+	defer primaryTarget.Close()
+
+	apiTarget := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "api:"+r.Host)
+	})
+	defer apiTarget.Close()
+
+	cfg, err := config.New(
+		primaryTarget.URL,
+		"127.0.0.1:0",
+		"target-001.local",
+		nil,
+		false, false, false,
+		"", "", 0, "", "", 30, 30,
+		apiTarget.URL,
+	)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	srv, addr := startTestProxy(t, cfg)
+	_ = srv
+
+	client := testClient()
+
+	resp, err := client.Get("https://" + addr + "/page")
+	if err != nil {
+		t.Fatalf("primary request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.HasPrefix(string(body), "primary:") {
+		t.Errorf("expected primary response, got: %s", body)
+	}
+}
+
 func TestExtractSubdomains(t *testing.T) {
 	tests := []struct {
 		host   string

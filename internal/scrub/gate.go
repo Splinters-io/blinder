@@ -1,6 +1,8 @@
 package scrub
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"regexp"
 	"strings"
@@ -40,7 +42,7 @@ type Gate struct {
 	leaks          map[string]*LeakEntry
 	aliases        map[string]string              // alias → real domain
 	cookieAliases  map[string]string              // alias → original cookie name
-	cookieValues   map[string]cookieValueMapping   // aliased cookie name → value mapping
+	cookieValues   map[string][]cookieValueMapping  // aliased cookie name → value mappings
 }
 
 // ForRequest keeps replacement counts isolated from concurrent requests while
@@ -77,7 +79,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		leaks:          make(map[string]*LeakEntry),
 		aliases:        make(map[string]string),
 		cookieAliases:  make(map[string]string),
-		cookieValues:   make(map[string]cookieValueMapping),
+		cookieValues:   make(map[string][]cookieValueMapping),
 	}
 	for _, domain := range domains {
 		g.domainPatterns = append(g.domainPatterns, literalPattern(domain))
@@ -259,14 +261,39 @@ func (g *Gate) Aliases() map[string]string {
 	return result
 }
 
-func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) {
+func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) string {
 	if g.parent != nil {
-		g.parent.RecordCookieValue(aliasedName, original, scrubbed)
-		return
+		return g.parent.RecordCookieValue(aliasedName, original, scrubbed)
 	}
 	g.mu.Lock()
-	g.cookieValues[aliasedName] = cookieValueMapping{original: original, scrubbed: scrubbed}
-	g.mu.Unlock()
+	defer g.mu.Unlock()
+
+	for _, m := range g.cookieValues[aliasedName] {
+		if m.original == original {
+			return m.scrubbed
+		}
+	}
+
+	unique := scrubbed
+	h := sha256.Sum256([]byte(original))
+	for hashLen := 3; hashLen <= 32; hashLen++ {
+		collision := false
+		for _, m := range g.cookieValues[aliasedName] {
+			if m.scrubbed == unique {
+				collision = true
+				break
+			}
+		}
+		if !collision {
+			break
+		}
+		unique = scrubbed + ":" + hex.EncodeToString(h[:hashLen])
+	}
+
+	updated := make([]cookieValueMapping, len(g.cookieValues[aliasedName]), len(g.cookieValues[aliasedName])+1)
+	copy(updated, g.cookieValues[aliasedName])
+	g.cookieValues[aliasedName] = append(updated, cookieValueMapping{original: original, scrubbed: unique})
+	return unique
 }
 
 func (g *Gate) ResidualLeakCount(scrubbed string) int {
@@ -290,8 +317,31 @@ func (g *Gate) RestoreCookieValue(aliasedName, currentValue string) string {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if mapping, ok := g.cookieValues[aliasedName]; ok && currentValue == mapping.scrubbed {
-		return mapping.original
+	for _, m := range g.cookieValues[aliasedName] {
+		if currentValue == m.scrubbed {
+			return m.original
+		}
 	}
 	return currentValue
+}
+
+func (g *Gate) RestoreCookieHeader(header string) string {
+	var parts []string
+	for _, pair := range strings.Split(header, ";") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		eqIdx := strings.IndexByte(pair, '=')
+		if eqIdx < 0 {
+			parts = append(parts, pair)
+			continue
+		}
+		aliasedName := pair[:eqIdx]
+		value := pair[eqIdx+1:]
+		originalName := g.OriginalCookieName(aliasedName)
+		originalValue := g.RestoreCookieValue(aliasedName, value)
+		parts = append(parts, originalName+"="+originalValue)
+	}
+	return strings.Join(parts, "; ")
 }

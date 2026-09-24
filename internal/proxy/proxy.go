@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/Splinters-io/blinder/internal/manifest"
 	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
+	"github.com/Splinters-io/blinder/internal/sri"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
 	"github.com/Splinters-io/blinder/internal/ws"
 )
@@ -34,16 +36,18 @@ type Stats struct {
 }
 
 type Server struct {
-	cfg       *config.Config
-	gate      *scrub.Gate
-	origins   *rewriter.OriginMapper
-	transport http.RoundTripper
-	server    *http.Server
-	wsProxy   *ws.Proxy
-	harWriter *har.Writer
-	manifest  *manifest.Session
-	stats     Stats
-	done      chan struct{}
+	cfg         *config.Config
+	gate        *scrub.Gate
+	origins     *rewriter.OriginMapper
+	transport   http.RoundTripper
+	server      *http.Server
+	wsProxy     *ws.Proxy
+	harWriter   *har.Writer
+	manifest    *manifest.Session
+	sriCache    *sri.Cache
+	sriPipeline *sri.Pipeline
+	stats       Stats
+	done        chan struct{}
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -58,9 +62,25 @@ func New(cfg *config.Config) (*Server, error) {
 func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, error) {
 	targetHost := cfg.TargetURL.Hostname()
 	targetDomains := append([]string{targetHost}, extractSubdomains(targetHost)...)
+	for _, extra := range cfg.ExtraOrigins {
+		extraHost := extra.Hostname()
+		targetDomains = append(targetDomains, extraHost)
+		targetDomains = append(targetDomains, extractSubdomains(extraHost)...)
+	}
 
 	gate := scrub.NewGate(targetDomains, cfg.IdentityTokens, cfg.AliasDomain)
-	origins := rewriter.NewOriginMapper(cfg.TargetURL, cfg.ListenAddr, cfg.AliasDomain)
+
+	var extraRoutes []rewriter.OriginRoute
+	seenAliases := map[string]string{cfg.AliasDomain: cfg.TargetURL.Host}
+	for _, extra := range cfg.ExtraOrigins {
+		alias := scrub.AliasOrigin(extra.Scheme, extra.Hostname(), extra.Port(), cfg.AliasDomain)
+		if prev, ok := seenAliases[alias]; ok {
+			return nil, fmt.Errorf("alias collision: %s and %s both map to %s", prev, extra.Host, alias)
+		}
+		seenAliases[alias] = extra.Host
+		extraRoutes = append(extraRoutes, rewriter.OriginRoute{Upstream: extra, Alias: alias})
+	}
+	origins := rewriter.NewOriginMapper(cfg.TargetURL, cfg.ListenAddr, cfg.AliasDomain, extraRoutes...)
 
 	upstreamTimeout := time.Duration(cfg.UpstreamTimeout) * time.Second
 
@@ -94,20 +114,64 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 
 	var harWriter *har.Writer
 	if cfg.HAR != nil {
-		harWriter = har.NewWriter(cfg.HAR.MaxBodySize)
+		harWriter = har.NewWriter(cfg.HAR.FilePath, cfg.HAR.MaxBodySize, 0)
 	}
 
 	session := manifest.NewSession(cfg.AliasDomain, cfg.TargetURL.String())
 
+	sriCache := sri.NewCache(256)
+
+	scrubFn := func(body []byte, contentType, path string) []byte {
+		result := rewriter.RewriteBody(body, contentType, path, gate, cfg.Paranoid)
+		return result.Body
+	}
+
+	sriCfg := sri.PipelineConfig{
+		Transport: transport,
+		ScrubFn:   scrubFn,
+		Cache:     sriCache,
+		IsAllowedOrigin: func(u *url.URL) bool {
+			return origins.IsKnownFullOrigin(u)
+		},
+		CookieRestoreFn: func(cookieHeader string) string {
+			return gate.RestoreCookieHeader(cookieHeader)
+		},
+	}
+
+	if harWriter != nil {
+		sriCfg.OnFetch = func(rec sri.FetchRecord) {
+			if rec.Request == nil {
+				return
+			}
+			if rec.Error != "" {
+				harWriter.RecordFetchFailure(rec.Request, rec.Status, rec.Headers, rec.Body, rec.Error, rec.Elapsed)
+				return
+			}
+			resp := &http.Response{
+				StatusCode: rec.Status,
+				Status:     fmt.Sprintf("%d %s", rec.Status, http.StatusText(rec.Status)),
+				Header:     rec.Headers,
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+			}
+			harWriter.Record(rec.Request, nil, resp, rec.Body, rec.Elapsed)
+		}
+	}
+
+	sriPipeline := sri.NewPipeline(sriCfg)
+
 	s := &Server{
-		cfg:       cfg,
-		gate:      gate,
-		origins:   origins,
-		transport: transport,
-		wsProxy:   wsProxy,
-		harWriter: harWriter,
-		manifest:  session,
-		done:      make(chan struct{}),
+		cfg:         cfg,
+		gate:        gate,
+		origins:     origins,
+		transport:   transport,
+		wsProxy:     wsProxy,
+		harWriter:   harWriter,
+		manifest:    session,
+		sriCache:    sriCache,
+		sriPipeline: sriPipeline,
+		done:        make(chan struct{}),
 	}
 
 	if harWriter != nil && cfg.HAR != nil {
@@ -169,10 +233,10 @@ func (s *Server) GetStats() (requests, bytes, errors, scrubbed int64) {
 }
 
 func (s *Server) FlushHAR() error {
-	if s.harWriter == nil || s.cfg.HAR == nil {
+	if s.harWriter == nil {
 		return nil
 	}
-	return s.harWriter.Flush(s.cfg.HAR.FilePath)
+	return s.harWriter.Flush()
 }
 
 func (s *Server) FlushManifest() error {
@@ -192,11 +256,23 @@ func (s *Server) FlushManifest() error {
 	}
 	s.manifest.ReplaceLeaks(findings)
 
+	for _, f := range s.sriPipeline.Findings() {
+		s.manifest.RecordSRIFinding(f.URL, f.UpstreamValid, f.UpstreamError, f.OriginalIntegrity, f.ReplacementHash, f.Transformed)
+	}
+
 	return s.manifest.Flush(s.cfg.OutputDir)
 }
 
 func (s *Server) Manifest() *manifest.Session {
 	return s.manifest
+}
+
+func (s *Server) ClearSRICache() {
+	s.sriCache.Clear()
+}
+
+func (s *Server) SRIFindings() []sri.Finding {
+	return s.sriPipeline.Findings()
 }
 
 func (s *Server) periodicHARFlush() {
@@ -205,8 +281,10 @@ func (s *Server) periodicHARFlush() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.FlushHAR(); err != nil {
-				log.Printf("[error] periodic HAR flush: %v", err)
+			if s.harWriter != nil {
+				if err := s.harWriter.FlushJournal(); err != nil {
+					log.Printf("[error] periodic HAR flush: %v", err)
+				}
 			}
 		case <-s.done:
 			return
@@ -268,9 +346,56 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(reqBodyBuf))
 	}
 
-	upstreamReq := rewriter.RewriteRequestHeaders(r, s.cfg.TargetURL.Host, gate, s.origins)
-	upstreamReq.URL.Scheme = s.cfg.TargetURL.Scheme
-	upstreamReq.URL.Host = s.cfg.TargetURL.Host
+	upstream := s.origins.Resolve(r.Host)
+	if upstream == nil {
+		upstream = s.cfg.TargetURL
+	}
+
+	upstreamURL := upstream.Scheme + "://" + upstream.Host + r.URL.RequestURI()
+	if r.Method == http.MethodGet {
+		cacheKey := sri.CacheKey(upstreamURL, r)
+		if entry, ok := s.sriCache.Get(cacheKey); ok {
+			if entry.FetchError != "" {
+				status = http.StatusBadGateway
+				http.Error(w, "upstream integrity verification failed", http.StatusBadGateway)
+				s.stats.Errors.Add(1)
+				return
+			}
+			if entry.ResponseHeaders != nil {
+				outHeaders := rewriter.RewriteResponseHeaders(
+					entry.ResponseHeaders,
+					gate,
+					s.cfg.AliasDomain,
+					s.cfg.TargetURL.Host,
+					rewriter.ResponseHeaderOpts{
+						OriginMapper:  s.origins,
+						RequestOrigin: r.Header.Get("Origin"),
+					},
+				)
+				for name, values := range outHeaders {
+					for _, v := range values {
+						w.Header().Add(name, v)
+					}
+				}
+			}
+			ct := entry.ContentType
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", ct)
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.ScrubbedBody)))
+			w.Header().Del("Content-Encoding")
+			w.Header().Del("Transfer-Encoding")
+			w.WriteHeader(http.StatusOK)
+			w.Write(entry.ScrubbedBody)
+			s.stats.Scrubbed.Add(1)
+			return
+		}
+	}
+
+	upstreamReq := rewriter.RewriteRequestHeaders(r, upstream.Host, gate, s.origins)
+	upstreamReq.URL.Scheme = upstream.Scheme
+	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
 
 	requestStart := time.Now()
@@ -316,7 +441,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	contentType := resp.Header.Get("Content-Type")
 	path := r.URL.Path
 
-	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid)
+	docURL := &url.URL{
+		Scheme: upstream.Scheme,
+		Host:   upstream.Host,
+		Path:   r.URL.Path,
+	}
+	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
+		Origins:      s.origins,
+		SRIPipeline:  s.sriPipeline,
+		UpstreamBase: docURL,
+		BaseRequest:  r,
+	})
 	s.stats.Scrubbed.Add(1)
 	leakCount = gate.ResidualLeakCount(string(result.Body))
 
@@ -325,6 +460,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		gate,
 		s.cfg.AliasDomain,
 		s.cfg.TargetURL.Host,
+		rewriter.ResponseHeaderOpts{
+			OriginMapper:  s.origins,
+			RequestOrigin: r.Header.Get("Origin"),
+		},
 	)
 
 	for name, values := range outHeaders {

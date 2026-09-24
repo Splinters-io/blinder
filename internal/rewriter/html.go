@@ -2,18 +2,44 @@ package rewriter
 
 import (
 	"bytes"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"golang.org/x/net/html"
 
+	"github.com/Splinters-io/blinder/internal/metadata"
 	"github.com/Splinters-io/blinder/internal/scrub"
+	"github.com/Splinters-io/blinder/internal/sri"
 )
+
+var sriDropAttrs = map[string]bool{
+	"integrity":   true,
+	"crossorigin": true,
+}
 
 const loremText = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
 
 var loremWords = strings.Fields(loremText)
 
-func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool) []byte {
+type sriRewriter struct {
+	pipeline      *sri.Pipeline
+	upstreamBase  *url.URL
+	effectiveBase *url.URL
+	baseReq       *http.Request
+}
+
+type sriAction int
+
+const (
+	sriNone    sriAction = iota
+	sriStrip             // no pipeline, proxied: strip integrity + crossorigin
+	sriReplace           // pipeline success: replace integrity, keep crossorigin
+	sriKeep              // pipeline failure or unchanged bytes: keep both
+	sriBlock             // verification failed: strip src/href + integrity to prevent load
+)
+
+func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMapper, sr *sriRewriter) []byte {
 	z := html.NewTokenizer(bytes.NewReader(body))
 	var out bytes.Buffer
 	out.Grow(len(body))
@@ -67,9 +93,20 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool) []byte {
 				attrs = collectTagAttrs(z)
 			}
 
+			if tagName == "base" && sr != nil {
+				for _, a := range attrs {
+					if a.key == "href" && a.val != "" {
+						if baseHref, err := sr.upstreamBase.Parse(a.val); err == nil {
+							sr.effectiveBase = baseHref
+						}
+						break
+					}
+				}
+			}
+
 			out.WriteByte('<')
 			out.WriteString(tagName)
-			writeScrubbedAttrs(&out, tagName, attrs, gate)
+			writeScrubbedAttrs(&out, tagName, attrs, gate, origins, sr)
 
 			if tt == html.SelfClosingTagToken {
 				out.WriteString(" /")
@@ -113,7 +150,7 @@ func collectTagAttrs(z *html.Tokenizer) []tagAttr {
 	return attrs
 }
 
-func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate) {
+func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sr *sriRewriter) {
 	relVal := ""
 	if tagName == "link" {
 		for _, a := range attrs {
@@ -124,21 +161,145 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 		}
 	}
 
+	action := sriNone
+	var replacementHash string
+	var integrityVal string
+
+	if tagName == "script" || tagName == "link" {
+		var resourceURL string
+		var crossoriginVal string
+		for _, a := range attrs {
+			if (tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href") {
+				resourceURL = a.val
+			}
+			if a.key == "integrity" {
+				integrityVal = a.val
+			}
+			if a.key == "crossorigin" {
+				crossoriginVal = a.val
+			}
+		}
+
+		if resourceURL != "" {
+			resolvedURL := resourceURL
+			if sr != nil {
+				base := sr.upstreamBase
+				if sr.effectiveBase != nil {
+					base = sr.effectiveBase
+				}
+				resolvedURL = resolveResourceURL(resourceURL, base)
+			}
+
+			if isProxiedResource(resolvedURL, origins) {
+				if integrityVal != "" && sr != nil {
+					ct := guessContentTypeFromTag(tagName)
+					pageOrigin := sr.upstreamBase
+					result := sr.pipeline.Process(resolvedURL, integrityVal, ct, crossoriginVal, pageOrigin, sr.baseReq)
+					if result != nil && result.VerificationFailed {
+						action = sriBlock
+					} else if result != nil && result.UpstreamValid {
+						if result.BytesModified {
+							action = sriReplace
+							replacementHash = result.ReplacementHash
+						} else {
+							action = sriKeep
+						}
+					} else {
+						action = sriKeep
+					}
+				} else if integrityVal != "" {
+					action = sriStrip
+				}
+			}
+		}
+	}
+
 	for _, a := range attrs {
+		if tagName == "script" || tagName == "link" {
+			if a.key == "integrity" {
+				switch action {
+				case sriStrip, sriBlock:
+					continue
+				case sriReplace:
+					out.WriteByte(' ')
+					out.WriteString(`integrity="`)
+					out.WriteString(html.EscapeString(replacementHash))
+					out.WriteByte('"')
+					continue
+				case sriKeep:
+					out.WriteByte(' ')
+					out.WriteString(`integrity="`)
+					out.WriteString(html.EscapeString(integrityVal))
+					out.WriteByte('"')
+					continue
+				}
+			}
+			if a.key == "crossorigin" && action == sriStrip {
+				continue
+			}
+			if action == sriBlock {
+				if (tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href") {
+					continue
+				}
+			}
+		}
+
 		out.WriteByte(' ')
 		out.WriteString(a.key)
 		out.WriteString(`="`)
-		out.WriteString(html.EscapeString(scrubAttrValue(tagName, a.key, a.val, relVal, gate)))
+		out.WriteString(html.EscapeString(scrubAttrValue(tagName, a.key, a.val, relVal, gate, origins)))
 		out.WriteByte('"')
 	}
 }
 
-func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate) string {
+func isProxiedResource(rawURL string, origins *OriginMapper) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return true
+	}
+	if parsed.Host == "" {
+		return true
+	}
+	if origins == nil {
+		return true
+	}
+	if parsed.Scheme != "" {
+		return origins.IsKnownFullOrigin(parsed)
+	}
+	return origins.IsKnownOrigin(parsed.Host)
+}
+
+func resolveResourceURL(rawURL string, base *url.URL) string {
+	if base == nil {
+		return rawURL
+	}
+	resolved, err := base.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return resolved.String()
+}
+
+func guessContentTypeFromTag(tagName string) string {
+	if tagName == "script" {
+		return "application/javascript"
+	}
+	return "text/css"
+}
+
+func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate, origins *OriginMapper) string {
 	if tagName == "img" && attrName == "src" {
 		return transparentGifDataURI
 	}
 	if tagName == "img" && attrName == "alt" {
 		return "[image]"
+	}
+
+	if origins != nil && isURLAttr(tagName, attrName) {
+		rewritten := origins.RewriteUpstreamURL(attrVal)
+		if rewritten != attrVal {
+			return gate.Scrub(rewritten, "html:"+attrName)
+		}
 	}
 
 	ctx := "html:body"
@@ -154,6 +315,88 @@ func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate)
 	}
 
 	return gate.Scrub(attrVal, ctx)
+}
+
+func isURLAttr(tagName, attrName string) bool {
+	switch attrName {
+	case "href", "src", "action", "formaction", "poster", "cite":
+		return true
+	}
+	return false
+}
+
+func extractHTMLMetadata(body []byte) *metadata.Result {
+	z := html.NewTokenizer(bytes.NewReader(body))
+	r := &metadata.Result{Format: "html"}
+
+	var inTitle bool
+	var titleBuf bytes.Buffer
+	depth := 0
+
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
+		}
+
+		switch tt {
+		case html.StartTagToken:
+			tn, hasAttr := z.TagName()
+			tagName := string(tn)
+			depth++
+
+			if tagName == "title" {
+				inTitle = true
+				titleBuf.Reset()
+			}
+
+			if tagName == "body" {
+				goto done
+			}
+
+			if tagName == "meta" && hasAttr {
+				attrs := collectTagAttrs(z)
+				var name, property, content string
+				for _, a := range attrs {
+					switch a.key {
+					case "name":
+						name = strings.ToLower(a.val)
+					case "property":
+						property = strings.ToLower(a.val)
+					case "content":
+						content = a.val
+					}
+				}
+				if content != "" {
+					switch {
+					case name == "author" || property == "article:author":
+						r.Identity.Author = content
+					case name == "generator":
+						r.Producer = content
+					}
+				}
+			}
+
+		case html.TextToken:
+			if inTitle {
+				titleBuf.Write(z.Text())
+			}
+
+		case html.EndTagToken:
+			tn, _ := z.TagName()
+			if string(tn) == "title" && inTitle {
+				r.Identity.Title = strings.TrimSpace(titleBuf.String())
+				inTitle = false
+			}
+			depth--
+		}
+	}
+
+done:
+	if r.Identity.Title == "" && r.Identity.Author == "" && r.Producer == "" {
+		return nil
+	}
+	return r
 }
 
 func loremForLength(n int) string {

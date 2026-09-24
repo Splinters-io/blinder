@@ -1,6 +1,7 @@
 package har
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -85,18 +86,33 @@ type Timings struct {
 }
 
 type Writer struct {
-	entries     []Entry
-	mu          sync.Mutex
-	maxBodySize int64
+	entries      []Entry
+	mu           sync.Mutex
+	flushMu      sync.Mutex
+	maxBodySize  int64
+	maxEntries   int
+	captureBudget int
+	path         string
 }
 
-func NewWriter(maxBodySize int64) *Writer {
+func NewWriter(path string, maxBodySize int64, maxEntries int) *Writer {
 	if maxBodySize <= 0 {
 		maxBodySize = 10 * 1024 * 1024
 	}
-	return &Writer{
-		maxBodySize: maxBodySize,
+	if maxEntries <= 0 {
+		maxEntries = 50000
 	}
+	return &Writer{
+		path:        path,
+		maxBodySize: maxBodySize,
+		maxEntries:  maxEntries,
+	}
+}
+
+func (w *Writer) SetCaptureBudget(n int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.captureBudget = n
 }
 
 func (w *Writer) Len() int {
@@ -118,7 +134,12 @@ func (w *Writer) Record(req *http.Request, reqBody []byte, resp *http.Response, 
 
 	w.mu.Lock()
 	w.entries = append(w.entries, entry)
+	overCap := len(w.entries) > w.maxEntries
 	w.mu.Unlock()
+
+	if overCap {
+		w.FlushJournal()
+	}
 }
 
 func (w *Writer) RecordError(req *http.Request, reqBody []byte, statusCode int, errorText string, elapsed time.Duration) {
@@ -144,7 +165,12 @@ func (w *Writer) RecordError(req *http.Request, reqBody []byte, statusCode int, 
 
 	w.mu.Lock()
 	w.entries = append(w.entries, entry)
+	overCap := len(w.entries) > w.maxEntries
 	w.mu.Unlock()
+
+	if overCap {
+		w.FlushJournal()
+	}
 }
 
 func (w *Writer) RecordUpgrade(req *http.Request, elapsed time.Duration) {
@@ -173,15 +199,284 @@ func (w *Writer) RecordUpgrade(req *http.Request, elapsed time.Duration) {
 
 	w.mu.Lock()
 	w.entries = append(w.entries, entry)
+	overCap := len(w.entries) > w.maxEntries
 	w.mu.Unlock()
+
+	if overCap {
+		w.FlushJournal()
+	}
 }
 
-func (w *Writer) Flush(path string) error {
+func (w *Writer) RecordFetchFailure(req *http.Request, status int, headers http.Header, body []byte, errorText string, elapsed time.Duration) {
+	now := time.Now()
+
+	statusText := errorText
+	if status > 0 {
+		statusText = http.StatusText(status)
+	}
+
+	var headerList []NameValue
+	if headers != nil {
+		headerList = headersToList(headers)
+	} else {
+		headerList = []NameValue{}
+	}
+
+	ct := "application/octet-stream"
+	if headers != nil {
+		if h := headers.Get("Content-Type"); h != "" {
+			ct = h
+		}
+	}
+
+	content := Content{
+		Size:     len(body),
+		MimeType: ct,
+		Comment:  errorText,
+	}
+	if len(body) > 0 {
+		content.Text, content.Encoding, _ = w.captureBody(body, isTextContent(ct))
+	}
+
+	resp := Response{
+		Status:      status,
+		StatusText:  statusText,
+		HTTPVersion: "HTTP/1.1",
+		Headers:     headerList,
+		Content:     content,
+		HeadersSize: -1,
+		BodySize:    len(body),
+	}
+
+	entry := Entry{
+		StartedDateTime: now.Add(-elapsed).Format(time.RFC3339Nano),
+		Time:            float64(elapsed.Milliseconds()),
+		Request:         w.buildRequest(req, nil),
+		Response:        resp,
+		Timings:         buildTimings(elapsed),
+	}
+
+	w.mu.Lock()
+	w.entries = append(w.entries, entry)
+	overCap := len(w.entries) > w.maxEntries
+	w.mu.Unlock()
+
+	if overCap {
+		w.FlushJournal()
+	}
+}
+
+func (w *Writer) FlushJournal() error {
+	if w.path == "" {
+		return nil
+	}
+	return w.flushMerge(w.path)
+}
+
+func (w *Writer) Flush() error {
+	if w.path == "" {
+		return nil
+	}
+	if err := w.flushMerge(w.path); err != nil {
+		return err
+	}
+	return w.materialize(w.path)
+}
+
+func (w *Writer) journalPath() string {
+	return w.path + ".journal"
+}
+
+func (w *Writer) flushMerge(path string) error {
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
+	w.mu.Lock()
+	if len(w.entries) == 0 {
+		w.mu.Unlock()
+		return nil
+	}
+	snapshot := make([]Entry, len(w.entries))
+	copy(snapshot, w.entries)
+	snapshotLen := len(snapshot)
+	w.mu.Unlock()
+
+	jpath := w.journalPath()
+	f, err := os.OpenFile(jpath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err == nil {
+		os.Chmod(jpath, 0600)
+	}
+	if err != nil {
+		return fmt.Errorf("open journal: %w", err)
+	}
+
+	enc := json.NewEncoder(f)
+	var writeErr error
+	for _, e := range snapshot {
+		if err := enc.Encode(e); err != nil {
+			writeErr = fmt.Errorf("write journal: %w", err)
+			break
+		}
+	}
+	if err := f.Close(); err != nil && writeErr == nil {
+		writeErr = fmt.Errorf("close journal: %w", err)
+	}
+	if writeErr != nil {
+		return writeErr
+	}
+
+	w.mu.Lock()
+	remaining := make([]Entry, len(w.entries)-snapshotLen)
+	copy(remaining, w.entries[snapshotLen:])
+	w.entries = remaining
+	w.mu.Unlock()
+
+	return nil
+}
+
+func (w *Writer) materialize(path string) error {
+	w.mu.Lock()
+	budget := w.captureBudget
+	w.mu.Unlock()
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".blinder-har-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	header := `{
+  "log": {
+    "version": "1.2",
+    "creator": { "name": "blinder", "version": "2.0.0" },
+    "entries": [
+`
+	if _, err := tmp.WriteString(header); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write header: %w", err)
+	}
+
+	written := 0
+	first := true
+	var skippedLines int
+
+	writeEntry := func(e *Entry) error {
+		if budget > 0 && written >= budget {
+			return nil
+		}
+		if !first {
+			if _, err := tmp.WriteString(",\n"); err != nil {
+				return err
+			}
+		}
+		first = false
+		data, err := json.MarshalIndent(e, "      ", "  ")
+		if err != nil {
+			return err
+		}
+		if _, err := tmp.Write(append([]byte("      "), data...)); err != nil {
+			return err
+		}
+		written++
+		return nil
+	}
+
+	if data, err := os.ReadFile(path); err == nil {
+		var existing HARFile
+		if json.Unmarshal(data, &existing) == nil {
+			for i := range existing.Log.Entries {
+				if err := writeEntry(&existing.Log.Entries[i]); err != nil {
+					tmp.Close()
+					os.Remove(tmpPath)
+					return fmt.Errorf("stream existing: %w", err)
+				}
+			}
+		} else {
+			backup := path + ".corrupt." + time.Now().Format("20060102-150405")
+			os.Rename(path, backup)
+		}
+	}
+
+	jpath := w.journalPath()
+	if jdata, err := os.ReadFile(jpath); err == nil {
+		for _, line := range splitJournalLines(jdata) {
+			if len(line) == 0 {
+				continue
+			}
+			var e Entry
+			if err := json.Unmarshal(line, &e); err != nil {
+				skippedLines++
+				continue
+			}
+			if err := writeEntry(&e); err != nil {
+				tmp.Close()
+				os.Remove(tmpPath)
+				return fmt.Errorf("stream journal: %w", err)
+			}
+		}
+	}
+
+	footer := "\n    ]\n  }\n}\n"
+	if _, err := tmp.WriteString(footer); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write footer: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	if skippedLines > 0 {
+		backup := jpath + ".corrupt." + time.Now().Format("20060102-150405")
+		os.Rename(jpath, backup)
+		return fmt.Errorf("journal recovery incomplete: %d record(s) unreadable, journal preserved as %s", skippedLines, filepath.Base(backup))
+	}
+	os.Remove(jpath)
+	return nil
+}
+
+func splitJournalLines(data []byte) [][]byte {
+	var lines [][]byte
+	for len(data) > 0 {
+		idx := bytes.IndexByte(data, '\n')
+		if idx < 0 {
+			line := bytes.TrimSpace(data)
+			if len(line) > 0 {
+				lines = append(lines, line)
+			}
+			break
+		}
+		line := bytes.TrimSpace(data[:idx])
+		if len(line) > 0 {
+			lines = append(lines, line)
+		}
+		data = data[idx+1:]
+	}
+	return lines
+}
+
+func (w *Writer) FlushTo(path string) error {
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
 	w.mu.Lock()
 	entries := make([]Entry, len(w.entries))
 	copy(entries, w.entries)
 	w.mu.Unlock()
 
+	return writeHARFile(path, entries)
+}
+
+func writeHARFile(path string, entries []Entry) error {
 	harFile := HARFile{
 		Log: Log{
 			Version: "1.2",
