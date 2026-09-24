@@ -116,7 +116,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 
 			sriDec := decideSRIAction(tagName, attrs, sr, origins)
 			if sriDec.action == sriBlock {
-				if tagName == "script" && tt != html.SelfClosingTagToken {
+				if tagName == "script" {
 					suppressElement = true
 				}
 				continue

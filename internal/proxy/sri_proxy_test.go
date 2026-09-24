@@ -640,6 +640,84 @@ func TestProxy_SRIBlockOmitsModuleScriptBody(t *testing.T) {
 	}
 }
 
+// In HTML, <script ... /> still opens a script element -- the slash does not
+// make it void. Body suppression must fire regardless of the token type.
+func TestProxy_SRIBlockSlashEndedClassicScript(t *testing.T) {
+	jsBody := []byte(`var y = 1;`)
+	wrongIntegrity := "sha384-" + sha384b64p([]byte("wrong"))
+
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<html><script src="/ext.js" integrity="%s" />document.title="SLASH_EXEC";</script><p>after</p></html>`, wrongIntegrity)
+		case "/ext.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			w.Write(jsBody)
+		}
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	_, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatalf("HTML request: %v", err)
+	}
+	htmlBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	htmlStr := string(htmlBody)
+
+	if strings.Contains(htmlStr, `<script`) {
+		t.Errorf("slash-ended script element must be fully omitted, got: %s", htmlStr)
+	}
+	if strings.Contains(htmlStr, "SLASH_EXEC") {
+		t.Errorf("inline body must not survive slash-ended script, got: %s", htmlStr)
+	}
+	if !strings.Contains(htmlStr, "<p") {
+		t.Errorf("following markup must be preserved, got: %s", htmlStr)
+	}
+}
+
+func TestProxy_SRIBlockSlashEndedModuleScript(t *testing.T) {
+	jsBody := []byte(`export const z = 1;`)
+	wrongIntegrity := "sha384-" + sha384b64p([]byte("wrong"))
+
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<html><script type="module" src="/mod.js" integrity="%s" />document.title="MOD_SLASH";</script><p>safe</p></html>`, wrongIntegrity)
+		case "/mod.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			w.Write(jsBody)
+		}
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	_, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatalf("HTML request: %v", err)
+	}
+	htmlBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	htmlStr := string(htmlBody)
+
+	if strings.Contains(htmlStr, `<script`) {
+		t.Errorf("slash-ended module script must be fully omitted, got: %s", htmlStr)
+	}
+	if strings.Contains(htmlStr, "MOD_SLASH") {
+		t.Errorf("module inline body must not survive, got: %s", htmlStr)
+	}
+	if !strings.Contains(htmlStr, "<p") {
+		t.Errorf("following markup must be preserved, got: %s", htmlStr)
+	}
+}
+
 // Defect 2: Origin restrictions must enforce scheme and port.
 func TestProxy_SRIOriginSchemePortEnforced(t *testing.T) {
 	jsBody := []byte(`var x = 1;`)
