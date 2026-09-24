@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/cache"
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/har"
 	"github.com/Splinters-io/blinder/internal/manifest"
@@ -44,10 +45,11 @@ type Server struct {
 	wsProxy     *ws.Proxy
 	harWriter   *har.Writer
 	manifest    *manifest.Session
-	sriCache    *sri.Cache
-	sriPipeline *sri.Pipeline
-	stats       Stats
-	done        chan struct{}
+	sriCache      *sri.Cache
+	sriPipeline   *sri.Pipeline
+	responseCache *cache.ResponseCache
+	stats         Stats
+	done          chan struct{}
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -162,16 +164,17 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	sriPipeline := sri.NewPipeline(sriCfg)
 
 	s := &Server{
-		cfg:         cfg,
-		gate:        gate,
-		origins:     origins,
-		transport:   transport,
-		wsProxy:     wsProxy,
-		harWriter:   harWriter,
-		manifest:    session,
-		sriCache:    sriCache,
-		sriPipeline: sriPipeline,
-		done:        make(chan struct{}),
+		cfg:           cfg,
+		gate:          gate,
+		origins:       origins,
+		transport:     transport,
+		wsProxy:       wsProxy,
+		harWriter:     harWriter,
+		manifest:      session,
+		sriCache:      sriCache,
+		sriPipeline:   sriPipeline,
+		responseCache: cache.New(4096),
+		done:          make(chan struct{}),
 	}
 
 	if harWriter != nil && cfg.HAR != nil {
@@ -271,6 +274,10 @@ func (s *Server) ClearSRICache() {
 	s.sriCache.Clear()
 }
 
+func (s *Server) ResponseCache() *cache.ResponseCache {
+	return s.responseCache
+}
+
 func (s *Server) SRIFindings() []sri.Finding {
 	return s.sriPipeline.Findings()
 }
@@ -352,51 +359,59 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := upstream.Scheme + "://" + upstream.Host + r.URL.RequestURI()
+	cacheable := r.Method == http.MethodGet || r.Method == http.MethodHead
+
+	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
-		cacheKey := sri.CacheKey(upstreamURL, r)
-		if entry, ok := s.sriCache.Get(cacheKey); ok {
-			if entry.FetchError != "" {
-				status = http.StatusBadGateway
-				http.Error(w, "upstream integrity verification failed", http.StatusBadGateway)
-				s.stats.Errors.Add(1)
-				return
-			}
-			if entry.ResponseHeaders != nil {
-				outHeaders := rewriter.RewriteResponseHeaders(
-					entry.ResponseHeaders,
-					gate,
-					s.cfg.AliasDomain,
-					s.cfg.TargetURL.Host,
-					rewriter.ResponseHeaderOpts{
-						OriginMapper:  s.origins,
-						RequestOrigin: r.Header.Get("Origin"),
-					},
-				)
-				for name, values := range outHeaders {
-					for _, v := range values {
-						w.Header().Add(name, v)
-					}
-				}
-			}
-			ct := entry.ContentType
-			if ct == "" {
-				ct = "application/octet-stream"
-			}
-			w.Header().Set("Content-Type", ct)
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.ScrubbedBody)))
-			w.Header().Del("Content-Encoding")
-			w.Header().Del("Transfer-Encoding")
-			w.WriteHeader(http.StatusOK)
-			w.Write(entry.ScrubbedBody)
-			s.stats.Scrubbed.Add(1)
+		if served := s.tryServeSRICache(w, r, upstreamURL, gate); served {
 			return
 		}
 	}
 
+	// --- Response cache: conditional and fresh-hit paths ---
+	var staleCacheKey string
+	var staleEntry *cache.Entry
+	if cacheable {
+		hasCreds := cache.HasCredentials(r)
+		cacheKey := cache.Key(upstreamURL, hasCreds, r, nil)
+		if cached, ok := s.responseCache.Lookup(cacheKey); ok {
+			if len(cached.VaryFields) > 0 {
+				cacheKey = cache.Key(upstreamURL, hasCreds, r, cached.VaryFields)
+				cached, ok = s.responseCache.Lookup(cacheKey)
+			}
+			if ok {
+				inm := r.Header.Get("If-None-Match")
+				if cached.IsFresh() {
+					if cache.MatchesETag(inm, cached.ETag) {
+						w.Header().Set("ETag", cached.ETag)
+						status = http.StatusNotModified
+						w.WriteHeader(http.StatusNotModified)
+						return
+					}
+					s.writeCachedResponse(w, &cached, r.Method == http.MethodHead)
+					status = cached.StatusCode
+					return
+				}
+				staleCacheKey = cacheKey
+				staleEntry = &cached
+			}
+		}
+	}
+
+	// --- Forward to upstream ---
 	upstreamReq := rewriter.RewriteRequestHeaders(r, upstream.Host, gate, s.origins)
 	upstreamReq.URL.Scheme = upstream.Scheme
 	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
+
+	if cacheable && staleEntry != nil {
+		if staleEntry.UpstreamETag != "" {
+			upstreamReq.Header.Set("If-None-Match", staleEntry.UpstreamETag)
+		}
+		if staleEntry.UpstreamLastModified != "" {
+			upstreamReq.Header.Set("If-Modified-Since", staleEntry.UpstreamLastModified)
+		}
+	}
 
 	requestStart := time.Now()
 	upstreamCtx, cancel := context.WithTimeout(upstreamReq.Context(), time.Duration(s.cfg.UpstreamTimeout)*time.Second)
@@ -417,10 +432,29 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	elapsed := time.Since(requestStart)
+
+	// --- Upstream 304: revalidation confirmed cached content is current ---
+	if resp.StatusCode == http.StatusNotModified && staleEntry != nil {
+		if s.harWriter != nil {
+			s.harWriter.Record(upstreamReq, reqBodyBuf, resp, nil, elapsed)
+		}
+		s.responseCache.Touch(staleCacheKey)
+		inm := r.Header.Get("If-None-Match")
+		if cache.MatchesETag(inm, staleEntry.ETag) {
+			w.Header().Set("ETag", staleEntry.ETag)
+			status = http.StatusNotModified
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		s.writeCachedResponse(w, staleEntry, r.Method == http.MethodHead)
+		status = staleEntry.StatusCode
+		return
+	}
+
 	body, err := s.readResponseBody(resp)
 	if err != nil {
 		status = http.StatusBadGateway
-		elapsed := time.Since(requestStart)
 		log.Printf("[error] reading body: %v", err)
 		if s.harWriter != nil {
 			s.harWriter.RecordError(upstreamReq, reqBodyBuf, http.StatusBadGateway, err.Error(), elapsed)
@@ -429,8 +463,6 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		s.stats.Errors.Add(1)
 		return
 	}
-
-	elapsed := time.Since(requestStart)
 
 	if s.harWriter != nil {
 		s.harWriter.Record(upstreamReq, reqBodyBuf, resp, body, elapsed)
@@ -466,14 +498,41 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 
+	etag := cache.ComputeETag(result.Body)
+
+	// Store in response cache for cacheable 200 responses.
+	if cacheable && resp.StatusCode == http.StatusOK {
+		varyFields := cache.ParseVary(resp.Header.Get("Vary"))
+		if len(varyFields) == 0 || varyFields[0] != "*" {
+			dirs := cache.ParseDirectives(resp.Header.Get("Cache-Control"))
+			hasCreds := cache.HasCredentials(r)
+			cacheKey := cache.Key(upstreamURL, hasCreds, r, varyFields)
+			s.responseCache.Store(cacheKey, cache.Entry{
+				Body:                 append([]byte(nil), result.Body...),
+				StatusCode:           resp.StatusCode,
+				Headers:              outHeaders.Clone(),
+				ContentType:          contentType,
+				ETag:                 etag,
+				UpstreamETag:         resp.Header.Get("ETag"),
+				UpstreamLastModified: resp.Header.Get("Last-Modified"),
+				VaryFields:           varyFields,
+				VaryValues:           cache.CaptureVaryValues(r, varyFields),
+				HasCredentials:       hasCreds,
+				Directives:           dirs,
+				StoredAt:             time.Now(),
+			})
+		}
+	}
+
 	for name, values := range outHeaders {
 		for _, v := range values {
 			w.Header().Add(name, v)
 		}
 	}
 
+	w.Header().Set("ETag", etag)
+
 	if result.Metadata != nil {
-		// Scrub decoded values before JSON escaping, while retaining the schema.
 		meta := *result.Metadata
 		meta.Producer = gate.Scrub(meta.Producer, "metadata:producer")
 		meta.PDFVersion = gate.Scrub(meta.PDFVersion, "metadata:pdf-version")
@@ -488,6 +547,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	status = resp.StatusCode
 
+	// Conditional match against the just-computed downstream ETag.
+	if cacheable {
+		inm := r.Header.Get("If-None-Match")
+		if cache.MatchesETag(inm, etag) {
+			status = http.StatusNotModified
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
 	if result.ContentType != "" {
 		w.Header().Set("Content-Type", result.ContentType)
 	}
@@ -496,7 +565,81 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Transfer-Encoding")
 
 	w.WriteHeader(resp.StatusCode)
-	w.Write(result.Body)
+	if r.Method != http.MethodHead {
+		w.Write(result.Body)
+	}
+}
+
+func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstreamURL string, gate *scrub.Gate) bool {
+	cacheKey := sri.CacheKey(upstreamURL, r)
+	entry, ok := s.sriCache.Get(cacheKey)
+	if !ok {
+		return false
+	}
+	if entry.FetchError != "" {
+		http.Error(w, "upstream integrity verification failed", http.StatusBadGateway)
+		s.stats.Errors.Add(1)
+		return true
+	}
+
+	etag := cache.ComputeETag(entry.ScrubbedBody)
+	inm := r.Header.Get("If-None-Match")
+	if cache.MatchesETag(inm, etag) {
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+
+	if entry.ResponseHeaders != nil {
+		outHeaders := rewriter.RewriteResponseHeaders(
+			entry.ResponseHeaders,
+			gate,
+			s.cfg.AliasDomain,
+			s.cfg.TargetURL.Host,
+			rewriter.ResponseHeaderOpts{
+				OriginMapper:  s.origins,
+				RequestOrigin: r.Header.Get("Origin"),
+			},
+		)
+		for name, values := range outHeaders {
+			for _, v := range values {
+				w.Header().Add(name, v)
+			}
+		}
+	}
+
+	ct := entry.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.ScrubbedBody)))
+	w.Header().Del("Content-Encoding")
+	w.Header().Del("Transfer-Encoding")
+	w.WriteHeader(http.StatusOK)
+	w.Write(entry.ScrubbedBody)
+	s.stats.Scrubbed.Add(1)
+	return true
+}
+
+func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, headOnly bool) {
+	for name, values := range entry.Headers {
+		for _, v := range values {
+			w.Header().Add(name, v)
+		}
+	}
+	w.Header().Set("ETag", entry.ETag)
+	if entry.ContentType != "" {
+		w.Header().Set("Content-Type", entry.ContentType)
+	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(entry.Body)))
+	w.Header().Del("Content-Encoding")
+	w.Header().Del("Transfer-Encoding")
+	w.WriteHeader(entry.StatusCode)
+	if !headOnly {
+		w.Write(entry.Body)
+	}
 }
 
 func (s *Server) readResponseBody(resp *http.Response) ([]byte, error) {

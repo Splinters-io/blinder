@@ -16,7 +16,6 @@ var passthroughHeaders = map[string]bool{
 	"cache-control":                       true,
 	"pragma":                              true,
 	"expires":                             true,
-	"etag":                                true,
 	"vary":                                true,
 	"x-content-type-options":              true,
 	"x-frame-options":                     true,
