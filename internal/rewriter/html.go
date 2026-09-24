@@ -36,8 +36,14 @@ const (
 	sriStrip             // no pipeline, proxied: strip integrity + crossorigin
 	sriReplace           // pipeline success: replace integrity, keep crossorigin
 	sriKeep              // pipeline failure or unchanged bytes: keep both
-	sriBlock             // verification failed: strip src/href + integrity to prevent load
+	sriBlock             // verification failed: omit entire element to prevent execution
 )
+
+type sriDecision struct {
+	action          sriAction
+	replacementHash string
+	integrityVal    string
+}
 
 func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMapper, sr *sriRewriter) []byte {
 	z := html.NewTokenizer(bytes.NewReader(body))
@@ -45,6 +51,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 	out.Grow(len(body))
 
 	var rawTextTag string
+	var suppressElement bool
 
 	for {
 		tt := z.Next()
@@ -59,6 +66,9 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 			out.Write(append([]byte(nil), z.Raw()...))
 
 		case html.TextToken:
+			if suppressElement {
+				continue
+			}
 			text := string(append([]byte(nil), z.Text()...))
 			switch rawTextTag {
 			case "script":
@@ -104,9 +114,17 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 				}
 			}
 
+			sriDec := decideSRIAction(tagName, attrs, sr, origins)
+			if sriDec.action == sriBlock {
+				if tagName == "script" && tt != html.SelfClosingTagToken {
+					suppressElement = true
+				}
+				continue
+			}
+
 			out.WriteByte('<')
 			out.WriteString(tagName)
-			writeScrubbedAttrs(&out, tagName, attrs, gate, origins, sr)
+			writeScrubbedAttrs(&out, tagName, attrs, gate, origins, sriDec)
 
 			if tt == html.SelfClosingTagToken {
 				out.WriteString(" /")
@@ -118,10 +136,15 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 			tagName := string(tn)
 
 			if tagName == rawTextTag {
-				if tagName == "title" {
+				if tagName == "title" && !suppressElement {
 					out.WriteString("[Blinder: title removed]")
 				}
 				rawTextTag = ""
+			}
+
+			if suppressElement {
+				suppressElement = false
+				continue
 			}
 
 			out.WriteString("</")
@@ -150,7 +173,65 @@ func collectTagAttrs(z *html.Tokenizer) []tagAttr {
 	return attrs
 }
 
-func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sr *sriRewriter) {
+func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *OriginMapper) sriDecision {
+	if tagName != "script" && tagName != "link" {
+		return sriDecision{}
+	}
+
+	var resourceURL, integrityVal, crossoriginVal string
+	for _, a := range attrs {
+		if (tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href") {
+			resourceURL = a.val
+		}
+		if a.key == "integrity" {
+			integrityVal = a.val
+		}
+		if a.key == "crossorigin" {
+			crossoriginVal = a.val
+		}
+	}
+
+	if resourceURL == "" {
+		return sriDecision{integrityVal: integrityVal}
+	}
+
+	resolvedURL := resourceURL
+	if sr != nil {
+		base := sr.upstreamBase
+		if sr.effectiveBase != nil {
+			base = sr.effectiveBase
+		}
+		resolvedURL = resolveResourceURL(resourceURL, base)
+	}
+
+	if !isProxiedResource(resolvedURL, origins) {
+		return sriDecision{integrityVal: integrityVal}
+	}
+
+	if integrityVal != "" && sr != nil {
+		ct := guessContentTypeFromTag(tagName)
+		pageOrigin := sr.upstreamBase
+		result := sr.pipeline.Process(resolvedURL, integrityVal, ct, crossoriginVal, pageOrigin, sr.baseReq)
+		if result != nil && result.VerificationFailed {
+			return sriDecision{action: sriBlock, integrityVal: integrityVal}
+		}
+		if result != nil && result.UpstreamValid {
+			if result.BytesModified {
+				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityVal: integrityVal}
+			}
+			return sriDecision{action: sriKeep, integrityVal: integrityVal}
+		}
+		return sriDecision{action: sriKeep, integrityVal: integrityVal}
+	}
+
+	if integrityVal != "" {
+		return sriDecision{action: sriStrip, integrityVal: integrityVal}
+	}
+
+	return sriDecision{}
+}
+
+func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sri sriDecision) {
 	relVal := ""
 	if tagName == "link" {
 		for _, a := range attrs {
@@ -161,86 +242,28 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 		}
 	}
 
-	action := sriNone
-	var replacementHash string
-	var integrityVal string
-
-	if tagName == "script" || tagName == "link" {
-		var resourceURL string
-		var crossoriginVal string
-		for _, a := range attrs {
-			if (tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href") {
-				resourceURL = a.val
-			}
-			if a.key == "integrity" {
-				integrityVal = a.val
-			}
-			if a.key == "crossorigin" {
-				crossoriginVal = a.val
-			}
-		}
-
-		if resourceURL != "" {
-			resolvedURL := resourceURL
-			if sr != nil {
-				base := sr.upstreamBase
-				if sr.effectiveBase != nil {
-					base = sr.effectiveBase
-				}
-				resolvedURL = resolveResourceURL(resourceURL, base)
-			}
-
-			if isProxiedResource(resolvedURL, origins) {
-				if integrityVal != "" && sr != nil {
-					ct := guessContentTypeFromTag(tagName)
-					pageOrigin := sr.upstreamBase
-					result := sr.pipeline.Process(resolvedURL, integrityVal, ct, crossoriginVal, pageOrigin, sr.baseReq)
-					if result != nil && result.VerificationFailed {
-						action = sriBlock
-					} else if result != nil && result.UpstreamValid {
-						if result.BytesModified {
-							action = sriReplace
-							replacementHash = result.ReplacementHash
-						} else {
-							action = sriKeep
-						}
-					} else {
-						action = sriKeep
-					}
-				} else if integrityVal != "" {
-					action = sriStrip
-				}
-			}
-		}
-	}
-
 	for _, a := range attrs {
 		if tagName == "script" || tagName == "link" {
 			if a.key == "integrity" {
-				switch action {
-				case sriStrip, sriBlock:
+				switch sri.action {
+				case sriStrip:
 					continue
 				case sriReplace:
 					out.WriteByte(' ')
 					out.WriteString(`integrity="`)
-					out.WriteString(html.EscapeString(replacementHash))
+					out.WriteString(html.EscapeString(sri.replacementHash))
 					out.WriteByte('"')
 					continue
 				case sriKeep:
 					out.WriteByte(' ')
 					out.WriteString(`integrity="`)
-					out.WriteString(html.EscapeString(integrityVal))
+					out.WriteString(html.EscapeString(sri.integrityVal))
 					out.WriteByte('"')
 					continue
 				}
 			}
-			if a.key == "crossorigin" && action == sriStrip {
+			if a.key == "crossorigin" && sri.action == sriStrip {
 				continue
-			}
-			if action == sriBlock {
-				if (tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href") {
-					continue
-				}
 			}
 		}
 

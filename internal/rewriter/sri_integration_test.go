@@ -150,11 +150,8 @@ func TestSRIIntegration_InvalidOriginalBlocked(t *testing.T) {
 	})
 	resultStr := string(result.Body)
 
-	if strings.Contains(resultStr, `src=`) {
-		t.Errorf("src must be stripped to block failed-verification resource, got: %s", resultStr)
-	}
-	if strings.Contains(resultStr, `integrity=`) {
-		t.Errorf("integrity must be stripped alongside src, got: %s", resultStr)
+	if strings.Contains(resultStr, `<script`) {
+		t.Errorf("entire script element must be omitted for failed verification, got: %s", resultStr)
 	}
 
 	cacheKey := sri.CacheKey(upstreamBase.String()+"/tampered.js", baseReq)

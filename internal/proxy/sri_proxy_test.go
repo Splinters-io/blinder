@@ -122,14 +122,8 @@ func TestProxy_SRIInvalidOriginalBlocked(t *testing.T) {
 	resp.Body.Close()
 	htmlStr := string(htmlBody)
 
-	if strings.Contains(htmlStr, `src=`) {
-		t.Error("src should be stripped when upstream verification fails")
-	}
-	if strings.Contains(htmlStr, `integrity=`) {
-		t.Error("integrity should be stripped when upstream verification fails")
-	}
-	if !strings.Contains(htmlStr, `<script></script>`) {
-		t.Errorf("blocked script should be an empty element, got: %s", htmlStr)
+	if strings.Contains(htmlStr, `<script`) {
+		t.Errorf("entire script element must be omitted for failed verification, got: %s", htmlStr)
 	}
 
 	resp2, err := client.Get("https://" + addr + "/data")
@@ -478,11 +472,8 @@ func TestProxy_SRIFailedBecomesValidBlocked(t *testing.T) {
 	resp2.Body.Close()
 	htmlStr2 := string(htmlBody2)
 
-	if strings.Contains(htmlStr2, `src=`) {
-		t.Fatalf("src must be stripped to block the attack, got: %s", htmlStr2)
-	}
-	if strings.Contains(htmlStr2, `integrity=`) {
-		t.Fatalf("integrity must be stripped alongside src, got: %s", htmlStr2)
+	if strings.Contains(htmlStr2, `<script`) {
+		t.Fatalf("entire script element must be omitted for failed verification, got: %s", htmlStr2)
 	}
 }
 
@@ -515,11 +506,8 @@ func TestProxy_SRISentinelBodyBlocked(t *testing.T) {
 	resp.Body.Close()
 	htmlStr := string(htmlBody)
 
-	if strings.Contains(htmlStr, `src=`) {
-		t.Errorf("sentinel body resource must be blocked (src stripped), got: %s", htmlStr)
-	}
-	if strings.Contains(htmlStr, `integrity=`) {
-		t.Errorf("integrity must be stripped, got: %s", htmlStr)
+	if strings.Contains(htmlStr, `<script`) {
+		t.Errorf("entire script element must be omitted for sentinel body, got: %s", htmlStr)
 	}
 }
 
@@ -562,13 +550,93 @@ func TestProxy_SRIBlockAllAlgorithms(t *testing.T) {
 			resp.Body.Close()
 			htmlStr := string(htmlBody)
 
-			if strings.Contains(htmlStr, `src=`) {
-				t.Errorf("%s: src should be stripped on verification failure, got: %s", tc.name, htmlStr)
-			}
-			if strings.Contains(htmlStr, `integrity=`) {
-				t.Errorf("%s: integrity should be stripped, got: %s", tc.name, htmlStr)
+			if strings.Contains(htmlStr, `<script`) {
+				t.Errorf("%s: entire script element must be omitted, got: %s", tc.name, htmlStr)
 			}
 		})
+	}
+}
+
+// Removing src from a script with a nonempty body turns it into an executable
+// inline script. The entire element must be omitted. Classic script variant.
+func TestProxy_SRIBlockOmitsClassicScriptBody(t *testing.T) {
+	jsBody := []byte(`console.log("external");`)
+	wrongIntegrity := "sha384-" + sha384b64p([]byte("wrong"))
+
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<html><script src="/ext.js" integrity="%s">document.title="EXECUTED";</script><p>preserved</p></html>`, wrongIntegrity)
+		case "/ext.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			w.Write(jsBody)
+		}
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	_, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatalf("HTML request: %v", err)
+	}
+	htmlBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	htmlStr := string(htmlBody)
+
+	if strings.Contains(htmlStr, `<script`) {
+		t.Errorf("entire script element (including body) must be omitted, got: %s", htmlStr)
+	}
+	if strings.Contains(htmlStr, "EXECUTED") {
+		t.Errorf("inline body must not appear in output, got: %s", htmlStr)
+	}
+	if !strings.Contains(htmlStr, "<p") {
+		t.Errorf("following markup must be preserved, got: %s", htmlStr)
+	}
+	if !strings.Contains(htmlStr, "preserved") {
+		t.Errorf("following text must be preserved, got: %s", htmlStr)
+	}
+}
+
+// Module script variant: type="module" scripts also execute inline body when src
+// is removed, so the entire element must be omitted.
+func TestProxy_SRIBlockOmitsModuleScriptBody(t *testing.T) {
+	jsBody := []byte(`export default 1;`)
+	wrongIntegrity := "sha384-" + sha384b64p([]byte("wrong"))
+
+	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<html><script type="module" src="/mod.js" integrity="%s">document.title="MODULE_EXEC";</script><p>safe</p></html>`, wrongIntegrity)
+		case "/mod.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			w.Write(jsBody)
+		}
+	})
+	defer target.Close()
+
+	cfg := newTestConfig(t, target.URL)
+	_, addr := startTestProxy(t, cfg)
+
+	resp, err := testClient().Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatalf("HTML request: %v", err)
+	}
+	htmlBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	htmlStr := string(htmlBody)
+
+	if strings.Contains(htmlStr, `<script`) {
+		t.Errorf("module script element must be omitted, got: %s", htmlStr)
+	}
+	if strings.Contains(htmlStr, "MODULE_EXEC") {
+		t.Errorf("module inline body must not appear in output, got: %s", htmlStr)
+	}
+	if !strings.Contains(htmlStr, "<p") {
+		t.Errorf("following markup must be preserved, got: %s", htmlStr)
 	}
 }
 
