@@ -548,7 +548,7 @@ func TestCache_VaryStarNotCached(t *testing.T) {
 	}
 }
 
-func TestCache_MustRevalidateAlwaysChecksUpstream(t *testing.T) {
+func TestCache_MustRevalidateFreshWithinMaxAge(t *testing.T) {
 	ct := newCacheTarget("must reval", `"up-v1"`, "max-age=3600, must-revalidate")
 	defer ct.close()
 
@@ -562,7 +562,7 @@ func TestCache_MustRevalidateAlwaysChecksUpstream(t *testing.T) {
 	resp2, _ := client.Get("https://" + addr + "/page")
 	resp2.Body.Close()
 
-	if ct.hitCount() != 2 {
-		t.Errorf("must-revalidate should check upstream every time, got %d", ct.hitCount())
+	if ct.hitCount() != 1 {
+		t.Errorf("must-revalidate within max-age should serve from cache, got %d upstream hits", ct.hitCount())
 	}
 }

@@ -359,7 +359,6 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := upstream.Scheme + "://" + upstream.Host + r.URL.RequestURI()
-	cacheable := r.Method == http.MethodGet || r.Method == http.MethodHead
 
 	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
@@ -368,32 +367,39 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// --- Response cache: conditional and fresh-hit paths ---
+	// --- Response cache: GET and HEAD read; only GET writes ---
+	cacheable := r.Method == http.MethodGet || r.Method == http.MethodHead
 	var staleCacheKey string
 	var staleEntry *cache.Entry
 	if cacheable {
-		hasCreds := cache.HasCredentials(r)
-		cacheKey := cache.Key(upstreamURL, hasCreds, r, nil)
-		if cached, ok := s.responseCache.Lookup(cacheKey); ok {
-			if len(cached.VaryFields) > 0 {
-				cacheKey = cache.Key(upstreamURL, hasCreds, r, cached.VaryFields)
-				cached, ok = s.responseCache.Lookup(cacheKey)
-			}
-			if ok {
-				inm := r.Header.Get("If-None-Match")
-				if cached.IsFresh() {
-					if cache.MatchesETag(inm, cached.ETag) {
-						w.Header().Set("ETag", cached.ETag)
-						status = http.StatusNotModified
-						w.WriteHeader(http.StatusNotModified)
+		reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
+		if !reqCC.NoCache {
+			credHash := cache.CredentialHash(r)
+			cacheKey := cache.Key(upstreamURL, credHash, r, nil)
+			if cached, ok := s.responseCache.Lookup(cacheKey); ok {
+				if cached.VarySentinel {
+					variantKey := cache.Key(upstreamURL, credHash, r, cached.VaryFields)
+					cached, ok = s.responseCache.Lookup(variantKey)
+					if ok {
+						cacheKey = variantKey
+					}
+				}
+				if ok && !cached.VarySentinel {
+					if cached.IsFresh() {
+						inm := r.Header.Get("If-None-Match")
+						if cache.MatchesETag(inm, cached.ETag) {
+							w.Header().Set("ETag", cached.ETag)
+							status = http.StatusNotModified
+							w.WriteHeader(http.StatusNotModified)
+							return
+						}
+						s.writeCachedResponse(w, &cached, r.Method == http.MethodHead, r.Header.Get("Origin"))
+						status = cached.StatusCode
 						return
 					}
-					s.writeCachedResponse(w, &cached, r.Method == http.MethodHead)
-					status = cached.StatusCode
-					return
+					staleCacheKey = cacheKey
+					staleEntry = &cached
 				}
-				staleCacheKey = cacheKey
-				staleEntry = &cached
 			}
 		}
 	}
@@ -404,7 +410,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
 
-	if cacheable && staleEntry != nil {
+	upstreamReq.Header.Del("If-None-Match")
+	upstreamReq.Header.Del("If-Modified-Since")
+
+	if staleEntry != nil {
 		if staleEntry.UpstreamETag != "" {
 			upstreamReq.Header.Set("If-None-Match", staleEntry.UpstreamETag)
 		}
@@ -439,16 +448,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if s.harWriter != nil {
 			s.harWriter.Record(upstreamReq, reqBodyBuf, resp, nil, elapsed)
 		}
-		s.responseCache.Touch(staleCacheKey)
+		s.responseCache.Revalidate(staleCacheKey, resp.Header)
+		refreshed, _ := s.responseCache.Lookup(staleCacheKey)
 		inm := r.Header.Get("If-None-Match")
-		if cache.MatchesETag(inm, staleEntry.ETag) {
-			w.Header().Set("ETag", staleEntry.ETag)
+		if cache.MatchesETag(inm, refreshed.ETag) {
+			w.Header().Set("ETag", refreshed.ETag)
 			status = http.StatusNotModified
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		s.writeCachedResponse(w, staleEntry, r.Method == http.MethodHead)
-		status = staleEntry.StatusCode
+		s.writeCachedResponse(w, &refreshed, r.Method == http.MethodHead, r.Header.Get("Origin"))
+		status = refreshed.StatusCode
 		return
 	}
 
@@ -469,6 +479,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.stats.Bytes.Add(int64(len(body)))
+
+	// Mutation invalidation: successful writes invalidate cached GET responses.
+	if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) &&
+		resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		s.responseCache.InvalidateURL(upstreamURL)
+	}
 
 	contentType := resp.Header.Get("Content-Type")
 	path := r.URL.Path
@@ -500,25 +516,45 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	etag := cache.ComputeETag(result.Body)
 
-	// Store in response cache for cacheable 200 responses.
-	if cacheable && resp.StatusCode == http.StatusOK {
+	// Store in response cache: only GET 200 responses.
+	// HEAD must not populate the cache (empty body would corrupt GETs).
+	// HTML with SRI processing is excluded (integrity hashes couple HTML to SRI cache lifetime).
+	if r.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
+		isHTML := strings.HasPrefix(strings.ToLower(contentType), "text/html")
+		sriActive := s.sriPipeline != nil && isHTML
 		varyFields := cache.ParseVary(resp.Header.Get("Vary"))
-		if len(varyFields) == 0 || varyFields[0] != "*" {
+		if !sriActive && (len(varyFields) == 0 || varyFields[0] != "*") {
 			dirs := cache.ParseDirectives(resp.Header.Get("Cache-Control"))
-			hasCreds := cache.HasCredentials(r)
-			cacheKey := cache.Key(upstreamURL, hasCreds, r, varyFields)
-			s.responseCache.Store(cacheKey, cache.Entry{
+			credHash := cache.CredentialHash(r)
+
+			storedHeaders := outHeaders.Clone()
+			storedHeaders.Del("Access-Control-Allow-Origin")
+
+			variantKey := cache.Key(upstreamURL, credHash, r, varyFields)
+
+			if len(varyFields) > 0 {
+				baseKey := cache.Key(upstreamURL, credHash, r, nil)
+				s.responseCache.Store(baseKey, cache.Entry{
+					VarySentinel: true,
+					VaryFields:   append([]string(nil), varyFields...),
+					Directives:   cache.Directives{MaxAge: dirs.MaxAge},
+					StoredAt:     time.Now(),
+				})
+			}
+
+			s.responseCache.Store(variantKey, cache.Entry{
 				Body:                 append([]byte(nil), result.Body...),
 				StatusCode:           resp.StatusCode,
-				Headers:              outHeaders.Clone(),
+				Headers:              storedHeaders,
 				ContentType:          contentType,
 				ETag:                 etag,
 				UpstreamETag:         resp.Header.Get("ETag"),
 				UpstreamLastModified: resp.Header.Get("Last-Modified"),
+				UpstreamACAO:         resp.Header.Get("Access-Control-Allow-Origin"),
 				VaryFields:           varyFields,
 				VaryValues:           cache.CaptureVaryValues(r, varyFields),
-				HasCredentials:       hasCreds,
 				Directives:           dirs,
+				InitialAge:           cache.ParseAge(resp.Header.Get("Age")),
 				StoredAt:             time.Now(),
 			})
 		}
@@ -547,8 +583,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	status = resp.StatusCode
 
-	// Conditional match against the just-computed downstream ETag.
-	if cacheable {
+	// Conditional match: only on successful (2xx) responses.
+	if cacheable && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		inm := r.Header.Get("If-None-Match")
 		if cache.MatchesETag(inm, etag) {
 			status = http.StatusNotModified
@@ -576,6 +612,14 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 	if !ok {
 		return false
 	}
+
+	if entry.ResponseHeaders != nil {
+		dirs := cache.ParseDirectives(entry.ResponseHeaders.Get("Cache-Control"))
+		if dirs.NoStore {
+			return false
+		}
+	}
+
 	if entry.FetchError != "" {
 		http.Error(w, "upstream integrity verification failed", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
@@ -623,11 +667,15 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 	return true
 }
 
-func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, headOnly bool) {
+func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, headOnly bool, requestOrigin string) {
 	for name, values := range entry.Headers {
 		for _, v := range values {
 			w.Header().Add(name, v)
 		}
+	}
+	if entry.UpstreamACAO != "" && s.origins != nil {
+		w.Header().Set("Access-Control-Allow-Origin",
+			s.origins.RewriteResponseOrigin(entry.UpstreamACAO, requestOrigin))
 	}
 	w.Header().Set("ETag", entry.ETag)
 	if entry.ContentType != "" {

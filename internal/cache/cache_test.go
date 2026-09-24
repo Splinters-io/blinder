@@ -177,13 +177,18 @@ func TestEntry_IsFresh(t *testing.T) {
 			false,
 		},
 		{
-			"must-revalidate always stale",
+			"must-revalidate fresh within max-age",
 			Entry{Directives: Directives{MustRevalidate: true, MaxAge: 3600}, StoredAt: time.Now()},
-			false,
+			true,
 		},
 		{
 			"unset max-age (-1) stale",
 			Entry{Directives: Directives{MaxAge: -1}, StoredAt: time.Now()},
+			false,
+		},
+		{
+			"upstream Age makes entry stale",
+			Entry{Directives: Directives{MaxAge: 60}, InitialAge: 120, StoredAt: time.Now()},
 			false,
 		},
 	}
@@ -196,11 +201,39 @@ func TestEntry_IsFresh(t *testing.T) {
 	}
 }
 
+func TestCredentialHash_DifferentValues(t *testing.T) {
+	alice := &http.Request{Header: http.Header{"Cookie": {"session=alice"}}}
+	bob := &http.Request{Header: http.Header{"Cookie": {"session=bob"}}}
+	anon := &http.Request{Header: http.Header{}}
+
+	ha := CredentialHash(alice)
+	hb := CredentialHash(bob)
+	hn := CredentialHash(anon)
+
+	if ha == hb {
+		t.Error("different cookies must produce different hashes")
+	}
+	if ha == hn {
+		t.Error("authenticated and anonymous must differ")
+	}
+	if hn != "" {
+		t.Errorf("anonymous hash should be empty, got %q", hn)
+	}
+}
+
 func TestKey_CredentialIsolation(t *testing.T) {
-	req := &http.Request{Header: http.Header{}}
-	k1 := Key("http://example.com/", false, req, nil)
-	k2 := Key("http://example.com/", true, req, nil)
+	alice := &http.Request{Header: http.Header{"Cookie": {"session=alice"}}}
+	bob := &http.Request{Header: http.Header{"Cookie": {"session=bob"}}}
+	anon := &http.Request{Header: http.Header{}}
+
+	k1 := Key("http://example.com/", CredentialHash(alice), alice, nil)
+	k2 := Key("http://example.com/", CredentialHash(bob), bob, nil)
+	k3 := Key("http://example.com/", CredentialHash(anon), anon, nil)
+
 	if k1 == k2 {
+		t.Error("different credentials must produce different keys")
+	}
+	if k1 == k3 {
 		t.Error("authed and anon keys must differ")
 	}
 }
@@ -209,8 +242,8 @@ func TestKey_VaryDimensions(t *testing.T) {
 	req1 := &http.Request{Header: http.Header{"Accept-Language": {"en"}}}
 	req2 := &http.Request{Header: http.Header{"Accept-Language": {"fr"}}}
 	vary := []string{"Accept-Language"}
-	k1 := Key("http://example.com/", false, req1, vary)
-	k2 := Key("http://example.com/", false, req2, vary)
+	k1 := Key("http://example.com/", "", req1, vary)
+	k2 := Key("http://example.com/", "", req2, vary)
 	if k1 == k2 {
 		t.Error("different Vary values must produce different keys")
 	}
@@ -254,6 +287,109 @@ func TestResponseCache_Touch(t *testing.T) {
 	got, _ = rc.Lookup("k")
 	if !got.IsFresh() {
 		t.Error("should be fresh after touch")
+	}
+}
+
+func TestResponseCache_LookupUpdatesLRU(t *testing.T) {
+	c := New(2)
+	entry := Entry{Body: []byte("body"), Directives: Directives{MaxAge: 3600}, StoredAt: time.Now()}
+	c.Store("A", entry)
+	c.Store("B", entry)
+	c.Lookup("A")
+	c.Store("C", entry)
+	if _, ok := c.Lookup("A"); !ok {
+		t.Fatal("recently read A was evicted; implementation is FIFO rather than LRU")
+	}
+	if _, ok := c.Lookup("B"); ok {
+		t.Fatal("least recently used B was retained")
+	}
+}
+
+func TestResponseCache_Revalidate(t *testing.T) {
+	rc := New(100)
+	rc.Store("k", Entry{
+		Body:       []byte("body"),
+		Headers:    http.Header{"Cache-Control": {"max-age=0"}},
+		Directives: Directives{MaxAge: 0},
+		StoredAt:   time.Now().Add(-time.Second),
+	})
+
+	got, _ := rc.Lookup("k")
+	if got.IsFresh() {
+		t.Fatal("should be stale before revalidation")
+	}
+
+	revalHeaders := make(http.Header)
+	revalHeaders.Set("Cache-Control", "max-age=3600")
+	revalHeaders.Set("ETag", `"upstream-v2"`)
+	rc.Revalidate("k", revalHeaders)
+
+	got, _ = rc.Lookup("k")
+	if !got.IsFresh() {
+		t.Error("should be fresh after revalidation")
+	}
+	if got.Directives.MaxAge != 3600 {
+		t.Errorf("max-age should be 3600, got %d", got.Directives.MaxAge)
+	}
+	if got.UpstreamETag != `"upstream-v2"` {
+		t.Errorf("upstream ETag should be updated, got %s", got.UpstreamETag)
+	}
+}
+
+func TestResponseCache_InvalidateURL(t *testing.T) {
+	rc := New(100)
+	entry := Entry{Body: []byte("body"), Directives: Directives{MaxAge: 3600}, StoredAt: time.Now()}
+	rc.Store("http://example.com/resource\x00", entry)
+	rc.Store("http://example.com/resource\x00abc123", entry)
+	rc.Store("http://example.com/other\x00", entry)
+
+	rc.InvalidateURL("http://example.com/resource")
+
+	if rc.Len() != 1 {
+		t.Errorf("expected 1 entry after invalidation, got %d", rc.Len())
+	}
+	if _, ok := rc.Lookup("http://example.com/other\x00"); !ok {
+		t.Error("unrelated entry should survive invalidation")
+	}
+}
+
+func TestParseAge(t *testing.T) {
+	tests := []struct {
+		header string
+		want   int
+	}{
+		{"0", 0},
+		{"120", 120},
+		{" 30 ", 30},
+		{"", 0},
+		{"abc", 0},
+		{"-5", 0},
+	}
+	for _, tt := range tests {
+		got := ParseAge(tt.header)
+		if got != tt.want {
+			t.Errorf("ParseAge(%q) = %d, want %d", tt.header, got, tt.want)
+		}
+	}
+}
+
+func TestVarySentinel_Lookup(t *testing.T) {
+	rc := New(100)
+	rc.Store("base\x00", Entry{
+		VarySentinel: true,
+		VaryFields:   []string{"Accept-Language"},
+		Directives:   Directives{MaxAge: 3600},
+		StoredAt:     time.Now(),
+	})
+	got, ok := rc.Lookup("base\x00")
+	if !ok {
+		t.Fatal("sentinel should be found")
+	}
+	if !got.VarySentinel {
+		t.Fatal("should be a sentinel")
+	}
+	if len(got.VaryFields) != 1 || got.VaryFields[0] != "Accept-Language" {
+		t.Errorf("sentinel should carry vary fields, got %v", got.VaryFields)
 	}
 }
 

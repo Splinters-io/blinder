@@ -10,29 +10,27 @@ import (
 	"time"
 )
 
-// Entry stores a rewritten response with separate upstream and downstream validators.
 type Entry struct {
 	Body        []byte
 	StatusCode  int
 	Headers     http.Header
 	ContentType string
 
-	// Downstream validator: computed from the rewritten Body bytes.
 	ETag string
 
-	// Upstream validators: used for conditional revalidation with origin.
 	UpstreamETag         string
 	UpstreamLastModified string
+	UpstreamACAO         string
 
-	VaryFields []string
-	VaryValues map[string]string
+	VaryFields   []string
+	VaryValues   map[string]string
+	VarySentinel bool
 
-	HasCredentials bool
-	Directives     Directives
-	StoredAt       time.Time
+	Directives Directives
+	InitialAge int
+	StoredAt   time.Time
 }
 
-// Directives holds parsed Cache-Control values.
 type Directives struct {
 	NoStore        bool
 	NoCache        bool
@@ -41,9 +39,8 @@ type Directives struct {
 	MaxAge         int // seconds; -1 means unset
 }
 
-// ResponseCache is a thread-safe LRU cache for rewritten responses.
 type ResponseCache struct {
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	entries  map[string]*Entry
 	order    []string
 	maxItems int
@@ -59,23 +56,29 @@ func New(maxItems int) *ResponseCache {
 	}
 }
 
-// ComputeETag returns a strong ETag for the given response body.
-// The "bl-" prefix distinguishes downstream ETags from upstream ones.
 func ComputeETag(body []byte) string {
 	h := sha256.Sum256(body)
 	return `"bl-` + hex.EncodeToString(h[:8]) + `"`
 }
 
-// Key computes the cache lookup key from URL, credential state and Vary dimensions.
-func Key(rawURL string, hasCredentials bool, req *http.Request, varyFields []string) string {
+func CredentialHash(req *http.Request) string {
+	cookie := req.Header.Get("Cookie")
+	auth := req.Header.Get("Authorization")
+	if cookie == "" && auth == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(cookie))
+	h.Write([]byte{0})
+	h.Write([]byte(auth))
+	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+func Key(rawURL string, credHash string, req *http.Request, varyFields []string) string {
 	var b strings.Builder
 	b.WriteString(rawURL)
 	b.WriteByte('\x00')
-	if hasCredentials {
-		b.WriteString("authed")
-	} else {
-		b.WriteString("anon")
-	}
+	b.WriteString(credHash)
 	for _, field := range varyFields {
 		b.WriteByte('\x00')
 		b.WriteString(strings.ToLower(field))
@@ -87,19 +90,18 @@ func Key(rawURL string, hasCredentials bool, req *http.Request, varyFields []str
 	return b.String()
 }
 
-// Lookup returns a copy of the cached entry for the given key, if present.
 func (c *ResponseCache) Lookup(key string) (Entry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	e, ok := c.entries[key]
 	if !ok {
 		return Entry{}, false
 	}
+	c.promote(key)
 	cp := *e
 	return cp, true
 }
 
-// Store adds or replaces a cache entry. NoStore entries are silently dropped.
 func (c *ResponseCache) Store(key string, entry Entry) {
 	if entry.Directives.NoStore {
 		return
@@ -114,7 +116,6 @@ func (c *ResponseCache) Store(key string, entry Entry) {
 	c.evict()
 }
 
-// Touch refreshes the StoredAt timestamp on an existing entry.
 func (c *ResponseCache) Touch(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -125,11 +126,66 @@ func (c *ResponseCache) Touch(key string) {
 	}
 }
 
-// Len returns the number of cached entries.
+func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return
+	}
+	updated := *e
+	updated.Headers = e.Headers.Clone()
+	updated.StoredAt = time.Now()
+
+	if cc := respHeaders.Get("Cache-Control"); cc != "" {
+		updated.Directives = ParseDirectives(cc)
+		updated.Headers.Set("Cache-Control", cc)
+	}
+	if etag := respHeaders.Get("ETag"); etag != "" {
+		updated.UpstreamETag = etag
+	}
+	if lm := respHeaders.Get("Last-Modified"); lm != "" {
+		updated.UpstreamLastModified = lm
+	}
+	if age := respHeaders.Get("Age"); age != "" {
+		updated.InitialAge = ParseAge(age)
+	} else {
+		updated.InitialAge = 0
+	}
+
+	c.entries[key] = &updated
+	c.promote(key)
+}
+
+func (c *ResponseCache) InvalidateURL(rawURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefix := rawURL + "\x00"
+	var remaining []string
+	for _, key := range c.order {
+		if key == rawURL || strings.HasPrefix(key, prefix) {
+			delete(c.entries, key)
+		} else {
+			remaining = append(remaining, key)
+		}
+	}
+	c.order = remaining
+}
+
 func (c *ResponseCache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return len(c.entries)
+}
+
+func (c *ResponseCache) promote(key string) {
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, key)
+			return
+		}
+	}
 }
 
 func (c *ResponseCache) evict() {
@@ -140,18 +196,17 @@ func (c *ResponseCache) evict() {
 	}
 }
 
-// IsFresh reports whether the entry is still usable without revalidation.
 func (e *Entry) IsFresh() bool {
-	if e.Directives.NoCache || e.Directives.MustRevalidate {
+	if e.Directives.NoCache {
 		return false
 	}
 	if e.Directives.MaxAge < 0 {
 		return false
 	}
-	return time.Since(e.StoredAt) < time.Duration(e.Directives.MaxAge)*time.Second
+	currentAge := e.InitialAge + int(time.Since(e.StoredAt).Seconds())
+	return currentAge < e.Directives.MaxAge
 }
 
-// MatchesETag reports whether the given If-None-Match value matches this entry.
 func MatchesETag(ifNoneMatch, etag string) bool {
 	if ifNoneMatch == "" || etag == "" {
 		return false
@@ -182,7 +237,6 @@ func weakEqual(a, b string) bool {
 	return strings.TrimPrefix(a, "W/") == strings.TrimPrefix(b, "W/")
 }
 
-// ParseDirectives extracts Cache-Control directives from the header value.
 func ParseDirectives(header string) Directives {
 	d := Directives{MaxAge: -1}
 	for _, part := range strings.Split(header, ",") {
@@ -205,8 +259,6 @@ func ParseDirectives(header string) Directives {
 	return d
 }
 
-// ParseVary extracts header field names from a Vary header value.
-// Returns ["*"] for Vary: * (uncacheable).
 func ParseVary(header string) []string {
 	if header == "" {
 		return nil
@@ -224,7 +276,6 @@ func ParseVary(header string) []string {
 	return fields
 }
 
-// CaptureVaryValues records request header values for the given Vary fields.
 func CaptureVaryValues(req *http.Request, fields []string) map[string]string {
 	if len(fields) == 0 {
 		return nil
@@ -236,7 +287,14 @@ func CaptureVaryValues(req *http.Request, fields []string) map[string]string {
 	return vals
 }
 
-// HasCredentials reports whether the request carries authentication material.
 func HasCredentials(req *http.Request) bool {
 	return req.Header.Get("Cookie") != "" || req.Header.Get("Authorization") != ""
+}
+
+func ParseAge(header string) int {
+	v, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
 }
