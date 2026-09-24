@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -35,6 +36,8 @@ type Cache struct {
 	entries map[string]*CacheEntry
 	order   []string
 	maxSize int
+
+	digestIndex map[string][32]byte
 }
 
 func NewCache(maxSize int) *Cache {
@@ -42,8 +45,9 @@ func NewCache(maxSize int) *Cache {
 		maxSize = 256
 	}
 	return &Cache{
-		entries: make(map[string]*CacheEntry),
-		maxSize: maxSize,
+		entries:     make(map[string]*CacheEntry),
+		maxSize:     maxSize,
+		digestIndex: make(map[string][32]byte),
 	}
 }
 
@@ -80,4 +84,43 @@ func (c *Cache) Clear() {
 	defer c.mu.Unlock()
 	c.entries = make(map[string]*CacheEntry)
 	c.order = nil
+	c.digestIndex = make(map[string][32]byte)
+}
+
+func (c *Cache) InvalidateURL(rawURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefix := rawURL + "\x00"
+	var remaining []string
+	for _, key := range c.order {
+		if key == rawURL || strings.HasPrefix(key, prefix) {
+			delete(c.entries, key)
+			delete(c.digestIndex, key)
+		} else {
+			remaining = append(remaining, key)
+		}
+	}
+	c.order = remaining
+	for key := range c.digestIndex {
+		if key == rawURL || strings.HasPrefix(key, prefix) {
+			delete(c.digestIndex, key)
+		}
+	}
+}
+
+func (c *Cache) IndexDigest(key string, rawBody []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.digestIndex[key] = sha256.Sum256(rawBody)
+}
+
+func (c *Cache) CheckBodyIntegrity(key string, rawBody []byte) bool {
+	c.mu.RLock()
+	stored, ok := c.digestIndex[key]
+	c.mu.RUnlock()
+	if !ok {
+		return true
+	}
+	actual := sha256.Sum256(rawBody)
+	return stored == actual
 }

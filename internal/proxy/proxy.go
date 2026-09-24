@@ -410,8 +410,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
 
-	upstreamReq.Header.Del("If-None-Match")
-	upstreamReq.Header.Del("If-Modified-Since")
+	if cacheable {
+		upstreamReq.Header.Del("If-None-Match")
+		upstreamReq.Header.Del("If-Modified-Since")
+	}
 
 	if staleEntry != nil {
 		if staleEntry.UpstreamETag != "" {
@@ -449,7 +451,29 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			s.harWriter.Record(upstreamReq, reqBodyBuf, resp, nil, elapsed)
 		}
 		s.responseCache.Revalidate(staleCacheKey, resp.Header)
-		refreshed, _ := s.responseCache.Lookup(staleCacheKey)
+		refreshed, ok := s.responseCache.Lookup(staleCacheKey)
+		if !ok {
+			s.writeCachedResponse(w, staleEntry, r.Method == http.MethodHead, r.Header.Get("Origin"))
+			status = staleEntry.StatusCode
+			return
+		}
+
+		newVary := cache.ParseVary(resp.Header.Get("Vary"))
+		if len(newVary) > 0 && len(staleEntry.VaryFields) == 0 {
+			credHash := cache.CredentialHash(r)
+			variantKey := cache.Key(upstreamURL, credHash, r, newVary)
+			s.responseCache.Store(staleCacheKey, cache.Entry{
+				VarySentinel: true,
+				VaryFields:   append([]string(nil), newVary...),
+				Directives:   cache.Directives{MaxAge: refreshed.Directives.MaxAge},
+				StoredAt:     time.Now(),
+			})
+			variantEntry := refreshed
+			variantEntry.VaryFields = newVary
+			variantEntry.VaryValues = cache.CaptureVaryValues(r, newVary)
+			s.responseCache.Store(variantKey, variantEntry)
+		}
+
 		inm := r.Header.Get("If-None-Match")
 		if cache.MatchesETag(inm, refreshed.ETag) {
 			w.Header().Set("ETag", refreshed.ETag)
@@ -480,10 +504,27 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	s.stats.Bytes.Add(int64(len(body)))
 
+	if r.Method == http.MethodGet && s.sriPipeline != nil {
+		sriKey := sri.CacheKey(upstreamURL, r)
+		integrityOK := s.sriCache.CheckBodyIntegrity(sriKey, body)
+		if integrityOK {
+			if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
+				integrityOK = s.sriCache.CheckBodyIntegrity(sri.CacheKey(orig, r), body)
+			}
+		}
+		if !integrityOK {
+			status = http.StatusBadGateway
+			http.Error(w, "resource integrity changed", http.StatusBadGateway)
+			s.stats.Errors.Add(1)
+			return
+		}
+	}
+
 	// Mutation invalidation: successful writes invalidate cached GET responses.
-	if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) &&
+	if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch) &&
 		resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		s.responseCache.InvalidateURL(upstreamURL)
+		s.sriCache.InvalidateURL(upstreamURL)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -520,11 +561,14 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// HEAD must not populate the cache (empty body would corrupt GETs).
 	// HTML with SRI processing is excluded (integrity hashes couple HTML to SRI cache lifetime).
 	if r.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
+		dirs := cache.ParseDirectives(resp.Header.Get("Cache-Control"))
+		if dirs.NoStore {
+			s.responseCache.InvalidateURL(upstreamURL)
+		}
 		isHTML := strings.HasPrefix(strings.ToLower(contentType), "text/html")
 		sriActive := s.sriPipeline != nil && isHTML
 		varyFields := cache.ParseVary(resp.Header.Get("Vary"))
-		if !sriActive && (len(varyFields) == 0 || varyFields[0] != "*") {
-			dirs := cache.ParseDirectives(resp.Header.Get("Cache-Control"))
+		if !sriActive && (len(varyFields) == 0 || varyFields[0] != "*") && !dirs.NoStore && !dirs.Private {
 			credHash := cache.CredentialHash(r)
 
 			storedHeaders := outHeaders.Clone()
@@ -607,10 +651,21 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstreamURL string, gate *scrub.Gate) bool {
+	reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
+	if reqCC.NoCache {
+		return false
+	}
+
 	cacheKey := sri.CacheKey(upstreamURL, r)
 	entry, ok := s.sriCache.Get(cacheKey)
 	if !ok {
-		return false
+		if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
+			cacheKey = sri.CacheKey(orig, r)
+			entry, ok = s.sriCache.Get(cacheKey)
+		}
+		if !ok {
+			return false
+		}
 	}
 
 	if entry.ResponseHeaders != nil {
@@ -716,6 +771,15 @@ func (s *Server) readResponseBody(resp *http.Response) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+func (s *Server) unaliasURL(upstreamURL string) string {
+	for alias, original := range s.gate.Aliases() {
+		if strings.Contains(upstreamURL, alias) {
+			return strings.Replace(upstreamURL, alias, original, 1)
+		}
+	}
+	return upstreamURL
 }
 
 func extractSubdomains(host string) []string {

@@ -102,7 +102,11 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		if cached.FetchError != "" {
 			return &ProcessResult{UpstreamError: cached.FetchError}
 		}
-		return p.verifyAgainstCached(cached, entries, integrityAttr, resourceURL)
+		noStoreCached := cached.ResponseHeaders != nil &&
+			strings.Contains(strings.ToLower(cached.ResponseHeaders.Get("Cache-Control")), "no-store")
+		if !noStoreCached {
+			return p.verifyAgainstCached(cached, entries, integrityAttr, resourceURL)
+		}
 	}
 
 	sameOrig := isSameOrigin(parsedURL, pageOrigin)
@@ -116,6 +120,7 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		return &ProcessResult{UpstreamError: fetchErr.Error()}
 	}
 
+	p.cache.IndexDigest(cacheKey, body)
 	digests := computeAllDigests(body)
 
 	if respCT == "" {

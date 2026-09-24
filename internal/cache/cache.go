@@ -103,7 +103,7 @@ func (c *ResponseCache) Lookup(key string) (Entry, bool) {
 }
 
 func (c *ResponseCache) Store(key string, entry Entry) {
-	if entry.Directives.NoStore {
+	if entry.Directives.NoStore || entry.Directives.Private {
 		return
 	}
 	c.mu.Lock()
@@ -126,6 +126,21 @@ func (c *ResponseCache) Touch(key string) {
 	}
 }
 
+func (c *ResponseCache) Remove(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.entries[key]; !ok {
+		return
+	}
+	delete(c.entries, key)
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			return
+		}
+	}
+}
+
 func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -133,6 +148,21 @@ func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 	if !ok {
 		return
 	}
+
+	if cc := respHeaders.Get("Cache-Control"); cc != "" {
+		dirs := ParseDirectives(cc)
+		if dirs.NoStore {
+			delete(c.entries, key)
+			for i, k := range c.order {
+				if k == key {
+					c.order = append(c.order[:i], c.order[i+1:]...)
+					break
+				}
+			}
+			return
+		}
+	}
+
 	updated := *e
 	updated.Headers = e.Headers.Clone()
 	updated.StoredAt = time.Now()
@@ -151,6 +181,13 @@ func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 		updated.InitialAge = ParseAge(age)
 	} else {
 		updated.InitialAge = 0
+	}
+	if vary := respHeaders.Get("Vary"); vary != "" {
+		updated.VaryFields = ParseVary(vary)
+		updated.Headers.Set("Vary", vary)
+	}
+	if csp := respHeaders.Get("Content-Security-Policy"); csp != "" {
+		updated.Headers.Set("Content-Security-Policy", csp)
 	}
 
 	c.entries[key] = &updated
