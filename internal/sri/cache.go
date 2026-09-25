@@ -16,6 +16,7 @@ type CacheEntry struct {
 	BytesModified   bool
 	ResponseHeaders http.Header
 	OriginalDigests map[string][]byte
+	BodyVersion     string
 }
 
 func CacheKey(resourceURL string, req *http.Request) string {

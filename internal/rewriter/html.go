@@ -273,11 +273,17 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 		out.WriteString(`="`)
 		val := scrubAttrValue(tagName, a.key, a.val, relVal, gate, origins)
 		if sri.bodyVersion != "" && ((tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href")) {
+			frag := ""
+			if idx := strings.IndexByte(val, '#'); idx >= 0 {
+				frag = val[idx:]
+				val = val[:idx]
+			}
 			if strings.Contains(val, "?") {
 				val += "&_bv=" + sri.bodyVersion
 			} else {
 				val += "?_bv=" + sri.bodyVersion
 			}
+			val += frag
 		}
 		out.WriteString(html.EscapeString(val))
 		out.WriteByte('"')

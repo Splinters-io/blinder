@@ -99,7 +99,11 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		return &ProcessResult{UpstreamError: "resource outside configured origins"}
 	}
 
-	cacheKey := CacheKey(resourceURL, baseReq)
+	canonicalURL := resourceURL
+	if idx := strings.IndexByte(canonicalURL, '#'); idx >= 0 {
+		canonicalURL = canonicalURL[:idx]
+	}
+	cacheKey := CacheKey(canonicalURL, baseReq)
 
 	if cached, ok := p.cache.Get(cacheKey); ok {
 		if cached.FetchError != "" {
@@ -123,17 +127,9 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		return &ProcessResult{UpstreamError: fetchErr.Error()}
 	}
 
-	noStore := respHeaders != nil &&
-		strings.Contains(strings.ToLower(respHeaders.Get("Cache-Control")), "no-store")
-
-	var bodyVersion string
-	if noStore {
-		h := sha256.Sum256(body)
-		bodyVersion = hex.EncodeToString(h[:8])
-		p.cache.IndexDigest(cacheKey+"\x01"+bodyVersion, body)
-	} else {
-		p.cache.IndexDigest(cacheKey, body)
-	}
+	h := sha256.Sum256(body)
+	bodyVersion := hex.EncodeToString(h[:8])
+	p.cache.IndexDigest(cacheKey+"\x01"+bodyVersion, body)
 
 	digests := computeAllDigests(body)
 
@@ -154,6 +150,7 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		BytesModified:   modified,
 		ResponseHeaders: respHeaders,
 		OriginalDigests: digests,
+		BodyVersion:     bodyVersion,
 	}
 	p.cache.Put(cacheKey, cached)
 
@@ -177,6 +174,7 @@ func (p *Pipeline) verifyAgainstCached(cached *CacheEntry, entries []HashEntry, 
 		UpstreamValid:   true,
 		ReplacementHash: cached.ReplacementHash,
 		BytesModified:   cached.BytesModified,
+		BodyVersion:     cached.BodyVersion,
 	}
 }
 

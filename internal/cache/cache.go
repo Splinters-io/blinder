@@ -182,6 +182,9 @@ func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 	} else {
 		updated.InitialAge = 0
 	}
+	if acao := respHeaders.Get("Access-Control-Allow-Origin"); acao != "" {
+		updated.UpstreamACAO = acao
+	}
 	if vary := respHeaders.Get("Vary"); vary != "" {
 		updated.VaryFields = ParseVary(vary)
 		updated.Headers.Set("Vary", vary)

@@ -36,6 +36,8 @@ var revalidationPolicyHeaders = []string{
 	"Referrer-Policy",
 	"Permissions-Policy",
 	"Strict-Transport-Security",
+	"Cross-Origin-Resource-Policy",
+	"X-Frame-Options",
 }
 
 type Stats struct {
@@ -377,7 +379,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
-		if served := s.tryServeSRICache(w, r, upstreamURL, gate); served {
+		if served := s.tryServeSRICache(w, r, upstreamURL, sriBodyVersion, gate); served {
 			return
 		}
 	}
@@ -386,7 +388,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	cacheable := r.Method == http.MethodGet || r.Method == http.MethodHead
 	var staleCacheKey string
 	var staleEntry *cache.Entry
-	if cacheable {
+	if cacheable && sriBodyVersion == "" {
 		reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
 		if !reqCC.NoCache {
 			credHash := cache.CredentialHash(r)
@@ -403,6 +405,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					if cached.IsFresh() {
 						inm := r.Header.Get("If-None-Match")
 						if cache.MatchesETag(inm, cached.ETag) {
+							for _, name := range revalidationPolicyHeaders {
+								for _, v := range cached.Headers.Values(name) {
+									w.Header().Add(name, v)
+								}
+							}
 							w.Header().Set("ETag", cached.ETag)
 							status = http.StatusNotModified
 							w.WriteHeader(http.StatusNotModified)
@@ -497,6 +504,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			served := *staleEntry
 			served.Headers = staleEntry.Headers.Clone()
 			mergePolicyHeaders(served.Headers, scrubbedRespHeaders)
+			if acao := resp.Header.Get("Access-Control-Allow-Origin"); acao != "" {
+				served.UpstreamACAO = acao
+			}
 			s.writeCachedResponse(w, &served, r.Method == http.MethodHead, r.Header.Get("Origin"))
 			status = served.StatusCode
 			return
@@ -716,7 +726,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstreamURL string, gate *scrub.Gate) bool {
+func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstreamURL, sriBodyVersion string, gate *scrub.Gate) bool {
 	reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
 	if reqCC.NoCache {
 		return false
@@ -732,6 +742,10 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 		if !ok {
 			return false
 		}
+	}
+
+	if sriBodyVersion != "" && entry.BodyVersion != sriBodyVersion {
+		return false
 	}
 
 	if entry.ResponseHeaders != nil {
@@ -861,16 +875,33 @@ func stripBodyVersion(rawURL string) (string, string) {
 	var version string
 	if end < 0 {
 		version = rawURL[idx+4:]
-		if rawURL[sepIdx] == '?' {
-			rawURL = rawURL[:sepIdx]
-		} else {
-			rawURL = rawURL[:sepIdx]
-		}
 	} else {
 		version = rawURL[idx+4 : idx+end]
+	}
+	if !isProxyBodyVersion(version) {
+		return rawURL, ""
+	}
+	if end < 0 {
+		rawURL = rawURL[:sepIdx]
+	} else if rawURL[sepIdx] == '?' {
+		rawURL = rawURL[:sepIdx+1] + rawURL[idx+end+1:]
+	} else {
 		rawURL = rawURL[:sepIdx] + rawURL[idx+end:]
 	}
 	return rawURL, version
+}
+
+func isProxyBodyVersion(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func varyEqual(a, b []string) bool {
