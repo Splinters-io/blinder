@@ -359,6 +359,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := upstream.Scheme + "://" + upstream.Host + r.URL.RequestURI()
+	if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
+		upstreamURL = orig
+	}
 
 	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
@@ -409,6 +412,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.URL.Scheme = upstream.Scheme
 	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
+	if parsed, err := url.Parse(upstreamURL); err == nil {
+		upstreamReq.URL.Path = parsed.Path
+		upstreamReq.URL.RawQuery = parsed.RawQuery
+	}
 
 	if cacheable {
 		upstreamReq.Header.Del("If-None-Match")
@@ -450,28 +457,59 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if s.harWriter != nil {
 			s.harWriter.Record(upstreamReq, reqBodyBuf, resp, nil, elapsed)
 		}
+
+		scrubbedRespHeaders := rewriter.RewriteResponseHeaders(
+			resp.Header, gate, s.cfg.AliasDomain, s.cfg.TargetURL.Host,
+			rewriter.ResponseHeaderOpts{
+				OriginMapper:  s.origins,
+				RequestOrigin: r.Header.Get("Origin"),
+			},
+		)
+
 		s.responseCache.Revalidate(staleCacheKey, resp.Header)
 		refreshed, ok := s.responseCache.Lookup(staleCacheKey)
 		if !ok {
-			s.writeCachedResponse(w, staleEntry, r.Method == http.MethodHead, r.Header.Get("Origin"))
-			status = staleEntry.StatusCode
+			served := *staleEntry
+			served.Headers = staleEntry.Headers.Clone()
+			if cc := scrubbedRespHeaders.Get("Cache-Control"); cc != "" {
+				served.Headers.Set("Cache-Control", cc)
+			}
+			if csp := scrubbedRespHeaders.Get("Content-Security-Policy"); csp != "" {
+				served.Headers.Set("Content-Security-Policy", csp)
+			}
+			s.writeCachedResponse(w, &served, r.Method == http.MethodHead, r.Header.Get("Origin"))
+			status = served.StatusCode
 			return
 		}
 
+		if csp := scrubbedRespHeaders.Get("Content-Security-Policy"); csp != "" {
+			refreshed.Headers = refreshed.Headers.Clone()
+			refreshed.Headers.Set("Content-Security-Policy", csp)
+			s.responseCache.UpdateHeaders(staleCacheKey, "Content-Security-Policy", csp)
+		}
+
 		newVary := cache.ParseVary(resp.Header.Get("Vary"))
-		if len(newVary) > 0 && len(staleEntry.VaryFields) == 0 {
+		if len(newVary) > 0 && (newVary[0] == "*" || !varyEqual(newVary, staleEntry.VaryFields)) {
 			credHash := cache.CredentialHash(r)
-			variantKey := cache.Key(upstreamURL, credHash, r, newVary)
-			s.responseCache.Store(staleCacheKey, cache.Entry{
-				VarySentinel: true,
-				VaryFields:   append([]string(nil), newVary...),
-				Directives:   cache.Directives{MaxAge: refreshed.Directives.MaxAge},
-				StoredAt:     time.Now(),
-			})
-			variantEntry := refreshed
-			variantEntry.VaryFields = newVary
-			variantEntry.VaryValues = cache.CaptureVaryValues(r, newVary)
-			s.responseCache.Store(variantKey, variantEntry)
+			if staleEntry.VaryFields != nil {
+				oldVariantKey := cache.Key(upstreamURL, credHash, r, staleEntry.VaryFields)
+				s.responseCache.Remove(oldVariantKey)
+			}
+			if newVary[0] == "*" {
+				s.responseCache.Remove(staleCacheKey)
+			} else {
+				variantKey := cache.Key(upstreamURL, credHash, r, newVary)
+				s.responseCache.Store(staleCacheKey, cache.Entry{
+					VarySentinel: true,
+					VaryFields:   append([]string(nil), newVary...),
+					Directives:   cache.Directives{MaxAge: refreshed.Directives.MaxAge},
+					StoredAt:     time.Now(),
+				})
+				variantEntry := refreshed
+				variantEntry.VaryFields = newVary
+				variantEntry.VaryValues = cache.CaptureVaryValues(r, newVary)
+				s.responseCache.Store(variantKey, variantEntry)
+			}
 		}
 
 		inm := r.Header.Get("If-None-Match")
@@ -562,7 +600,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// HTML with SRI processing is excluded (integrity hashes couple HTML to SRI cache lifetime).
 	if r.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
 		dirs := cache.ParseDirectives(resp.Header.Get("Cache-Control"))
-		if dirs.NoStore {
+		if dirs.NoStore || dirs.Private {
 			s.responseCache.InvalidateURL(upstreamURL)
 		}
 		isHTML := strings.HasPrefix(strings.ToLower(contentType), "text/html")
@@ -780,6 +818,18 @@ func (s *Server) unaliasURL(upstreamURL string) string {
 		}
 	}
 	return upstreamURL
+}
+
+func varyEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func extractSubdomains(host string) []string {

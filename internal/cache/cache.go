@@ -151,7 +151,7 @@ func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 
 	if cc := respHeaders.Get("Cache-Control"); cc != "" {
 		dirs := ParseDirectives(cc)
-		if dirs.NoStore {
+		if dirs.NoStore || dirs.Private {
 			delete(c.entries, key)
 			for i, k := range c.order {
 				if k == key {
@@ -186,12 +186,21 @@ func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 		updated.VaryFields = ParseVary(vary)
 		updated.Headers.Set("Vary", vary)
 	}
-	if csp := respHeaders.Get("Content-Security-Policy"); csp != "" {
-		updated.Headers.Set("Content-Security-Policy", csp)
-	}
-
 	c.entries[key] = &updated
 	c.promote(key)
+}
+
+func (c *ResponseCache) UpdateHeaders(key, name, value string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return
+	}
+	updated := *e
+	updated.Headers = e.Headers.Clone()
+	updated.Headers.Set(name, value)
+	c.entries[key] = &updated
 }
 
 func (c *ResponseCache) InvalidateURL(rawURL string) {
