@@ -11,33 +11,38 @@
   <a href="#quick-start">Quick start</a> &nbsp; / &nbsp;
   <a href="#certificates">Certificates</a> &nbsp; / &nbsp;
   <a href="#tor">Tor</a> &nbsp; / &nbsp;
+  <a href="#captcha">CAPTCHA</a> &nbsp; / &nbsp;
   <a href="#evidence">Evidence</a> &nbsp; / &nbsp;
   <a href="#development">Development</a>
 </p>
 
 ---
 
-Blinder lets you inspect an application's technical behavior while reducing the identity information exposed to your scanner or LLM workflow. It rewrites configured domains, identity tokens and selected response content, and keeps original HTTP evidence on the operator's side.
+Blinder sits between your scanner or browser and a live target. It rewrites configured identities, domains and selected response content so downstream consumers see the technical surface without the operator's identity. Original HTTP evidence stays on the operator's side.
 
 ```text
  Browser / scanner ── HTTPS ── Blinder ── direct or Tor ── Target
                                 │
+                                ├── Scrubbed content → downstream
                                 └── Original evidence → operator
 ```
 
-| | What you get |
+| | |
 | :--- | :--- |
-| **Content scrubbing** | Configured identities and domain references rewritten across supported HTTP content and WebSocket text. |
-| **Session handling** | Reversible cookie names and recognized browser Origin/Referer mapping for HTTP and WebSocket requests. |
-| **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5, with remote hostname resolution. |
-| **Local HTTPS** | Persistent certificates, OS-aware setup advice and explicit macOS user trust. |
-| **Evidence** | Original HTTP HAR, request manifest, domain mapping and scrub report. |
+| **Content scrubbing** | Identity tokens, domain references and cookie values rewritten across HTTP bodies, headers and WebSocket text. HTML tokenizer handles entity-encoded and attribute-embedded identities. |
+| **Resource integrity** | SRI attributes stripped on proxied resources (where content will be scrubbed), preserved on external CDN references. Version-tagged body references survive cache revalidation. |
+| **Response cache** | Separate upstream/downstream cache validators. 304 revalidation merges security-policy headers. Vary-aware eviction. |
+| **Session handling** | Reversible cookie names with per-value scrubbing. Multi-origin routing via `--extra-origin` with deterministic alias hostnames, Host-header routing and CORS origin translation. |
+| **CAPTCHA relay** | Operator-facing challenge queue with browser isolation. Provider resources routed through the configured transport. Challenge pages sandboxed without same-origin access. |
+| **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
+| **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
+| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. |
 
-**Development release.** The tested workflow is single-target scanning. Full multi-origin browsing and complete anonymization remain open engineering work; review [supported behavior and delivery gates](docs/capabilities.md) when choosing a workflow.
+**Development release.** The tested workflow is single-target and multi-origin scanning. Full browser containment verification and complete anonymization of arbitrary input remain open; review [supported behavior and delivery gates](docs/capabilities.md) before connecting a sensitive target.
 
 ## Quick start
 
-Build with **Go 1.26+**, then run the standalone binary. Use targets you are authorized to test.
+Build with **Go 1.26+**. The binary has no external runtime dependency.
 
 ```sh
 git clone https://github.com/Splinters-io/blinder.git
@@ -56,9 +61,7 @@ capture_dir=$(mktemp -d)
   --output "$capture_dir/output"
 ```
 
-Point your browser or scanner at **`https://127.0.0.1:8099`** as its target URL. Blinder is a reverse proxy. Add multiple identity tokens with repeated `--identity` flags.
-
-Stop with **Ctrl-C** to save the session evidence. Startup and evidence-write failures return a nonzero exit status.
+Point your browser or scanner at **`https://127.0.0.1:8099`**. Add multiple identity tokens with repeated `--identity` flags. Stop with **Ctrl-C** to save the session evidence.
 
 ## Certificates
 
@@ -71,9 +74,9 @@ Preflight generates or reuses the local certificate and prints its public path, 
 
 Use `--cert-dir DIR` for a chosen private store. Certificates persist across restarts; `--ephemeral-cert` selects a temporary identity. Preflight exit **2** means platform trust needs setup; a client using its own certificate file can still connect successfully.
 
-The endpoint store also holds a private `version-signing.key`, independent of certificate renewal. Keep it across restarts so expired resource references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
+The endpoint store also holds a private `version-signing.key` for resource-reference ownership, independent of certificate renewal. Keep it across restarts so expired references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
 
-[Certificate setup, OS guidance and renewal →](docs/testing.md#local-certificate-trust)
+[Certificate setup, OS guidance and renewal](docs/testing.md#local-certificate-trust)
 
 ## Tor
 
@@ -87,7 +90,22 @@ Start your Tor service and wait for bootstrap, then select its SOCKS endpoint:
 
 Clearnet targets can use the same route. Target TLS verification stays enabled. Tor failures return an error without falling back to a direct target connection.
 
-[Tor setup and live acceptance checklist →](docs/testing.md#live-tor-uat)
+[Tor setup and live acceptance checklist](docs/testing.md#live-tor-uat)
+
+## CAPTCHA
+
+When the target returns a CAPTCHA challenge, Blinder queues it for the operator. Configure providers via `--captcha-config`:
+
+```yaml
+version: 1
+captcha:
+  providers:
+    - hcaptcha
+```
+
+The operator authenticates at `/__blinder/captcha/` using the bearer token printed at startup. Challenge pages are rendered in a sandboxed iframe (`allow-scripts allow-forms`, no `allow-same-origin`) so the provider page cannot read the operator's session. Anti-framing headers (`X-Frame-Options: DENY`, `frame-ancestors 'none'`) prevent proxied pages from embedding operator endpoints.
+
+Provider resources with `tor_policy: route-with-target` (the default) are relayed through the configured SOCKS transport via `/__blinder/captcha/res?u=`. Providers with `tor_policy: direct` bypass Tor. Custom providers are supported with explicit `resource_origins`, `resource_url_regex`, `opaque_fields` and `submissions`.
 
 ## Evidence
 
@@ -95,26 +113,27 @@ Keep original captures on the operator's side; they contain real target data.
 
 | Output | Contents |
 | :--- | :--- |
-| `--har FILE` | Original HTTP requests and responses before scrubbing. |
-| `blinder-manifest.json` | HTTP outcomes, replacement counts and extracted identity metadata. |
+| `--har FILE` | Original HTTP requests and responses before scrubbing. Journal-based persistence with periodic flushes. |
+| `blinder-manifest.json` | HTTP outcomes, per-request identity/domain replacement counts and leak counts. |
 | `blinder-dealias.json` | Alias-to-original domain mapping. |
 | `blinder-scrub-report.json` | Recorded identity/domain matches and aggregate counts. |
 
 JSON reports are saved under `--output DIR` with owner-only file permissions. `--har-max-body` bounds each captured request/response body, with truncation recorded in the HAR. Shutdown attempts both HAR and report output even if one fails.
 
-[Capture behavior and artifact format →](docs/capabilities.md#evidence)
+[Capture behavior and artifact format](docs/capabilities.md#evidence)
 
 ## Development
 
 ```sh
-make test              # Package regressions with race detection
+make test              # 768 package tests with race detection
 make lint              # Go vet
-make test-functional   # Real CLI, TLS, sessions, evidence, WebSocket and SOCKS5
+make test-functional   # 35 functional scenarios: CLI, TLS, sessions,
+                       # evidence, WebSocket, SOCKS5 and CAPTCHA
 ```
 
-The local functional suite passes **29/29 scenarios**, including the acceptance checks and eight Tor/SOCKS scenarios. GitHub Actions is configured to run the functional suite alongside package tests, vet and a static build. Browser/scanner, OS trust and successful live Tor/onion acceptance are tracked separately.
+All tests pass with `-race`. Browser-level acceptance tests are opt-in via `BLINDER_REVIEW_BROWSER=1`.
 
-[Testing & UAT guide](docs/testing.md) · [Test results](docs/testing-results-2026-09-23.md) · [Delivery gates](docs/capabilities.md#remaining-delivery-gates) · [Technical specification](SPEC.md)
+[Testing and UAT guide](docs/testing.md) · [Delivery gates](docs/capabilities.md#remaining-delivery-gates) · [Technical specification](SPEC.md)
 
 ---
 
