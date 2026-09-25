@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Splinters-io/blinder/internal/captcha"
 )
 
 type TorConfig struct {
@@ -19,19 +22,23 @@ type HARConfig struct {
 }
 
 type Config struct {
-	TargetURL       *url.URL
-	ListenAddr      string
-	AliasDomain     string
-	IdentityTokens  []string
-	VerifyTargetTLS bool
-	Paranoid        bool
-	BindAll         bool
-	Tor             *TorConfig
-	HAR             *HARConfig
-	OutputDir       string
-	CertDir         string
-	UpstreamTimeout int
-	ClientTimeout   int
+	TargetURL         *url.URL
+	ExtraOrigins      []*url.URL
+	ListenAddr        string
+	AliasDomain       string
+	IdentityTokens    []string
+	VerifyTargetTLS   bool
+	Paranoid          bool
+	BindAll           bool
+	Tor               *TorConfig
+	HAR               *HARConfig
+	OutputDir         string
+	CertDir           string
+	VersionKeyDir     string // Defaults to CertDir; CLI also persists ownership with ephemeral TLS.
+	UpstreamTimeout   int
+	ClientTimeout     int
+	CaptchaConfigPath string
+	Captcha           *captcha.Config
 }
 
 var (
@@ -63,6 +70,7 @@ func New(
 	certDir string,
 	upstreamTimeout int,
 	clientTimeout int,
+	extraOrigins ...string,
 ) (*Config, error) {
 	if target == "" {
 		return nil, ErrNoTarget
@@ -139,6 +147,25 @@ func New(
 		}
 	}
 
+	var extras []*url.URL
+	for _, raw := range extraOrigins {
+		eu, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid extra origin %q: %w", raw, parseErr)
+		}
+		if !allowedSchemes[eu.Scheme] {
+			return nil, fmt.Errorf("extra origin must use http or https: %s", raw)
+		}
+		if eu.Hostname() == "" || eu.Opaque != "" || !utf8.ValidString(eu.Hostname()) {
+			return nil, fmt.Errorf("extra origin must include a valid hostname: %s", raw)
+		}
+		extraOnion := strings.HasSuffix(strings.ToLower(strings.TrimSuffix(eu.Hostname(), ".")), ".onion")
+		if extraOnion && torAddr == "" {
+			return nil, ErrOnionRequiresTor
+		}
+		extras = append(extras, eu)
+	}
+
 	if upstreamTimeout <= 0 {
 		upstreamTimeout = 30
 	}
@@ -148,6 +175,7 @@ func New(
 
 	return &Config{
 		TargetURL:       u,
+		ExtraOrigins:    extras,
 		ListenAddr:      listen,
 		AliasDomain:     alias,
 		IdentityTokens:  tokensCopy,
@@ -169,4 +197,21 @@ func (c *Config) IsOnion() bool {
 
 func (c *Config) UseTor() bool {
 	return c.Tor != nil
+}
+
+func (c *Config) LoadCaptchaConfig() error {
+	if c.CaptchaConfigPath == "" {
+		c.Captcha = &captcha.Config{}
+		return nil
+	}
+	data, err := os.ReadFile(c.CaptchaConfigPath)
+	if err != nil {
+		return fmt.Errorf("captcha config: %w", err)
+	}
+	cfg, err := captcha.ParseConfig(data)
+	if err != nil {
+		return err
+	}
+	c.Captcha = cfg
+	return nil
 }

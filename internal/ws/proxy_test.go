@@ -137,7 +137,7 @@ func TestProxy_TextFrameScrubbing(t *testing.T) {
 	echoAddr := startWSEchoServer(t)
 
 	gate := scrub.NewGate(nil, []string{"SecretOrg"}, "alias.local")
-	p := NewProxy(gate, "alias.local", echoAddr, echoAddr, false, true, "", 5*time.Second)
+	p := NewProxy(gate, "alias.local", echoAddr, echoAddr, false, true, "", 5*time.Second, nil)
 
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
@@ -206,8 +206,8 @@ func TestProxy_TextFrameScrubbing(t *testing.T) {
 	if strings.Contains(echoed, "SecretOrg") {
 		t.Errorf("text frame should have SecretOrg scrubbed, got: %s", echoed)
 	}
-	if !strings.Contains(echoed, "[REDACTED]") {
-		t.Errorf("text frame should contain [REDACTED], got: %s", echoed)
+	if !strings.Contains(echoed, "[REDACTED:") {
+		t.Errorf("text frame should contain reversible alias, got: %s", echoed)
 	}
 
 	closeFrame := []byte{finBit | opcodeClose, maskBit | 0}
@@ -251,7 +251,7 @@ func TestProxy_BinaryFramePassthrough(t *testing.T) {
 	scrubbed := gate.ScrubBytes(input, "test")
 	_ = scrubbed
 
-	p := NewProxy(gate, "alias.local", "localhost:1", "localhost:1", false, true, "", 5*time.Second)
+	p := NewProxy(gate, "alias.local", "localhost:1", "localhost:1", false, true, "", 5*time.Second, nil)
 	_ = p
 }
 
@@ -281,7 +281,7 @@ func TestWriteFrame(t *testing.T) {
 
 func TestDialUpstream_BadAddress(t *testing.T) {
 	gate := scrub.NewGate(nil, nil, "alias.local")
-	p := NewProxy(gate, "alias.local", "127.0.0.1:1", "127.0.0.1:1", false, true, "", 5*time.Second)
+	p := NewProxy(gate, "alias.local", "127.0.0.1:1", "127.0.0.1:1", false, true, "", 5*time.Second, nil)
 
 	_, err := p.dialUpstream()
 	if err == nil {
@@ -314,7 +314,7 @@ func TestDialUpstream_TLS(t *testing.T) {
 	}()
 
 	gate := scrub.NewGate(nil, nil, "alias.local")
-	p := NewProxy(gate, "alias.local", ln.Addr().String(), ln.Addr().String(), true, false, "", 5*time.Second)
+	p := NewProxy(gate, "alias.local", ln.Addr().String(), ln.Addr().String(), true, false, "", 5*time.Second, nil)
 
 	conn, err := p.dialUpstream()
 	if err != nil {

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+<title id="title">Blinder project mark</title><desc id="desc">A redacted empty-set symbol: a slashed circle interrupted by a horizontal bar, in ivory on black.</desc>
+<rect width="512" height="512" fill="#111210"/>
+<g transform="translate(256 256) scale(1.7)" fill="none" stroke="#eeeae0" stroke-width="12">
+ <circle r="70"/><path d="M-49 83L49-83"/>
+ <path d="M-102 0H102" stroke="#111210" stroke-width="40"/>
+ <path d="M-102 0H102" stroke="#eeeae0" stroke-width="12"/>
+ </g>
+</svg>

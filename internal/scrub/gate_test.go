@@ -19,8 +19,11 @@ func TestGate_ScrubsTargetDomain(t *testing.T) {
 func TestGate_ScrubsIdentityToken(t *testing.T) {
 	g := NewGate(nil, []string{"Acme Corp"}, "target-001.local")
 	result := g.Scrub("Welcome to Acme Corp portal", "test")
-	if result != "Welcome to [REDACTED] portal" {
-		t.Errorf("expected identity token scrubbed, got: %s", result)
+	if strings.Contains(result, "Acme Corp") {
+		t.Errorf("identity token should be scrubbed, got: %s", result)
+	}
+	if !strings.Contains(result, "[REDACTED:") {
+		t.Errorf("scrubbed token should use reversible alias format, got: %s", result)
 	}
 }
 
@@ -102,8 +105,11 @@ func TestGate_CaseInsensitiveDomain(t *testing.T) {
 func TestGate_CaseInsensitiveToken(t *testing.T) {
 	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
 	result := g.Scrub("Welcome to acmecorp", "test")
-	if result != "Welcome to [REDACTED]" {
+	if strings.Contains(result, "acmecorp") {
 		t.Errorf("token scrub should be case-insensitive, got: %s", result)
+	}
+	if !strings.Contains(result, "[REDACTED:") {
+		t.Errorf("scrubbed token should use reversible alias format, got: %s", result)
 	}
 }
 
@@ -120,6 +126,149 @@ func TestAliasDomain_DifferentInputs(t *testing.T) {
 	a2 := AliasDomain("different.com", "target-001.local")
 	if a1 == a2 {
 		t.Error("different domains should produce different aliases")
+	}
+}
+
+func TestGate_ResidualLeakCountZeroAfterScrub(t *testing.T) {
+	g := NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "target-001.local")
+	scrubbed := g.Scrub("Visit AcmeCorp at target.com", "test")
+	if count := g.ResidualLeakCount(scrubbed); count != 0 {
+		t.Errorf("scrubbed output should have 0 residual leaks, got %d (output: %q)", count, scrubbed)
+	}
+}
+
+func TestGate_ResidualLeakCountDetectsUnscrubbed(t *testing.T) {
+	g := NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "target-001.local")
+	if count := g.ResidualLeakCount("Visit AcmeCorp at target.com"); count != 2 {
+		t.Errorf("expected 2 residual leaks, got %d", count)
+	}
+}
+
+func TestGate_ResidualLeakCountIgnoresAliases(t *testing.T) {
+	g := NewGate([]string{"target.com"}, nil, "target-001.local")
+	alias := AliasDomain("target.com", "target-001.local")
+	if count := g.ResidualLeakCount("Visit " + alias); count != 0 {
+		t.Errorf("alias domain should not be counted as leak, got %d", count)
+	}
+}
+
+func TestGate_CookieValueRoundTrip(t *testing.T) {
+	g := NewGate([]string{"target.com"}, []string{"AcmeCorp"}, "target-001.local")
+	aliased := g.AliasCookieNameAndRecord("session_id")
+
+	original := "tok-AcmeCorp-abc123"
+	scrubbed := g.Scrub(original, "cookie:value")
+	g.RecordCookieValue(aliased, original, scrubbed)
+
+	if scrubbed == original {
+		t.Fatal("scrub should have replaced identity token in cookie value")
+	}
+	if !strings.Contains(scrubbed, "[REDACTED:") {
+		t.Errorf("identity token should be replaced with reversible alias, got: %s", scrubbed)
+	}
+
+	restored := g.RestoreCookieValue(aliased, scrubbed)
+	if restored != original {
+		t.Errorf("RestoreCookieValue should return original %q, got %q", original, restored)
+	}
+}
+
+func TestGate_CookieValueNoMatchPassesThrough(t *testing.T) {
+	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
+	aliased := g.AliasCookieNameAndRecord("pref")
+
+	g.RecordCookieValue(aliased, "original-val", "scrubbed-val")
+
+	result := g.RestoreCookieValue(aliased, "something-else")
+	if result != "something-else" {
+		t.Errorf("unmatched value should pass through, got: %s", result)
+	}
+}
+
+func TestGate_CookieValueChildDelegates(t *testing.T) {
+	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
+	child := g.ForRequest()
+
+	aliased := child.AliasCookieNameAndRecord("sess")
+	child.RecordCookieValue(aliased, "tok-AcmeCorp-1", "tok-[REDACTED]-1")
+
+	restored := child.RestoreCookieValue(aliased, "tok-[REDACTED]-1")
+	if restored != "tok-AcmeCorp-1" {
+		t.Errorf("child should delegate to parent, got: %s", restored)
+	}
+}
+
+func TestCookieValueRestoration_MultipleValues(t *testing.T) {
+	g := NewGate(nil, []string{"Alice", "Bobby"}, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+
+	scrubbed1 := g.Scrub("Alice", "cookie:value")
+	actual1 := g.RecordCookieValue(aliased, "Alice", scrubbed1)
+
+	scrubbed2 := g.Scrub("Bobby", "cookie:value")
+	actual2 := g.RecordCookieValue(aliased, "Bobby", scrubbed2)
+
+	if actual1 == actual2 {
+		t.Fatalf("disambiguated scrubbed values must differ, both are %q", actual1)
+	}
+
+	restored1 := g.RestoreCookieValue(aliased, actual1)
+	if restored1 != "Alice" {
+		t.Errorf("first cookie value should be restored, got %q (scrubbed was %q)", restored1, actual1)
+	}
+
+	restored2 := g.RestoreCookieValue(aliased, actual2)
+	if restored2 != "Bobby" {
+		t.Errorf("second cookie value should be restored, got %q (scrubbed was %q)", restored2, actual2)
+	}
+}
+
+func TestCookieValueRestoration_SameValueIdempotent(t *testing.T) {
+	g := NewGate(nil, nil, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+
+	actual1 := g.RecordCookieValue(aliased, "samevalue", "samevalue")
+	actual2 := g.RecordCookieValue(aliased, "samevalue", "samevalue")
+	if actual1 != actual2 {
+		t.Errorf("same original should return same scrubbed: %q vs %q", actual1, actual2)
+	}
+
+	restored := g.RestoreCookieValue(aliased, actual1)
+	if restored != "samevalue" {
+		t.Errorf("should restore, got %q", restored)
+	}
+}
+
+func TestCookieValueRestoration_LiteralCollisionWithHash(t *testing.T) {
+	g := NewGate(nil, []string{"Alice", "Bobby"}, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+
+	scrubAlice := g.Scrub("Alice", "cookie:value")
+	actualAlice := g.RecordCookieValue(aliased, "Alice", scrubAlice)
+
+	scrubBobby := g.Scrub("Bobby", "cookie:value")
+	actualBobby := g.RecordCookieValue(aliased, "Bobby", scrubBobby)
+
+	// Now record a third value whose scrubbed form is crafted to equal one of
+	// the existing scrubbed values (simulating the literal collision).
+	actualThird := g.RecordCookieValue(aliased, "Charlie", actualBobby)
+
+	if actualThird == actualBobby {
+		t.Fatalf("literal collision: third value's handle %q equals Bobby's %q", actualThird, actualBobby)
+	}
+	if actualThird == actualAlice {
+		t.Fatalf("literal collision: third value's handle %q equals Alice's %q", actualThird, actualAlice)
+	}
+
+	// All three must restore correctly.
+	if r := g.RestoreCookieValue(aliased, actualAlice); r != "Alice" {
+		t.Errorf("Alice restore failed: got %q", r)
+	}
+	if r := g.RestoreCookieValue(aliased, actualBobby); r != "Bobby" {
+		t.Errorf("Bobby restore failed: got %q", r)
+	}
+	if r := g.RestoreCookieValue(aliased, actualThird); r != "Charlie" {
+		t.Errorf("Charlie restore failed: got %q", r)
 	}
 }
 

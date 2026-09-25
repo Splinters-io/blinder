@@ -27,6 +27,8 @@ A secondary problem: even without an LLM in the loop, bug bounty researchers wan
 
 Blinder is a standalone reverse proxy binary. It sits between any HTTP client (scanner, browser, curl) and the real target. Every response passes through a multi-stage scrub pipeline that removes identity while preserving technical surface. Optionally, the raw (pre-scrub) HTTP transactions are captured in HAR 1.2 format for evidence and replay.
 
+The operator also sets up trust for the local HTTPS endpoint presented by Blinder. Browsers and scanners must accept or trust its certificate before they can use that connection. Startup prepares or reuses a persistent certificate and reports local trust status. `--preflight` performs certificate setup without serving traffic, and `--trust-cert` offers an explicit macOS user-trust action. Local certificate trust is separate from upstream certificate verification and Tor connectivity. See the [operator guide](docs/testing.md#local-certificate-trust).
+
 ## 3. Design Principles
 
 - **Zero leaks.** Every byte leaving the proxy toward the client passes through the scrub gate. Defence in depth: content-type-specific rewriters handle the bulk, the universal scrub gate catches anything they missed.
@@ -260,9 +262,15 @@ Connection lifecycle:
 
 Self-signed certificate generation for the alias domain. Uses Go's `crypto/x509` and `crypto/ecdsa` (P-256, faster than RSA for ephemeral certs).
 
-SAN entries: alias domain, `localhost`, `127.0.0.1`.
+SAN entries: alias domain, `localhost`, `127.0.0.1`, `::1`, and the listen host. Wildcard listen addresses use their loopback counterpart for the displayed client endpoint.
 
-Cert is ephemeral — generated in memory per run, never written to disk unless `--cert-dir` is specified.
+CLI startup defaults to a persistent certificate under the platform's user configuration directory, keyed by alias/listen host; `--cert-dir` overrides this location. A private `identity.pem` atomically stores the certificate/key pair, while `certificate.pem` exports only the public certificate. Store directories require mode 0700, private identities require mode 0600, and concurrent preparation is serialized with a file lock on supported macOS/Linux platforms. Missing public exports are repaired from the canonical identity. Corrupt private identities and unsafe file paths fail with an actionable error rather than discarding existing keys.
+
+Persistent certificates last 90 days and are renewed at startup with seven days or less remaining. Endpoint-name changes also cause reissue. Previous public certificates are retained as `previous-<fingerprint>.pem` for removal of old trust. Reuse preserves the fingerprint across restarts; renewal or reissue changes it and requires a new trust step. `--ephemeral-cert` retains a 24-hour memory-only mode.
+
+`--preflight` prepares the certificate and checks platform verification for the displayed endpoint, returning 0 for ready, 2 for trust setup needed, or 1 for setup failure. It does not test listener availability, upstream connectivity or Tor bootstrap. On macOS, `--trust-cert` requests explicit approval to trust only this server certificate for SSL to the displayed host in the current user's login Keychain; no signing CA or admin trust store is installed. Other platforms/clients use their own public-certificate import or CA-file option. Successful platform verification does not prove that clients with separate stores trust the certificate.
+
+Certificate status includes OS-specific advice. macOS receives an explicitly quoted trust command carrying the current certificate directory, alias and listen address. Linux distribution detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, or `/usr/lib/os-release` if the first file is missing, without executing either file. Ubuntu/Debian receives client-specific trust guidance and explains why a system-wide root-CA workflow is not the default for Blinder's leaf certificate; unknown Linux receives generic guidance. macOS/Linux also receives a `curl --cacert` verification command for the actual endpoint. Client-specific trust does not alter the platform-check exit status. OS detection identifies the running environment and cannot verify a remote browser's trust store. See the [certificate guide](docs/testing.md#certificate-advice-by-os).
 
 ## 6. CLI Interface
 
@@ -289,7 +297,10 @@ Capture:
   --output, -o DIR         Output directory for manifest and reports
 
 TLS:
-  --cert-dir DIR           Persist generated cert/key to this directory
+  --cert-dir DIR           Override the private persistent certificate directory
+  --preflight              Prepare/check local certificate and platform trust, then exit
+  --trust-cert             Request approved macOS user trust installation, then exit
+  --ephemeral-cert         Use a new 24-hour in-memory certificate for this run
 ```
 
 ### 6.1 Examples
@@ -366,10 +377,12 @@ curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
 The HAR file records the **real** HTTP transactions (pre-scrub). This is the operator's evidence file — proof of what was sent to and received from the target.
 
 Each entry contains:
-- Full request: method, URL (real target), headers, query parameters, POST body
-- Full response: status, headers, body (text or base64-encoded binary)
-- Timing: total elapsed time, broken into send/wait/receive
-- Timestamps: ISO 8601 with millisecond precision
+- Request: method, URL (real target), headers, query parameters and capped body
+- Response: status, headers and capped body (text or base64-encoded binary)
+- Timing: total elapsed time, currently assigned to the HAR wait field; send/receive are not independently measured
+- Timestamps: estimated request start from capture time minus elapsed duration, formatted as RFC3339Nano
+
+`--har-max-body` applies separately to request and response bodies of every type. Original byte sizes remain recorded alongside truncation comments. Text truncation preserves UTF-8 boundaries. Binary or invalid-UTF-8 request bytes use the `postData._encoding: "base64"` extension; response bytes use HAR's `content.encoding`. Session entries are still buffered until shutdown. See [current evidence behavior](docs/capabilities.md#evidence).
 
 ### 8.2 What Does Not Get Captured
 
@@ -379,7 +392,7 @@ Each entry contains:
 
 ### 8.3 Import Compatibility
 
-The HAR file is standard HAR 1.2 and imports into:
+HAR uses the 1.2 log structure. Independent import/replay verification remains required for:
 - Chrome DevTools (Network tab → Import HAR)
 - Burp Suite (via HAR importer extension)
 - OWASP ZAP
@@ -388,7 +401,7 @@ The HAR file is standard HAR 1.2 and imports into:
 
 ### 8.4 Security of HAR Files
 
-HAR files contain the **real** target data — URLs, headers, cookies, response bodies. They are evidence-grade artifacts and must be handled with the same care as the target data itself. Blinder writes them with 0600 permissions (owner-only read/write).
+HAR files contain the **real** target data — URLs, headers, cookies and captured bodies. Handle them with the same care as the target data itself. Blinder writes them with 0600 permissions (owner-only read/write); capture truncation and missing transaction types must be accounted for when interpreting evidence.
 
 ## 9. Security Considerations (ASVS-Aligned)
 
@@ -398,8 +411,8 @@ HAR files contain the **real** target data — URLs, headers, cookies, response 
 - **Listen address:** validated as a valid host:port. Reject binding to 0.0.0.0 without explicit `--bind-all` flag (prevents accidental exposure).
 - **Identity tokens:** minimum 3 characters (avoid false positives from short tokens). Maximum 100 tokens.
 - **CLI arguments:** no shell interpolation. All values are string literals passed to Go's flag parser.
-- **Upstream responses:** content-length validated against actual body size. Bodies over 50MB are streamed through with domain-only scrubbing (no full parse).
-- **HAR body size:** capped at `--har-max-body` (default 10MB). Prevents memory exhaustion from large response bodies.
+- **Upstream responses:** decompressed bodies are limited to 50 MiB; unsupported encodings, decoding failures and oversized bodies return a generic 502. There is no streaming fallback.
+- **HAR body size:** capped at `--har-max-body` (default 10 MiB) for each request/response. This bounds individual captures, not aggregate session memory.
 
 ### 9.2 Output Encoding (ASVS V5)
 
@@ -410,8 +423,8 @@ HAR files contain the **real** target data — URLs, headers, cookies, response 
 
 ### 9.3 Cryptography (ASVS V6)
 
-- **TLS for client-facing:** self-signed ECDSA P-256 certificate. SHA-256 signature. Valid for 24 hours. SAN includes alias domain, localhost, 127.0.0.1.
-- **TLS for upstream:** uses Go's default TLS 1.2+ configuration. `--no-verify-tls` disables certificate verification (required for self-signed targets, .onion services). When verification is disabled, a warning is logged at startup.
+- **TLS for client-facing:** self-signed ECDSA P-256 server certificate. SHA-256 signature. Valid for 90 days in persistent mode or 24 hours in ephemeral mode; SAN includes alias domain, localhost, loopback IPs and listen host. This is a server identity, not a signing CA.
+- **TLS for upstream:** uses Go's default TLS 1.2+ configuration. `--no-verify-tls` disables verification of the target's HTTPS certificate and logs a warning. It does not establish browser trust in Blinder's local certificate. Tor or an `.onion` hostname alone does not require this override; HTTPS target verification remains enabled by default, including through Tor.
 - **Domain hashing:** SHA-256 truncated to 8 hex characters (32 bits). This is for aliasing consistency, not security — collision within a single session is acceptable (same alias for two different domains would reduce information, not leak it).
 
 ### 9.4 Error Handling (ASVS V7)

@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -153,6 +154,227 @@ func TestRewriteBody_PDFMetadata(t *testing.T) {
 	techJSON := result.Metadata.TechnicalJSON()
 	if strings.Contains(techJSON, "Secret Agent") {
 		t.Error("technical JSON must not leak identity author")
+	}
+}
+
+func TestRewriteBody_HTMLEntityDecodesBeforeScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<p>Welcome to &#65;cmeCorp headquarters</p>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "AcmeCorp") || strings.Contains(resultStr, "&#65;cmeCorp") {
+		t.Errorf("HTML entity-encoded identity token should be decoded and scrubbed, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLEntityInAttribute(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<a href="https://target&#46;example&#46;com/login">login</a>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "target.example.com") || strings.Contains(resultStr, "target&#46;") {
+		t.Errorf("entity-encoded domain in attribute should be decoded and scrubbed, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLPreservesScriptLogic(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><script>var x = "AcmeCorp"; if(x) { console.log(x); }</script></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "AcmeCorp") {
+		t.Error("identity token in JS string should be scrubbed")
+	}
+	if !strings.Contains(resultStr, "console.log") {
+		t.Error("JS code structure should be preserved")
+	}
+}
+
+func TestRewriteBody_HTMLBaseHrefScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><head><base href="https://target.example.com/"></head></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if strings.Contains(string(result.Body), "target.example.com") {
+		t.Error("base href should be scrubbed")
+	}
+}
+
+func TestRewriteBody_HTMLCanonicalScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<link rel="canonical" href="https://target.example.com/page">`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if strings.Contains(string(result.Body), "target.example.com") {
+		t.Error("canonical link href should be scrubbed")
+	}
+}
+
+func TestRewriteBody_HTMLDataAttrScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<div data-company="AcmeCorp" data-domain="target.example.com">text</div>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "AcmeCorp") {
+		t.Errorf("data-attr identity token should be scrubbed, got: %s", resultStr)
+	}
+	if strings.Contains(resultStr, "target.example.com") {
+		t.Errorf("data-attr domain should be scrubbed, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLMetaContentScrub(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<meta name="author" content="AcmeCorp Engineering Team">`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if strings.Contains(string(result.Body), "AcmeCorp") {
+		t.Error("meta content identity should be scrubbed")
+	}
+}
+
+func TestRewriteBody_HTMLStripsSRIIntegrity(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<script src="/main.bundle" integrity="sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC" crossorigin="anonymous"></script>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "integrity=") {
+		t.Error("SRI integrity attribute should be stripped for proxied resources")
+	}
+	if strings.Contains(resultStr, "crossorigin=") {
+		t.Error("crossorigin attribute should be stripped for proxied resources")
+	}
+	if !strings.Contains(resultStr, `src="`) {
+		t.Error("src attribute should be preserved")
+	}
+}
+
+func TestRewriteBody_HTMLStripsSRIOnLink(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<link rel="stylesheet" href="/styles/main" integrity="sha256-abc123" crossorigin="anonymous">`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "integrity=") {
+		t.Error("SRI integrity attribute should be stripped for proxied link tags")
+	}
+	if !strings.Contains(resultStr, `href="`) {
+		t.Error("href attribute should be preserved on link")
+	}
+}
+
+func TestRewriteBody_HTMLStripsSRIForProxiedRelativeURL(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<script src="/bundle.js" integrity="sha384-abc123" crossorigin="anonymous"></script>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "integrity=") {
+		t.Error("SRI should be stripped for relative URLs (content will be scrubbed by proxy)")
+	}
+}
+
+func TestRewriteBody_HTMLPreservesSRIForExternalCDN(t *testing.T) {
+	gate := newTestGate()
+	origins := NewOriginMapper(
+		&url.URL{Scheme: "https", Host: "target.example.com"},
+		"127.0.0.1:8099", "target-001.local",
+	)
+	body := []byte(`<script src="https://cdn.jsdelivr.net/npm/lib@1.0/dist.js" integrity="sha384-real" crossorigin="anonymous"></script>`)
+	result := RewriteBody(body, "text/html", "/", gate, false, RewriteOpts{Origins: origins})
+	resultStr := string(result.Body)
+	if !strings.Contains(resultStr, `integrity="sha384-real"`) {
+		t.Error("SRI should be preserved for external CDN URLs (not proxied)")
+	}
+	if !strings.Contains(resultStr, `crossorigin="anonymous"`) {
+		t.Error("crossorigin should be preserved for external CDN URLs")
+	}
+}
+
+func TestRewriteBody_HTMLStripsSRIForUpstreamURL(t *testing.T) {
+	gate := newTestGate()
+	origins := NewOriginMapper(
+		&url.URL{Scheme: "https", Host: "target.example.com"},
+		"127.0.0.1:8099", "target-001.local",
+	)
+	body := []byte(`<script src="https://target.example.com/app.js" integrity="sha384-abc123" crossorigin="anonymous"></script>`)
+	result := RewriteBody(body, "text/html", "/", gate, false, RewriteOpts{Origins: origins})
+	resultStr := string(result.Body)
+	if strings.Contains(resultStr, "integrity=") {
+		t.Error("SRI should be stripped when src points to proxied upstream")
+	}
+}
+
+func TestRewriteBody_HTMLBodyURLsUseOriginMapper(t *testing.T) {
+	gate := scrub.NewGate([]string{"app.example.com", "api.example.com"}, nil, "target-001.local")
+	primary, _ := url.Parse("https://app.example.com")
+	api, _ := url.Parse("https://api.example.com")
+	origins := NewOriginMapper(primary, "127.0.0.1:8099", "target-001.local",
+		OriginRoute{Upstream: api, Alias: "host-api.target-001.local"},
+	)
+
+	body := []byte(`<a href="https://api.example.com/v1/users">API</a>`)
+	result := RewriteBody(body, "text/html", "/", gate, false, RewriteOpts{Origins: origins})
+	resultStr := string(result.Body)
+
+	if strings.Contains(resultStr, "api.example.com") {
+		t.Errorf("upstream domain should be rewritten in HTML body, got: %s", resultStr)
+	}
+	if !strings.Contains(resultStr, "host-api.target-001.local:8099") {
+		t.Errorf("HTML body URL should use origin-aware alias, got: %s", resultStr)
+	}
+}
+
+func TestRewriteBody_HTMLPreservesIntegrityOnNonSRIElements(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<div integrity="custom-value">text</div>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	resultStr := string(result.Body)
+	if !strings.Contains(resultStr, `integrity="`) {
+		t.Error("integrity attribute on non-script/link should be preserved")
+	}
+}
+
+func TestRewriteBody_HTMLMetadataExtractsTitle(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><head><title>Internal Dashboard</title></head><body>content</body></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if result.Metadata == nil {
+		t.Fatal("HTML with title should produce metadata")
+	}
+	if result.Metadata.Format != "html" {
+		t.Errorf("expected format 'html', got %q", result.Metadata.Format)
+	}
+	if result.Metadata.Identity.Title != "Internal Dashboard" {
+		t.Errorf("expected title 'Internal Dashboard', got %q", result.Metadata.Identity.Title)
+	}
+}
+
+func TestRewriteBody_HTMLMetadataExtractsAuthor(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><head><meta name="author" content="Jane Doe"><title>Page</title></head><body>x</body></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if result.Metadata == nil {
+		t.Fatal("HTML with author meta should produce metadata")
+	}
+	if result.Metadata.Identity.Author != "Jane Doe" {
+		t.Errorf("expected author 'Jane Doe', got %q", result.Metadata.Identity.Author)
+	}
+}
+
+func TestRewriteBody_HTMLMetadataExtractsGenerator(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><head><meta name="generator" content="WordPress 6.3"><title>Blog</title></head></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if result.Metadata == nil {
+		t.Fatal("HTML with generator meta should produce metadata")
+	}
+	if result.Metadata.Producer != "WordPress 6.3" {
+		t.Errorf("expected producer 'WordPress 6.3', got %q", result.Metadata.Producer)
+	}
+}
+
+func TestRewriteBody_HTMLNoMetadataWhenEmpty(t *testing.T) {
+	gate := newTestGate()
+	body := []byte(`<html><body><p>No metadata here</p></body></html>`)
+	result := RewriteBody(body, "text/html", "/", gate, false)
+	if result.Metadata != nil {
+		t.Error("HTML without title/author/generator should not produce metadata")
 	}
 }
 

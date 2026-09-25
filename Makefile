@@ -2,13 +2,16 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-.PHONY: build test clean release lint
+.PHONY: build test test-functional clean release lint
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o blinder ./cmd/blinder
 
 test:
 	go test -race -count=1 ./...
+
+test-functional:
+	go test -tags functional -race -count=1 -timeout 120s ./tests/functional
 
 lint:
 	go vet ./...

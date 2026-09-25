@@ -42,11 +42,34 @@ func TestRelayKeepsControlBetweenFragments(t *testing.T) {
 	writeFrame(&input, opcodeText, []byte("Acme"), false)
 	writeFrame(&input, finBit|opcodePing, []byte("ping"), false)
 	writeFrame(&input, finBit, []byte("Corp"), false)
-	var want bytes.Buffer
-	writeFrame(&want, finBit|opcodePing, []byte("ping"), false)
-	writeFrame(&want, finBit|opcodeText, []byte("[REDACTED]"), false)
-	if got := reviewRelay(t, input.Bytes(), true); !bytes.Equal(got, want.Bytes()) {
-		t.Fatalf("got %x, want %x", got, want.Bytes())
+	got := reviewRelay(t, input.Bytes(), true)
+	var wantPing bytes.Buffer
+	writeFrame(&wantPing, finBit|opcodePing, []byte("ping"), false)
+	if !bytes.HasPrefix(got, wantPing.Bytes()) {
+		t.Fatalf("control frame not forwarded first, got %x", got)
+	}
+	remainder := got[len(wantPing.Bytes()):]
+	if bytes.Contains(remainder, []byte("AcmeCorp")) {
+		t.Fatal("identity token leaked in reassembled text frame")
+	}
+	if !bytes.Contains(remainder, []byte("[REDACTED:")) {
+		t.Fatalf("scrubbed text should contain alias, got %x", remainder)
+	}
+	if len(remainder) < 2 {
+		t.Fatal("text frame too short for header")
+	}
+	if remainder[0]&0x80 == 0 {
+		t.Fatal("text frame missing FIN bit")
+	}
+	if remainder[0]&0x0f != 1 {
+		t.Fatalf("expected text opcode, got %d", remainder[0]&0x0f)
+	}
+	if remainder[1]&0x80 != 0 {
+		t.Fatal("server-to-client frame should not be masked")
+	}
+	payloadLen := int(remainder[1] & 0x7f)
+	if payloadLen == 0 {
+		t.Fatal("text frame has zero payload length")
 	}
 }
 
@@ -57,7 +80,7 @@ func TestRelayIdleTimeoutClosesBothDirections(t *testing.T) {
 	upstream, relayUpstream := net.Pipe()
 	defer upstream.Close()
 	defer relayUpstream.Close()
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 20*time.Millisecond)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 20*time.Millisecond, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -120,7 +143,7 @@ func TestUpgradeDoesNotOfferUnsupportedCompression(t *testing.T) {
 }
 
 func TestCloseCancelsRelayConnections(t *testing.T) {
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", time.Second)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", time.Second, nil)
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -160,7 +183,7 @@ func TestRelayOneWayActivityKeepsConnectionAlive(t *testing.T) {
 	upstream, relayUpstream := net.Pipe()
 	defer upstream.Close()
 	defer relayUpstream.Close()
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 100*time.Millisecond)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "unused", "unused", false, true, "", 100*time.Millisecond, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

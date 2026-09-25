@@ -167,6 +167,86 @@ func TestOnionValidationNormalizesHost(t *testing.T) {
 	}
 }
 
+func TestNew_ExtraOrigins(t *testing.T) {
+	cfg, err := New(
+		"https://app.example.com", "", "", nil,
+		true, false, false, "", "", 0, "", "", 0, 0,
+		"https://api.example.com", "https://cdn.example.com",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.ExtraOrigins) != 2 {
+		t.Fatalf("expected 2 extra origins, got %d", len(cfg.ExtraOrigins))
+	}
+	if cfg.ExtraOrigins[0].Host != "api.example.com" {
+		t.Errorf("expected api.example.com, got %s", cfg.ExtraOrigins[0].Host)
+	}
+	if cfg.ExtraOrigins[1].Host != "cdn.example.com" {
+		t.Errorf("expected cdn.example.com, got %s", cfg.ExtraOrigins[1].Host)
+	}
+}
+
+func TestNew_ExtraOriginBadScheme(t *testing.T) {
+	_, err := New(
+		"https://app.example.com", "", "", nil,
+		true, false, false, "", "", 0, "", "", 0, 0,
+		"ftp://files.example.com",
+	)
+	if err == nil {
+		t.Error("expected error for ftp scheme extra origin")
+	}
+}
+
+func TestNew_ExtraOnionRequiresTor(t *testing.T) {
+	_, err := New(
+		"https://clearnet.example.com", "", "", nil,
+		true, false, false,
+		"", "", 0, "", "", 0, 0,
+		"http://something.onion",
+	)
+	if err != ErrOnionRequiresTor {
+		t.Errorf("expected ErrOnionRequiresTor for .onion extra origin without Tor, got %v", err)
+	}
+}
+
+func TestNew_ExtraOnionCaseAndDot(t *testing.T) {
+	for _, extra := range []string{"http://EXAMPLE.ONION", "http://example.onion."} {
+		_, err := New(
+			"https://clearnet.example.com", "", "", nil,
+			true, false, false,
+			"", "", 0, "", "", 0, 0,
+			extra,
+		)
+		if err != ErrOnionRequiresTor {
+			t.Errorf("%s: expected ErrOnionRequiresTor, got %v", extra, err)
+		}
+	}
+}
+
+func TestNew_ExtraOnionWithTor(t *testing.T) {
+	_, err := New(
+		"https://clearnet.example.com", "", "", nil,
+		true, false, false,
+		"127.0.0.1:9050", "", 0, "", "", 0, 0,
+		"http://something.onion",
+	)
+	if err != nil {
+		t.Fatalf("extra .onion with Tor should succeed, got %v", err)
+	}
+}
+
+func TestNew_ExtraOriginNoHost(t *testing.T) {
+	_, err := New(
+		"https://app.example.com", "", "", nil,
+		true, false, false, "", "", 0, "", "", 0, 0,
+		"https://",
+	)
+	if err == nil {
+		t.Error("expected error for extra origin without hostname")
+	}
+}
+
 func TestIdentityTokenValidationUsesCharacters(t *testing.T) {
 	for _, token := range []string{"猫", string([]byte{0xff, 0xff, 0xff})} {
 		if _, err := New("https://example.com", "", "", []string{token}, true, false, false, "", "", 0, "", "", 0, 0); err == nil {

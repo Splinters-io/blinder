@@ -1,6 +1,11 @@
 package scrub
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net"
 	"regexp"
 	"strings"
@@ -24,16 +29,53 @@ type LeakEntry struct {
 	Count   int
 }
 
+type cookieValueMapping struct {
+	original string
+	scrubbed string
+}
+
 type Gate struct {
+	parent         *Gate // Per-request counters; aliases and aggregate findings stay shared.
 	targetDomains  []string
 	identityTokens []string
 	domainPatterns []*regexp.Regexp
 	tokenPatterns  []*regexp.Regexp
 	aliasDomain    string
+	escapePrefix   string
+	preserveDomains  map[string]bool
+	preserveURLCheck func(fullURL string) bool
 	mu             sync.Mutex
 	leaks          map[string]*LeakEntry
-	aliases        map[string]string // alias → real domain
-	cookieAliases  map[string]string // alias → original cookie name
+	aliases        map[string]string               // alias → real domain
+	cookieAliases  map[string]string               // alias → original cookie name
+	cookieValues   map[string][]cookieValueMapping  // aliased cookie name → value mappings
+	tokenAliases   map[string]string               // alias → original token text
+	emailAliases   map[string]string               // alias → original email
+	ipv4Aliases    map[string]string               // alias → original IPv4
+	ipv6Aliases    map[string]string               // alias → original IPv6
+}
+
+// ForRequest keeps replacement counts isolated from concurrent requests while
+// retaining session-wide domain and cookie mappings.
+func (g *Gate) ForRequest() *Gate {
+	return &Gate{
+		parent: g, targetDomains: g.targetDomains, identityTokens: g.identityTokens,
+		domainPatterns: g.domainPatterns, tokenPatterns: g.tokenPatterns,
+		aliasDomain: g.aliasDomain, escapePrefix: g.escapePrefix,
+		preserveDomains:  g.preserveDomains,
+		preserveURLCheck: g.preserveURLCheck,
+		leaks: make(map[string]*LeakEntry),
+	}
+}
+
+func (g *Gate) ReplacementCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	total := 0
+	for _, entry := range g.leaks {
+		total += entry.Count
+	}
+	return total
 }
 
 func NewGate(targetDomains []string, identityTokens []string, aliasDomain string) *Gate {
@@ -43,13 +85,26 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 	tokens := make([]string, len(identityTokens))
 	copy(tokens, identityTokens)
 
+	nonceData := []byte(aliasDomain)
+	for _, t := range tokens {
+		nonceData = append(nonceData, 0)
+		nonceData = append(nonceData, []byte(t)...)
+	}
+	nh := sha256.Sum256(nonceData)
+
 	g := &Gate{
 		targetDomains:  domains,
 		identityTokens: tokens,
 		aliasDomain:    aliasDomain,
+		escapePrefix: "[~" + hex.EncodeToString(nh[:6]) + ":",
 		leaks:          make(map[string]*LeakEntry),
 		aliases:        make(map[string]string),
 		cookieAliases:  make(map[string]string),
+		cookieValues:   make(map[string][]cookieValueMapping),
+		tokenAliases:   make(map[string]string),
+		emailAliases:   make(map[string]string),
+		ipv4Aliases:    make(map[string]string),
+		ipv6Aliases:    make(map[string]string),
 	}
 	for _, domain := range domains {
 		g.domainPatterns = append(g.domainPatterns, literalPattern(domain))
@@ -58,6 +113,27 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		g.tokenPatterns = append(g.tokenPatterns, literalPattern(token))
 	}
 	return g
+}
+
+func (g *Gate) SetPreserveURLCheck(fn func(fullURL string) bool) {
+	if g.parent != nil {
+		g.parent.SetPreserveURLCheck(fn)
+		return
+	}
+	g.preserveURLCheck = fn
+}
+
+func (g *Gate) PreserveDomains(domains []string) {
+	if g.parent != nil {
+		g.parent.PreserveDomains(domains)
+		return
+	}
+	if g.preserveDomains == nil {
+		g.preserveDomains = make(map[string]bool)
+	}
+	for _, d := range domains {
+		g.preserveDomains[strings.ToLower(d)] = true
+	}
 }
 
 func literalPattern(value string) *regexp.Regexp {
@@ -69,8 +145,67 @@ func literalPattern(value string) *regexp.Regexp {
 	return regexp.MustCompile("(?i)" + regexp.QuoteMeta(value))
 }
 
+func (g *Gate) escapeMarkers(input string) string {
+	prefix := g.escapePrefix
+	const target = "[REDACTED:"
+	if !strings.Contains(input, prefix) && !strings.Contains(input, target) {
+		return input
+	}
+	var out strings.Builder
+	out.Grow(len(input) + 64)
+	i := 0
+	for i < len(input) {
+		if i+len(prefix) <= len(input) && input[i:i+len(prefix)] == prefix {
+			out.WriteString(prefix)
+			out.WriteByte('E')
+			i += len(prefix)
+		} else if i+len(target) <= len(input) && input[i:i+len(target)] == target {
+			out.WriteString(prefix)
+			out.WriteByte('R')
+			i += len(target)
+		} else {
+			out.WriteByte(input[i])
+			i++
+		}
+	}
+	return out.String()
+}
+
+func (g *Gate) unescapeMarkers(input string) string {
+	prefix := g.escapePrefix
+	if !strings.Contains(input, prefix) {
+		return input
+	}
+	var out strings.Builder
+	out.Grow(len(input))
+	i := 0
+	for i < len(input) {
+		if i+len(prefix) <= len(input) && input[i:i+len(prefix)] == prefix {
+			i += len(prefix)
+			if i < len(input) {
+				switch input[i] {
+				case 'R':
+					out.WriteString("[REDACTED:")
+					i++
+				case 'E':
+					out.WriteString(prefix)
+					i++
+				default:
+					out.WriteString(prefix)
+				}
+			} else {
+				out.WriteString(prefix)
+			}
+		} else {
+			out.WriteByte(input[i])
+			i++
+		}
+	}
+	return out.String()
+}
+
 func (g *Gate) Scrub(input string, context string) string {
-	result := input
+	result := g.escapeMarkers(input)
 
 	for i, pattern := range g.domainPatterns {
 		if pattern == nil {
@@ -87,9 +222,9 @@ func (g *Gate) Scrub(input string, context string) string {
 		if pattern == nil {
 			continue
 		}
-		result = pattern.ReplaceAllStringFunc(result, func(string) string {
+		result = pattern.ReplaceAllStringFunc(result, func(matched string) string {
 			g.recordLeak(context, "identity_token", "[configured token]")
-			return "[REDACTED]"
+			return g.aliasToken(matched)
 		})
 	}
 
@@ -103,8 +238,7 @@ func (g *Gate) Scrub(input string, context string) string {
 			return email
 		}
 		g.recordLeak(context, "email", email)
-		alias := g.aliasDomainAndRecord(domain)
-		return "user@" + alias
+		return g.aliasEmail(email, domain)
 	})
 
 	result = ipv4Re.ReplaceAllStringFunc(result, func(ipStr string) string {
@@ -116,7 +250,7 @@ func (g *Gate) Scrub(input string, context string) string {
 			return ipStr
 		}
 		g.recordLeak(context, "public_ipv4", ipStr)
-		return testNetIPv4
+		return g.aliasIPv4(ipStr)
 	})
 
 	result = ipv6Re.ReplaceAllStringFunc(result, func(ipStr string) string {
@@ -128,19 +262,30 @@ func (g *Gate) Scrub(input string, context string) string {
 			return ipStr
 		}
 		g.recordLeak(context, "public_ipv6", ipStr)
-		return testNetIPv6
+		return g.aliasIPv6(ipStr)
 	})
 
-	result = domainRe.ReplaceAllStringFunc(result, func(domain string) string {
-		if IsSafeDomain(domain) {
-			return domain
-		}
-		if domain == g.aliasDomain || strings.HasSuffix(domain, "."+g.aliasDomain) {
-			return domain
-		}
-		g.recordLeak(context, "domain", domain)
-		return g.aliasDomainAndRecord(domain)
-	})
+	root := g
+	if g.parent != nil {
+		root = g.parent
+	}
+	if root.preserveURLCheck != nil {
+		result = g.scrubDomainsURLAware(result, context)
+	} else {
+		result = domainRe.ReplaceAllStringFunc(result, func(domain string) string {
+			if IsSafeDomain(domain) {
+				return domain
+			}
+			if domain == g.aliasDomain || strings.HasSuffix(domain, "."+g.aliasDomain) {
+				return domain
+			}
+			if g.isPreservedDomain(domain) {
+				return domain
+			}
+			g.recordLeak(context, "domain", domain)
+			return g.aliasDomainAndRecord(domain)
+		})
+	}
 
 	return result
 }
@@ -168,7 +313,6 @@ func (g *Gate) Leaks() []LeakEntry {
 func (g *Gate) recordLeak(context, typ, detail string) {
 	key := context + "|" + typ + "|" + detail
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if entry, ok := g.leaks[key]; ok {
 		entry.Count++
 	} else {
@@ -179,9 +323,16 @@ func (g *Gate) recordLeak(context, typ, detail string) {
 			Count:   1,
 		}
 	}
+	g.mu.Unlock()
+	if g.parent != nil {
+		g.parent.recordLeak(context, typ, detail)
+	}
 }
 
 func (g *Gate) aliasDomainAndRecord(domain string) string {
+	if g.parent != nil {
+		return g.parent.aliasDomainAndRecord(domain)
+	}
 	alias := AliasDomain(domain, g.aliasDomain)
 	g.mu.Lock()
 	g.aliases[alias] = strings.ToLower(domain)
@@ -190,6 +341,9 @@ func (g *Gate) aliasDomainAndRecord(domain string) string {
 }
 
 func (g *Gate) AliasCookieNameAndRecord(name string) string {
+	if g.parent != nil {
+		return g.parent.AliasCookieNameAndRecord(name)
+	}
 	alias := AliasCookieName(name)
 	g.mu.Lock()
 	g.cookieAliases[alias] = name
@@ -198,6 +352,9 @@ func (g *Gate) AliasCookieNameAndRecord(name string) string {
 }
 
 func (g *Gate) OriginalCookieName(alias string) string {
+	if g.parent != nil {
+		return g.parent.OriginalCookieName(alias)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if original, ok := g.cookieAliases[alias]; ok {
@@ -207,6 +364,9 @@ func (g *Gate) OriginalCookieName(alias string) string {
 }
 
 func (g *Gate) Aliases() map[string]string {
+	if g.parent != nil {
+		return g.parent.Aliases()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	result := make(map[string]string, len(g.aliases))
@@ -214,4 +374,396 @@ func (g *Gate) Aliases() map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) string {
+	if g.parent != nil {
+		return g.parent.RecordCookieValue(aliasedName, original, scrubbed)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for _, m := range g.cookieValues[aliasedName] {
+		if m.original == original {
+			return m.scrubbed
+		}
+	}
+
+	unique := scrubbed
+	h := sha256.Sum256([]byte(original))
+	for hashLen := 3; hashLen <= 32; hashLen++ {
+		collision := false
+		for _, m := range g.cookieValues[aliasedName] {
+			if m.scrubbed == unique {
+				collision = true
+				break
+			}
+		}
+		if !collision {
+			break
+		}
+		unique = scrubbed + ":" + hex.EncodeToString(h[:hashLen])
+	}
+
+	updated := make([]cookieValueMapping, len(g.cookieValues[aliasedName]), len(g.cookieValues[aliasedName])+1)
+	copy(updated, g.cookieValues[aliasedName])
+	g.cookieValues[aliasedName] = append(updated, cookieValueMapping{original: original, scrubbed: unique})
+	return unique
+}
+
+func (g *Gate) ResidualLeakCount(scrubbed string) int {
+	count := 0
+	for _, pattern := range g.domainPatterns {
+		if pattern != nil {
+			count += len(pattern.FindAllString(scrubbed, -1))
+		}
+	}
+	for _, pattern := range g.tokenPatterns {
+		if pattern != nil {
+			count += len(pattern.FindAllString(scrubbed, -1))
+		}
+	}
+	return count
+}
+
+func (g *Gate) RestoreCookieValue(aliasedName, currentValue string) string {
+	if g.parent != nil {
+		return g.parent.RestoreCookieValue(aliasedName, currentValue)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, m := range g.cookieValues[aliasedName] {
+		if currentValue == m.scrubbed {
+			return m.original
+		}
+	}
+	return currentValue
+}
+
+func (g *Gate) RestoreCookieHeader(header string) string {
+	var parts []string
+	for _, pair := range strings.Split(header, ";") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		eqIdx := strings.IndexByte(pair, '=')
+		if eqIdx < 0 {
+			parts = append(parts, pair)
+			continue
+		}
+		aliasedName := pair[:eqIdx]
+		value := pair[eqIdx+1:]
+		originalName := g.OriginalCookieName(aliasedName)
+		originalValue := g.RestoreCookieValue(aliasedName, value)
+		parts = append(parts, originalName+"="+originalValue)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (g *Gate) aliasToken(original string) string {
+	if g.parent != nil {
+		return g.parent.aliasToken(original)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for alias, orig := range g.tokenAliases {
+		if orig == original {
+			return alias
+		}
+	}
+	h := sha256.Sum256([]byte(original))
+	alias := "[REDACTED:" + hex.EncodeToString(h[:3]) + "]"
+	if _, exists := g.tokenAliases[alias]; exists {
+		alias = "[REDACTED:" + hex.EncodeToString(h[:6]) + "]"
+	}
+	g.tokenAliases[alias] = original
+	return alias
+}
+
+func (g *Gate) aliasEmail(original, domain string) string {
+	if g.parent != nil {
+		return g.parent.aliasEmail(original, domain)
+	}
+	domainAlias := g.aliasDomainAndRecord(domain)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for alias, orig := range g.emailAliases {
+		if orig == original {
+			return alias
+		}
+	}
+	n := len(g.emailAliases) + 1
+	alias := fmt.Sprintf("user%d@%s", n, domainAlias)
+	g.emailAliases[alias] = original
+	return alias
+}
+
+func (g *Gate) aliasIPv4(original string) string {
+	if g.parent != nil {
+		return g.parent.aliasIPv4(original)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for alias, orig := range g.ipv4Aliases {
+		if orig == original {
+			return alias
+		}
+	}
+	n := len(g.ipv4Aliases) + 1
+	alias := fmt.Sprintf("203.0.113.%d", n)
+	g.ipv4Aliases[alias] = original
+	return alias
+}
+
+func (g *Gate) aliasIPv6(original string) string {
+	if g.parent != nil {
+		return g.parent.aliasIPv6(original)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for alias, orig := range g.ipv6Aliases {
+		if orig == original {
+			return alias
+		}
+	}
+	n := len(g.ipv6Aliases) + 1
+	alias := fmt.Sprintf("2001:db8::%d", n)
+	g.ipv6Aliases[alias] = original
+	return alias
+}
+
+func (g *Gate) RestoreBody(input string) string {
+	if g.parent != nil {
+		return g.parent.RestoreBody(input)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	result := input
+	for alias, original := range g.tokenAliases {
+		result = strings.ReplaceAll(result, alias, original)
+	}
+	for alias, original := range g.emailAliases {
+		result = strings.ReplaceAll(result, alias, original)
+	}
+	for alias, original := range g.ipv4Aliases {
+		result = strings.ReplaceAll(result, alias, original)
+	}
+	for alias, original := range g.ipv6Aliases {
+		result = strings.ReplaceAll(result, alias, original)
+	}
+	for alias, original := range g.aliases {
+		result = strings.ReplaceAll(result, alias, original)
+	}
+
+	result = g.unescapeMarkers(result)
+
+	return result
+}
+
+func (g *Gate) ContainsAlias(input string) bool {
+	if g.parent != nil {
+		return g.parent.ContainsAlias(input)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for alias := range g.tokenAliases {
+		if strings.Contains(input, alias) {
+			return true
+		}
+	}
+	for alias := range g.emailAliases {
+		if strings.Contains(input, alias) {
+			return true
+		}
+	}
+	for alias := range g.ipv4Aliases {
+		if strings.Contains(input, alias) {
+			return true
+		}
+	}
+	for alias := range g.ipv6Aliases {
+		if strings.Contains(input, alias) {
+			return true
+		}
+	}
+	for alias := range g.aliases {
+		if strings.Contains(input, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gate) scrubDomainsURLAware(input, context string) string {
+	root := g
+	if g.parent != nil {
+		root = g.parent
+	}
+
+	locs := domainRe.FindAllStringIndex(input, -1)
+	if len(locs) == 0 {
+		return input
+	}
+
+	var b strings.Builder
+	b.Grow(len(input))
+	last := 0
+	for _, loc := range locs {
+		domain := input[loc[0]:loc[1]]
+		b.WriteString(input[last:loc[0]])
+
+		switch {
+		case IsSafeDomain(domain):
+			b.WriteString(domain)
+		case domain == g.aliasDomain || strings.HasSuffix(domain, "."+g.aliasDomain):
+			b.WriteString(domain)
+		case g.isPreservedDomain(domain):
+			b.WriteString(domain)
+		default:
+			fullURL := extractURLAroundDomain(input, loc[0], loc[1])
+			if fullURL != "" && root.preserveURLCheck(fullURL) {
+				b.WriteString(domain)
+			} else {
+				g.recordLeak(context, "domain", domain)
+				b.WriteString(g.aliasDomainAndRecord(domain))
+			}
+		}
+		last = loc[1]
+	}
+	b.WriteString(input[last:])
+	return b.String()
+}
+
+func extractURLAroundDomain(input string, domStart, domEnd int) string {
+	schemeEnd := domStart
+	scheme := ""
+	if schemeEnd >= 8 && input[schemeEnd-8:schemeEnd] == "https://" {
+		scheme = "https://"
+	} else if schemeEnd >= 7 && input[schemeEnd-7:schemeEnd] == "http://" {
+		scheme = "http://"
+	}
+	if scheme == "" {
+		return ""
+	}
+
+	end := domEnd
+	for end < len(input) {
+		c := input[end]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+			c == '"' || c == '\'' || c == '<' || c == '>' ||
+			c == ')' || c == ']' {
+			break
+		}
+		end++
+	}
+	return scheme + input[domStart:end]
+}
+
+func (g *Gate) isPreservedDomain(domain string) bool {
+	root := g
+	if g.parent != nil {
+		root = g.parent
+	}
+	if root.preserveDomains == nil {
+		return false
+	}
+	lower := strings.ToLower(domain)
+	if root.preserveDomains[lower] {
+		return true
+	}
+	for d := range root.preserveDomains {
+		if strings.HasSuffix(lower, "."+d) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gate) ContainsEscape(input string) bool {
+	return strings.Contains(input, g.escapePrefix)
+}
+
+func (g *Gate) Seed() []byte {
+	data := []byte(g.aliasDomain)
+	for _, d := range g.targetDomains {
+		data = append(data, 0)
+		data = append(data, []byte(d)...)
+	}
+	for _, t := range g.identityTokens {
+		data = append(data, 0)
+		data = append(data, []byte(t)...)
+	}
+	return data
+}
+
+func (g *Gate) RestoreJSON(input []byte) []byte {
+	if g.parent != nil {
+		return g.parent.RestoreJSON(input)
+	}
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.UseNumber()
+	var parsed interface{}
+	if err := dec.Decode(&parsed); err != nil {
+		return []byte(g.RestoreBody(string(input)))
+	}
+	if len(bytes.TrimSpace(input[dec.InputOffset():])) > 0 {
+		return input
+	}
+	restored, ok := g.restoreJSONValue(parsed)
+	if !ok {
+		return nil
+	}
+	out, err := json.Marshal(restored)
+	if err != nil {
+		return []byte(g.RestoreBody(string(input)))
+	}
+	return out
+}
+
+func (g *Gate) RestoreJSONValue(v interface{}) interface{} {
+	if g.parent != nil {
+		return g.parent.RestoreJSONValue(v)
+	}
+	result, ok := g.restoreJSONValue(v)
+	if !ok {
+		return nil
+	}
+	return result
+}
+
+func (g *Gate) restoreJSONValue(v interface{}) (interface{}, bool) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{}, len(val))
+		for key, value := range val {
+			restoredKey := g.RestoreBody(key)
+			if _, exists := result[restoredKey]; exists {
+				return nil, false
+			}
+			rv, ok := g.restoreJSONValue(value)
+			if !ok {
+				return nil, false
+			}
+			result[restoredKey] = rv
+		}
+		return result, true
+	case []interface{}:
+		result := make([]interface{}, len(val))
+		for i, item := range val {
+			rv, ok := g.restoreJSONValue(item)
+			if !ok {
+				return nil, false
+			}
+			result[i] = rv
+		}
+		return result, true
+	case json.Number:
+		return val, true
+	case string:
+		return g.RestoreBody(val), true
+	default:
+		return v, true
+	}
 }

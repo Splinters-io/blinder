@@ -16,7 +16,6 @@ var passthroughHeaders = map[string]bool{
 	"cache-control":                       true,
 	"pragma":                              true,
 	"expires":                             true,
-	"etag":                                true,
 	"vary":                                true,
 	"x-content-type-options":              true,
 	"x-frame-options":                     true,
@@ -70,17 +69,17 @@ var scrubHeaders = map[string]bool{
 	"link":             true,
 	"refresh":          true,
 	"p3p":              true,
-	"x-redirect-by":   true,
+	"x-redirect-by":    true,
 }
 
 var cspKeywords = map[string]bool{
-	"'self'":           true,
-	"'unsafe-inline'":  true,
-	"'unsafe-eval'":    true,
-	"'strict-dynamic'": true,
-	"'none'":           true,
+	"'self'":             true,
+	"'unsafe-inline'":    true,
+	"'unsafe-eval'":      true,
+	"'strict-dynamic'":   true,
+	"'none'":             true,
 	"'wasm-unsafe-eval'": true,
-	"'unsafe-hashes'":  true,
+	"'unsafe-hashes'":    true,
 }
 
 var cspSchemes = map[string]bool{
@@ -94,7 +93,18 @@ var cspSchemes = map[string]bool{
 
 var cspNonceHashRe = regexp.MustCompile(`^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/=]+'$`)
 
-func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain string, targetHost string) http.Header {
+type ResponseHeaderOpts struct {
+	OriginMapper   *OriginMapper
+	RequestOrigin  string
+}
+
+func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain string, targetHost string, opts ...ResponseHeaderOpts) http.Header {
+	var originMapper *OriginMapper
+	var requestOrigin string
+	if len(opts) > 0 {
+		originMapper = opts[0].OriginMapper
+		requestOrigin = opts[0].RequestOrigin
+	}
 	out := make(http.Header)
 
 	for name, values := range resp {
@@ -105,6 +115,14 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 				scrubbed := make([]string, len(values))
 				for i, v := range values {
 					scrubbed[i] = rewriteCSP(v, gate, aliasDomain)
+				}
+				out[name] = scrubbed
+				continue
+			}
+			if lower == "access-control-allow-origin" && originMapper != nil {
+				scrubbed := make([]string, len(values))
+				for i, v := range values {
+					scrubbed[i] = originMapper.RewriteResponseOrigin(v, requestOrigin)
 				}
 				out[name] = scrubbed
 				continue
@@ -124,7 +142,12 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 		if scrubHeaders[lower] {
 			scrubbed := make([]string, len(values))
 			for i, v := range values {
-				scrubbed[i] = gate.Scrub(v, "header:"+lower)
+				if (lower == "location" || lower == "content-location") && originMapper != nil {
+					rewritten := originMapper.RewriteUpstreamURL(v)
+					scrubbed[i] = gate.Scrub(rewritten, "header:"+lower)
+				} else {
+					scrubbed[i] = gate.Scrub(v, "header:"+lower)
+				}
 			}
 			out[name] = scrubbed
 			continue
@@ -143,7 +166,7 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 	return out
 }
 
-func RewriteRequestHeaders(req *http.Request, targetHost string, aliasDomain string, gate *scrub.Gate) *http.Request {
+func RewriteRequestHeaders(req *http.Request, targetHost string, gate *scrub.Gate, origins *OriginMapper) *http.Request {
 	clone := req.Clone(req.Context())
 	clone.Host = targetHost
 
@@ -151,16 +174,17 @@ func RewriteRequestHeaders(req *http.Request, targetHost string, aliasDomain str
 		var parts []string
 		for _, c := range cookies {
 			originalName := gate.OriginalCookieName(c.Name)
-			parts = append(parts, originalName+"="+c.Value)
+			originalValue := gate.RestoreCookieValue(c.Name, c.Value)
+			parts = append(parts, originalName+"="+originalValue)
 		}
 		clone.Header.Set("Cookie", strings.Join(parts, "; "))
 	}
 
-	if ref := clone.Header.Get("Referer"); ref != "" {
-		clone.Header.Set("Referer", strings.ReplaceAll(ref, aliasDomain, targetHost))
+	if values := clone.Header.Values("Referer"); len(values) == 1 {
+		clone.Header.Set("Referer", origins.Rewrite(values[0], false))
 	}
-	if origin := clone.Header.Get("Origin"); origin != "" {
-		clone.Header.Set("Origin", strings.ReplaceAll(origin, aliasDomain, targetHost))
+	if values := clone.Header.Values("Origin"); len(values) == 1 {
+		clone.Header.Set("Origin", origins.Rewrite(values[0], true))
 	}
 
 	clone.Header.Del("Accept-Encoding")
@@ -218,7 +242,9 @@ func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targe
 				cookieName := trimmed[:eqIdx]
 				cookieValue := trimmed[eqIdx+1:]
 				hashedName := gate.AliasCookieNameAndRecord(cookieName)
-				rewritten = append(rewritten, hashedName+"="+cookieValue)
+				scrubbed := gate.Scrub(cookieValue, "cookie:value")
+				actual := gate.RecordCookieValue(hashedName, cookieValue, scrubbed)
+				rewritten = append(rewritten, hashedName+"="+actual)
 				continue
 			}
 		}

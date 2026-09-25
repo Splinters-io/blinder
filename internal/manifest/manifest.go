@@ -14,8 +14,8 @@ import (
 type RequestEntry struct {
 	Path       string `json:"path"`
 	StatusCode int    `json:"status_code"`
-	ScrubCount int    `json:"scrub_count"`
-	LeakCount  int    `json:"leak_count"`
+	ScrubCount int    `json:"scrub_count"` // Identity/domain matches replaced for this request.
+	LeakCount  int    `json:"leak_count"`  // -1 when residual identity leakage has not been measured.
 	Timestamp  string `json:"timestamp"`
 }
 
@@ -47,6 +47,15 @@ type ManifestFile struct {
 	IdentityVault []IdentityEntry `json:"identity_vault"`
 }
 
+type SRIFinding struct {
+	URL               string `json:"url"`
+	UpstreamValid     bool   `json:"upstream_valid"`
+	UpstreamError     string `json:"upstream_error,omitempty"`
+	OriginalIntegrity string `json:"original_integrity"`
+	ReplacementHash   string `json:"replacement_hash,omitempty"`
+	Transformed       bool   `json:"transformed"`
+}
+
 type ScrubReport struct {
 	TotalLeaks int            `json:"total_leaks"`
 	ByType     map[string]int `json:"by_type"`
@@ -63,6 +72,7 @@ type Session struct {
 	aliases     map[string]string // alias → real
 	leaks       []LeakEntry
 	identity    []IdentityEntry
+	sriFindings []SRIFinding
 }
 
 func NewSession(aliasDomain, targetURL string) *Session {
@@ -110,6 +120,14 @@ func (s *Session) RecordLeak(leakType, context, value string) {
 	s.mu.Unlock()
 }
 
+// ReplaceLeaks installs the current gate snapshot, so repeated flushes do not
+// multiply findings that were already written.
+func (s *Session) ReplaceLeaks(entries []LeakEntry) {
+	s.mu.Lock()
+	s.leaks = append([]LeakEntry(nil), entries...)
+	s.mu.Unlock()
+}
+
 func (s *Session) RecordIdentity(path string, meta *metadata.Result) {
 	if meta == nil {
 		return
@@ -134,6 +152,28 @@ func (s *Session) RecordIdentity(path string, meta *metadata.Result) {
 	s.mu.Lock()
 	s.identity = append(s.identity, entry)
 	s.mu.Unlock()
+}
+
+func (s *Session) RecordSRIFinding(url string, valid bool, upstreamErr, originalIntegrity, replacementHash string, transformed bool) {
+	entry := SRIFinding{
+		URL:               url,
+		UpstreamValid:     valid,
+		UpstreamError:     upstreamErr,
+		OriginalIntegrity: originalIntegrity,
+		ReplacementHash:   replacementHash,
+		Transformed:       transformed,
+	}
+	s.mu.Lock()
+	s.sriFindings = append(s.sriFindings, entry)
+	s.mu.Unlock()
+}
+
+func (s *Session) SRIFindings() []SRIFinding {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]SRIFinding, len(s.sriFindings))
+	copy(result, s.sriFindings)
+	return result
 }
 
 func (s *Session) Requests() []RequestEntry {
@@ -184,6 +224,8 @@ func (s *Session) Flush(dir string) error {
 	copy(leaks, s.leaks)
 	identity := make([]IdentityEntry, len(s.identity))
 	copy(identity, s.identity)
+	sriFindings := make([]SRIFinding, len(s.sriFindings))
+	copy(sriFindings, s.sriFindings)
 	s.mu.Unlock()
 
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -212,6 +254,12 @@ func (s *Session) Flush(dir string) error {
 	report := buildScrubReport(leaks)
 	if err := writeAtomicJSON(filepath.Join(dir, "blinder-scrub-report.json"), report); err != nil {
 		return fmt.Errorf("write scrub report: %w", err)
+	}
+
+	if len(sriFindings) > 0 {
+		if err := writeAtomicJSON(filepath.Join(dir, "blinder-sri-findings.json"), sriFindings); err != nil {
+			return fmt.Errorf("write SRI findings: %w", err)
+		}
 	}
 
 	return nil

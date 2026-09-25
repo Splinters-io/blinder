@@ -14,7 +14,7 @@ import (
 
 func reviewRelay(t *testing.T, input []byte, serverToClient bool) []byte {
 	t.Helper()
-	p := NewProxy(scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local"), "alias.local", "acmecorp.io", "unused", false, true, "", time.Second)
+	p := NewProxy(scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local"), "alias.local", "acmecorp.io", "unused", false, true, "", time.Second, nil)
 	dst, reader := net.Pipe()
 	defer reader.Close()
 	done := make(chan struct{})
@@ -50,7 +50,7 @@ func TestReviewFragmentedTextIsScrubbed(t *testing.T) {
 }
 
 func TestReviewHugeFrameIsRejectedBeforeAllocation(t *testing.T) {
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "example.com", "unused", false, true, "", time.Second)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", "example.com", "unused", false, true, "", time.Second, nil)
 	dst, reader := net.Pipe()
 	defer dst.Close()
 	defer reader.Close()

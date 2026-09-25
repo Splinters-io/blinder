@@ -99,15 +99,24 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool
 		fin := first&finBit != 0
 		opcode := first & 0xf
 		if opcode >= 8 {
-			if opcode == opcodeClose && serverToClient && len(payload) > 2 {
-				reason := []byte(p.gate.Scrub(string(payload[2:]), "ws:close"))
-				if len(reason) > 123 {
-					reason = reason[:123]
-					for !utf8.Valid(reason) {
-						reason = reason[:len(reason)-1]
+			if serverToClient && len(payload) > 0 {
+				switch opcode {
+				case opcodeClose:
+					if len(payload) > 2 {
+						reason := []byte(p.gate.Scrub(string(payload[2:]), "ws:close"))
+						if len(reason) > 123 {
+							reason = reason[:123]
+							for !utf8.Valid(reason) {
+								reason = reason[:len(reason)-1]
+							}
+						}
+						payload = append(payload[:2:2], reason...)
+					}
+				case opcodePing, opcodePong:
+					if utf8.Valid(payload) {
+						payload = p.gate.ScrubBytes(payload, "ws:control")
 					}
 				}
-				payload = append(payload[:2:2], reason...)
 			}
 			if err := p.sendFrame(dst, first, payload, !serverToClient); err != nil {
 				return

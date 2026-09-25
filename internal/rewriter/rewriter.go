@@ -1,23 +1,53 @@
 package rewriter
 
 import (
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Splinters-io/blinder/internal/metadata"
 	"github.com/Splinters-io/blinder/internal/scrub"
+	"github.com/Splinters-io/blinder/internal/sri"
 )
 
 type BodyResult struct {
-	Body     []byte
-	Metadata *metadata.Result
+	Body        []byte
+	Metadata    *metadata.Result
+	ContentType string // Nonempty when a replacement changes the media type.
 }
 
-func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate, paranoid bool) BodyResult {
+type RewriteOpts struct {
+	Origins         *OriginMapper
+	SRIPipeline     *sri.Pipeline
+	UpstreamBase    *url.URL
+	BaseRequest     *http.Request
+	RegisterVersion func(upstreamURL, bodyVersion string) string
+	// ResourceURL handles configured opaque resources before generic scrubbing.
+	ResourceURL func(raw string, base *url.URL) (string, bool)
+}
+
+func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate, paranoid bool, opts ...RewriteOpts) BodyResult {
 	ct := normalizeContentType(contentType)
+
+	var opt RewriteOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 
 	switch {
 	case strings.HasPrefix(ct, "text/html"):
-		return BodyResult{Body: rewriteHTML(body, gate, paranoid)}
+		meta := extractHTMLMetadata(body)
+		var sr *sriRewriter
+		if opt.SRIPipeline != nil || opt.ResourceURL != nil {
+			sr = &sriRewriter{
+				pipeline:        opt.SRIPipeline,
+				upstreamBase:    opt.UpstreamBase,
+				baseReq:         opt.BaseRequest,
+				registerVersion: opt.RegisterVersion,
+				resourceURL:     opt.ResourceURL,
+			}
+		}
+		return BodyResult{Body: rewriteHTML(body, gate, paranoid, opt.Origins, sr), Metadata: meta}
 	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
 		return BodyResult{Body: scrubJSON(body, gate, "body:json:"+path)}
 	case strings.HasPrefix(ct, "text/javascript") || ct == "application/javascript":
@@ -28,7 +58,7 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 		return BodyResult{Body: gate.ScrubBytes(body, "body:xml:"+path)}
 	case isBinaryContent(ct):
 		meta := metadata.Extract(body)
-		return BodyResult{Body: rewriteBinaryImage(ct), Metadata: &meta}
+		return BodyResult{Body: rewriteBinaryImage(ct), Metadata: &meta, ContentType: "image/gif"}
 	case strings.HasPrefix(ct, "text/"):
 		return BodyResult{Body: gate.ScrubBytes(body, "body:text:"+path)}
 	default:

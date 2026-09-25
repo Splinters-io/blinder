@@ -27,6 +27,9 @@ func TestReviewPDFProducerIsScrubbed(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/doc.pdf", nil))
+	if rec.Header().Get("Content-Type") != "image/gif" || !strings.HasPrefix(rec.Body.String(), "GIF89a") {
+		t.Fatal("replacement media type does not describe the delivered body")
+	}
 	got := rec.Header().Get("X-Blinder-Meta")
 	if strings.Contains(got, "AcmeCorp") || strings.Contains(got, "acmecorp.io") {
 		t.Fatalf("metadata header leaks: %s", got)
