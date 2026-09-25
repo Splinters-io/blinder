@@ -18,18 +18,29 @@
 
 ---
 
-Blinder sits between your scanner or browser and a live target. It rewrites configured identities, domains and selected response content so downstream consumers see the technical surface without the operator's identity. Original HTTP evidence stays on the operator's side.
+## Why
+
+LLM-driven security tools decide what to test based on what they see. When an AI agent sees the real target -- its domain, its brand, its organisation name -- it forms opinions. It may refuse to probe a well-known service, soften its findings, or decline to generate a proof-of-concept because of who the target is rather than what the target does.
+
+Blinder removes that decision. To the downstream AI, the target looks like a locally hosted application at `https://127.0.0.1:8099`. There is no brand to recognise, no domain to have an opinion about. The AI focuses on the application's behavior: its injection points, its broken access controls, its reflected input. An application vulnerable to XSS still reflects attacker-controlled markup through Blinder. A SQL injection still produces diagnostic errors. A CSRF still lacks its token. Every technical vulnerability the application has is preserved exactly as-is -- only the identity is gone.
+
+This is content-blind scanning: the operator controls who the target is; the AI focuses on what it does.
 
 ```text
- Browser / scanner ── HTTPS ── Blinder ── direct or Tor ── Target
-                                │
-                                ├── Scrubbed content → downstream
-                                └── Original evidence → operator
+ AI scanner / browser ── HTTPS ── Blinder ── direct or Tor ── Target
+                                    │
+                         looks like localhost    real identity
+                         no brand, no domain     stays here
+                                    │
+                                    ├── Scrubbed content → AI sees technical surface only
+                                    └── Original evidence → operator keeps full fidelity
 ```
+
+## What it does
 
 | | |
 | :--- | :--- |
-| **Content scrubbing** | Identity tokens, domain references and cookie values rewritten across HTTP bodies, headers and WebSocket text. HTML tokenizer handles entity-encoded and attribute-embedded identities. |
+| **Content scrubbing** | Identity tokens, domain references and cookie values rewritten across HTTP bodies, headers and WebSocket text. HTML tokenizer handles entity-encoded and attribute-embedded identities. Technical content -- vulnerabilities, error messages, injection reflections, security headers -- passes through unchanged. |
 | **Resource integrity** | SRI attributes stripped on proxied resources (where content will be scrubbed), preserved on external CDN references. Version-tagged body references survive cache revalidation. |
 | **Response cache** | Separate upstream/downstream cache validators. 304 revalidation merges security-policy headers. Vary-aware eviction. |
 | **Session handling** | Reversible cookie names with per-value scrubbing. Multi-origin routing via `--extra-origin` with deterministic alias hostnames, Host-header routing and CORS origin translation. |
