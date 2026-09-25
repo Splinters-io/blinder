@@ -190,7 +190,7 @@ func (c *ResponseCache) Revalidate(key string, respHeaders http.Header) {
 	c.promote(key)
 }
 
-func (c *ResponseCache) UpdateHeaders(key, name, value string) {
+func (c *ResponseCache) UpdatePolicyHeaders(key string, headers http.Header, names []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
@@ -199,7 +199,15 @@ func (c *ResponseCache) UpdateHeaders(key, name, value string) {
 	}
 	updated := *e
 	updated.Headers = e.Headers.Clone()
-	updated.Headers.Set(name, value)
+	for _, name := range names {
+		vals := headers.Values(name)
+		if len(vals) > 0 {
+			updated.Headers.Del(name)
+			for _, v := range vals {
+				updated.Headers.Add(name, v)
+			}
+		}
+	}
 	c.entries[key] = &updated
 }
 

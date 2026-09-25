@@ -506,7 +506,7 @@ func TestAudit267SRIBlockDoesNotEnableInlineScript(t *testing.T) {
 		return audit267SRIResponse("application/javascript", asset), nil
 	})
 	page := audit267SRIRequest(s, "GET", "/page", "", "")
-	dir := "/Users/carroll/.codex/visualizations/2026/09/23/01a0ce57-c07e-79e0-a189-9f6c7c6023dd/blinder-cache-a26766d"
+	dir := t.TempDir()
 	for name, data := range map[string]string{"original.html": original, "rewritten.html": page.Body.String(), "asset.js": asset} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
 			t.Fatal(err)
@@ -528,7 +528,7 @@ func TestAudit267SRIBlockConsumesSelfClosingScriptBody(t *testing.T) {
 		return audit267SRIResponse("application/javascript", asset), nil
 	})
 	page := audit267SRIRequest(s, "GET", "/page", "", "")
-	dir := "/Users/carroll/.codex/visualizations/2026/09/23/01a0ce57-c07e-79e0-a189-9f6c7c6023dd/blinder-cache-a26766d"
+	dir := t.TempDir()
 	for name, data := range map[string]string{"selfclosing-original.html": original, "selfclosing-rewritten.html": page.Body.String(), "asset.js": asset} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
 			t.Fatal(err)

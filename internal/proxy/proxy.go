@@ -29,6 +29,15 @@ import (
 const maxRequestBody = 50 * 1024 * 1024
 const maxResponseBody = 50 * 1024 * 1024
 
+var revalidationPolicyHeaders = []string{
+	"Cache-Control",
+	"Content-Security-Policy",
+	"Content-Security-Policy-Report-Only",
+	"Referrer-Policy",
+	"Permissions-Policy",
+	"Strict-Transport-Security",
+}
+
 type Stats struct {
 	Requests atomic.Int64
 	Bytes    atomic.Int64
@@ -363,6 +372,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		upstreamURL = orig
 	}
 
+	var sriBodyVersion string
+	upstreamURL, sriBodyVersion = stripBodyVersion(upstreamURL)
+
 	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
 		if served := s.tryServeSRICache(w, r, upstreamURL, gate); served {
@@ -414,6 +426,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.RequestURI = ""
 	if parsed, err := url.Parse(upstreamURL); err == nil {
 		upstreamReq.URL.Path = parsed.Path
+		upstreamReq.URL.RawPath = parsed.RawPath
 		upstreamReq.URL.RawQuery = parsed.RawQuery
 	}
 
@@ -467,39 +480,46 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		)
 
 		s.responseCache.Revalidate(staleCacheKey, resp.Header)
+
+		mergePolicyHeaders := func(dst http.Header, src http.Header) {
+			for _, name := range revalidationPolicyHeaders {
+				if vals := src.Values(name); len(vals) > 0 {
+					dst.Del(name)
+					for _, v := range vals {
+						dst.Add(name, v)
+					}
+				}
+			}
+		}
+
 		refreshed, ok := s.responseCache.Lookup(staleCacheKey)
 		if !ok {
 			served := *staleEntry
 			served.Headers = staleEntry.Headers.Clone()
-			if cc := scrubbedRespHeaders.Get("Cache-Control"); cc != "" {
-				served.Headers.Set("Cache-Control", cc)
-			}
-			if csp := scrubbedRespHeaders.Get("Content-Security-Policy"); csp != "" {
-				served.Headers.Set("Content-Security-Policy", csp)
-			}
+			mergePolicyHeaders(served.Headers, scrubbedRespHeaders)
 			s.writeCachedResponse(w, &served, r.Method == http.MethodHead, r.Header.Get("Origin"))
 			status = served.StatusCode
 			return
 		}
 
-		if csp := scrubbedRespHeaders.Get("Content-Security-Policy"); csp != "" {
-			refreshed.Headers = refreshed.Headers.Clone()
-			refreshed.Headers.Set("Content-Security-Policy", csp)
-			s.responseCache.UpdateHeaders(staleCacheKey, "Content-Security-Policy", csp)
-		}
+		refreshed.Headers = refreshed.Headers.Clone()
+		mergePolicyHeaders(refreshed.Headers, scrubbedRespHeaders)
+		s.responseCache.UpdatePolicyHeaders(staleCacheKey, scrubbedRespHeaders, revalidationPolicyHeaders)
 
 		newVary := cache.ParseVary(resp.Header.Get("Vary"))
 		if len(newVary) > 0 && (newVary[0] == "*" || !varyEqual(newVary, staleEntry.VaryFields)) {
 			credHash := cache.CredentialHash(r)
+			baseKey := cache.Key(upstreamURL, credHash, r, nil)
 			if staleEntry.VaryFields != nil {
 				oldVariantKey := cache.Key(upstreamURL, credHash, r, staleEntry.VaryFields)
 				s.responseCache.Remove(oldVariantKey)
 			}
 			if newVary[0] == "*" {
 				s.responseCache.Remove(staleCacheKey)
+				s.responseCache.Remove(baseKey)
 			} else {
 				variantKey := cache.Key(upstreamURL, credHash, r, newVary)
-				s.responseCache.Store(staleCacheKey, cache.Entry{
+				s.responseCache.Store(baseKey, cache.Entry{
 					VarySentinel: true,
 					VaryFields:   append([]string(nil), newVary...),
 					Directives:   cache.Directives{MaxAge: refreshed.Directives.MaxAge},
@@ -514,6 +534,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 		inm := r.Header.Get("If-None-Match")
 		if cache.MatchesETag(inm, refreshed.ETag) {
+			for _, name := range revalidationPolicyHeaders {
+				for _, v := range refreshed.Headers.Values(name) {
+					w.Header().Add(name, v)
+				}
+			}
 			w.Header().Set("ETag", refreshed.ETag)
 			status = http.StatusNotModified
 			w.WriteHeader(http.StatusNotModified)
@@ -544,8 +569,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet && s.sriPipeline != nil {
 		sriKey := sri.CacheKey(upstreamURL, r)
+		if sriBodyVersion != "" {
+			sriKey += "\x01" + sriBodyVersion
+		}
 		integrityOK := s.sriCache.CheckBodyIntegrity(sriKey, body)
-		if integrityOK {
+		if integrityOK && sriBodyVersion == "" {
 			if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
 				integrityOK = s.sriCache.CheckBodyIntegrity(sri.CacheKey(orig, r), body)
 			}
@@ -814,10 +842,35 @@ func (s *Server) readResponseBody(resp *http.Response) ([]byte, error) {
 func (s *Server) unaliasURL(upstreamURL string) string {
 	for alias, original := range s.gate.Aliases() {
 		if strings.Contains(upstreamURL, alias) {
-			return strings.Replace(upstreamURL, alias, original, 1)
+			upstreamURL = strings.ReplaceAll(upstreamURL, alias, original)
 		}
 	}
 	return upstreamURL
+}
+
+func stripBodyVersion(rawURL string) (string, string) {
+	idx := strings.Index(rawURL, "_bv=")
+	if idx < 0 {
+		return rawURL, ""
+	}
+	sepIdx := idx - 1
+	if sepIdx < 0 || (rawURL[sepIdx] != '?' && rawURL[sepIdx] != '&') {
+		return rawURL, ""
+	}
+	end := strings.IndexByte(rawURL[idx:], '&')
+	var version string
+	if end < 0 {
+		version = rawURL[idx+4:]
+		if rawURL[sepIdx] == '?' {
+			rawURL = rawURL[:sepIdx]
+		} else {
+			rawURL = rawURL[:sepIdx]
+		}
+	} else {
+		version = rawURL[idx+4 : idx+end]
+		rawURL = rawURL[:sepIdx] + rawURL[idx+end:]
+	}
+	return rawURL, version
 }
 
 func varyEqual(a, b []string) bool {

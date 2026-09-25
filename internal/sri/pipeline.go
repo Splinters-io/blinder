@@ -3,6 +3,8 @@ package sri
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +42,7 @@ type ProcessResult struct {
 	ReplacementHash    string
 	BytesModified      bool
 	VerificationFailed bool
+	BodyVersion        string
 }
 
 type PipelineConfig struct {
@@ -120,7 +123,18 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		return &ProcessResult{UpstreamError: fetchErr.Error()}
 	}
 
-	p.cache.IndexDigest(cacheKey, body)
+	noStore := respHeaders != nil &&
+		strings.Contains(strings.ToLower(respHeaders.Get("Cache-Control")), "no-store")
+
+	var bodyVersion string
+	if noStore {
+		h := sha256.Sum256(body)
+		bodyVersion = hex.EncodeToString(h[:8])
+		p.cache.IndexDigest(cacheKey+"\x01"+bodyVersion, body)
+	} else {
+		p.cache.IndexDigest(cacheKey, body)
+	}
+
 	digests := computeAllDigests(body)
 
 	if respCT == "" {
@@ -143,7 +157,11 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 	}
 	p.cache.Put(cacheKey, cached)
 
-	return p.verifyAgainstCached(cached, entries, integrityAttr, resourceURL)
+	result := p.verifyAgainstCached(cached, entries, integrityAttr, resourceURL)
+	if result != nil {
+		result.BodyVersion = bodyVersion
+	}
+	return result
 }
 
 func (p *Pipeline) verifyAgainstCached(cached *CacheEntry, entries []HashEntry, integrityAttr, resourceURL string) *ProcessResult {

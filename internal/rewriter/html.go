@@ -43,6 +43,7 @@ type sriDecision struct {
 	action          sriAction
 	replacementHash string
 	integrityVal    string
+	bodyVersion     string
 }
 
 func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMapper, sr *sriRewriter) []byte {
@@ -217,9 +218,9 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 		}
 		if result != nil && result.UpstreamValid {
 			if result.BytesModified {
-				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityVal: integrityVal}
+				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityVal: integrityVal, bodyVersion: result.BodyVersion}
 			}
-			return sriDecision{action: sriKeep, integrityVal: integrityVal}
+			return sriDecision{action: sriKeep, integrityVal: integrityVal, bodyVersion: result.BodyVersion}
 		}
 		return sriDecision{action: sriKeep, integrityVal: integrityVal}
 	}
@@ -270,7 +271,15 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 		out.WriteByte(' ')
 		out.WriteString(a.key)
 		out.WriteString(`="`)
-		out.WriteString(html.EscapeString(scrubAttrValue(tagName, a.key, a.val, relVal, gate, origins)))
+		val := scrubAttrValue(tagName, a.key, a.val, relVal, gate, origins)
+		if sri.bodyVersion != "" && ((tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href")) {
+			if strings.Contains(val, "?") {
+				val += "&_bv=" + sri.bodyVersion
+			} else {
+				val += "?_bv=" + sri.bodyVersion
+			}
+		}
+		out.WriteString(html.EscapeString(val))
 		out.WriteByte('"')
 	}
 }

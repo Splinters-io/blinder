@@ -111,9 +111,7 @@ func (c *Cache) InvalidateURL(rawURL string) {
 func (c *Cache) IndexDigest(key string, rawBody []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.digestIndex[key]; !exists {
-		c.digestIndex[key] = sha256.Sum256(rawBody)
-	}
+	c.digestIndex[key] = sha256.Sum256(rawBody)
 }
 
 func (c *Cache) CheckBodyIntegrity(key string, rawBody []byte) bool {
