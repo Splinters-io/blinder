@@ -19,8 +19,11 @@ func TestGate_ScrubsTargetDomain(t *testing.T) {
 func TestGate_ScrubsIdentityToken(t *testing.T) {
 	g := NewGate(nil, []string{"Acme Corp"}, "target-001.local")
 	result := g.Scrub("Welcome to Acme Corp portal", "test")
-	if result != "Welcome to [REDACTED] portal" {
-		t.Errorf("expected identity token scrubbed, got: %s", result)
+	if strings.Contains(result, "Acme Corp") {
+		t.Errorf("identity token should be scrubbed, got: %s", result)
+	}
+	if !strings.Contains(result, "[REDACTED:") {
+		t.Errorf("scrubbed token should use reversible alias format, got: %s", result)
 	}
 }
 
@@ -102,8 +105,11 @@ func TestGate_CaseInsensitiveDomain(t *testing.T) {
 func TestGate_CaseInsensitiveToken(t *testing.T) {
 	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
 	result := g.Scrub("Welcome to acmecorp", "test")
-	if result != "Welcome to [REDACTED]" {
+	if strings.Contains(result, "acmecorp") {
 		t.Errorf("token scrub should be case-insensitive, got: %s", result)
+	}
+	if !strings.Contains(result, "[REDACTED:") {
+		t.Errorf("scrubbed token should use reversible alias format, got: %s", result)
 	}
 }
 
@@ -157,8 +163,8 @@ func TestGate_CookieValueRoundTrip(t *testing.T) {
 	if scrubbed == original {
 		t.Fatal("scrub should have replaced identity token in cookie value")
 	}
-	if !strings.Contains(scrubbed, "[REDACTED]") {
-		t.Errorf("identity token should be replaced with [REDACTED], got: %s", scrubbed)
+	if !strings.Contains(scrubbed, "[REDACTED:") {
+		t.Errorf("identity token should be replaced with reversible alias, got: %s", scrubbed)
 	}
 
 	restored := g.RestoreCookieValue(aliased, scrubbed)

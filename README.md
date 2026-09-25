@@ -71,6 +71,8 @@ Preflight generates or reuses the local certificate and prints its public path, 
 
 Use `--cert-dir DIR` for a chosen private store. Certificates persist across restarts; `--ephemeral-cert` selects a temporary identity. Preflight exit **2** means platform trust needs setup; a client using its own certificate file can still connect successfully.
 
+The endpoint store also holds a private `version-signing.key`, independent of certificate renewal. Keep it across restarts so expired resource references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
+
 [Certificate setup, OS guidance and renewal →](docs/testing.md#local-certificate-trust)
 
 ## Tor

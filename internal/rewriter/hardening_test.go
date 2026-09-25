@@ -13,7 +13,6 @@ func TestJSONFailsClosed(t *testing.T) {
 		`{"company":"\u0041cmeCorp"`,
 		`{"safe":1}]`,
 		`{"safe":1} {"company":"\u0041cmeCorp"}`,
-		`{"AcmeCorp":1,"OtherOrg":2}`,
 	} {
 		t.Run(source, func(t *testing.T) {
 			gate := scrub.NewGate(nil, []string{"AcmeCorp", "OtherOrg"}, "alias.local")
@@ -22,6 +21,27 @@ func TestJSONFailsClosed(t *testing.T) {
 				t.Fatalf("ambiguous/invalid JSON must fail closed, got %s", got)
 			}
 		})
+	}
+}
+
+func TestJSONDistinctAliasedKeysPreserveBothValues(t *testing.T) {
+	gate := scrub.NewGate(nil, []string{"AcmeCorp", "OtherOrg"}, "alias.local")
+	got := RewriteBody([]byte(`{"AcmeCorp":1,"OtherOrg":2}`), "application/json", "/", gate, false).Body
+	if string(got) == "null" {
+		t.Fatal("distinct aliased keys should produce valid JSON, not null")
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(got, &parsed); err != nil {
+		t.Fatalf("output must be valid JSON: %v (got %s)", err, got)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("both keys must be preserved: got %d keys in %s", len(parsed), got)
+	}
+	for _, v := range parsed {
+		val, ok := v.(float64)
+		if !ok || (val != 1 && val != 2) {
+			t.Fatalf("values must be preserved: got %v in %s", v, got)
+		}
 	}
 }
 

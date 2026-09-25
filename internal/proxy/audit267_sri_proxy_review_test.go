@@ -134,11 +134,14 @@ func TestAudit267SRIFailedFetchAppearsInRawEvidence(t *testing.T) {
 
 func (f audit267SRITransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func audit267SRIServer(t *testing.T, fn audit267SRITransport) *Server {
+func audit267SRIServer(t *testing.T, fn audit267SRITransport, keyDir ...string) *Server {
 	t.Helper()
 	cfg, err := config.New("https://main.example", "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(keyDir) > 0 {
+		cfg.VersionKeyDir = keyDir[0] + "/version-store"
 	}
 	s, err := NewWithCertificate(cfg, tls.Certificate{})
 	if err != nil {

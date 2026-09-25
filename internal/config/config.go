@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Splinters-io/blinder/internal/captcha"
 )
 
 type TorConfig struct {
@@ -19,20 +22,23 @@ type HARConfig struct {
 }
 
 type Config struct {
-	TargetURL       *url.URL
-	ExtraOrigins    []*url.URL
-	ListenAddr      string
-	AliasDomain     string
-	IdentityTokens  []string
-	VerifyTargetTLS bool
-	Paranoid        bool
-	BindAll         bool
-	Tor             *TorConfig
-	HAR             *HARConfig
-	OutputDir       string
-	CertDir         string
-	UpstreamTimeout int
-	ClientTimeout   int
+	TargetURL         *url.URL
+	ExtraOrigins      []*url.URL
+	ListenAddr        string
+	AliasDomain       string
+	IdentityTokens    []string
+	VerifyTargetTLS   bool
+	Paranoid          bool
+	BindAll           bool
+	Tor               *TorConfig
+	HAR               *HARConfig
+	OutputDir         string
+	CertDir           string
+	VersionKeyDir     string // Defaults to CertDir; CLI also persists ownership with ephemeral TLS.
+	UpstreamTimeout   int
+	ClientTimeout     int
+	CaptchaConfigPath string
+	Captcha           *captcha.Config
 }
 
 var (
@@ -191,4 +197,21 @@ func (c *Config) IsOnion() bool {
 
 func (c *Config) UseTor() bool {
 	return c.Tor != nil
+}
+
+func (c *Config) LoadCaptchaConfig() error {
+	if c.CaptchaConfigPath == "" {
+		c.Captcha = &captcha.Config{}
+		return nil
+	}
+	data, err := os.ReadFile(c.CaptchaConfigPath)
+	if err != nil {
+		return fmt.Errorf("captcha config: %w", err)
+	}
+	cfg, err := captcha.ParseConfig(data)
+	if err != nil {
+		return err
+	}
+	c.Captcha = cfg
+	return nil
 }

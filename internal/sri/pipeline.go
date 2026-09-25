@@ -103,7 +103,14 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 	if idx := strings.IndexByte(canonicalURL, '#'); idx >= 0 {
 		canonicalURL = canonicalURL[:idx]
 	}
-	cacheKey := CacheKey(canonicalURL, baseReq)
+	sameOrig := isSameOrigin(parsedURL, pageOrigin)
+	sendCreds := sameOrig
+
+	cacheKeyReq := baseReq
+	if !sendCreds {
+		cacheKeyReq = nil
+	}
+	cacheKey := CacheKey(canonicalURL, cacheKeyReq)
 
 	if cached, ok := p.cache.Get(cacheKey); ok {
 		if cached.FetchError != "" {
@@ -116,9 +123,6 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		}
 	}
 
-	sameOrig := isSameOrigin(parsedURL, pageOrigin)
-	sendCreds := sameOrig
-
 	body, respCT, respHeaders, fetchErr := p.fetch(resourceURL, sendCreds, baseReq)
 	if fetchErr != nil {
 		cached := &CacheEntry{FetchError: fetchErr.Error()}
@@ -128,7 +132,7 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 	}
 
 	h := sha256.Sum256(body)
-	bodyVersion := hex.EncodeToString(h[:8])
+	bodyVersion := "bl" + hex.EncodeToString(h[:8])
 	p.cache.IndexDigest(cacheKey+"\x01"+bodyVersion, body)
 
 	digests := computeAllDigests(body)

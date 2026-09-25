@@ -165,8 +165,8 @@ func TestRewriteResponseHeaders_SetCookieValueScrub(t *testing.T) {
 	if strings.Contains(cookie, "AcmeCorp") {
 		t.Errorf("cookie value should have identity token scrubbed, got: %s", cookie)
 	}
-	if !strings.Contains(cookie, "[REDACTED]") {
-		t.Errorf("cookie value should contain [REDACTED], got: %s", cookie)
+	if !strings.Contains(cookie, "[REDACTED:") {
+		t.Errorf("cookie value should contain reversible alias, got: %s", cookie)
 	}
 	if !strings.Contains(cookie, "HttpOnly") {
 		t.Error("cookie attributes should be preserved")
@@ -182,8 +182,9 @@ func TestRewriteRequestHeaders_CookieValueRestored(t *testing.T) {
 	RewriteResponseHeaders(respHeaders, gate, "alias.local", "target.com")
 
 	aliasedName := gate.AliasCookieNameAndRecord("session")
+	scrubbedVal := gate.Scrub("tok-AcmeCorp-xyz", "cookie:value")
 	req, _ := http.NewRequest("GET", "https://alias.local/page", nil)
-	req.Header.Set("Cookie", aliasedName+"=tok-[REDACTED]-xyz")
+	req.Header.Set("Cookie", aliasedName+"="+scrubbedVal)
 
 	origins := NewOriginMapper(&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:443", "alias.local")
 	rewritten := RewriteRequestHeaders(req, "target.com", gate, origins)
@@ -192,8 +193,8 @@ func TestRewriteRequestHeaders_CookieValueRestored(t *testing.T) {
 	if !strings.Contains(cookieHeader, "tok-AcmeCorp-xyz") {
 		t.Errorf("cookie value should be restored to original, got: %s", cookieHeader)
 	}
-	if strings.Contains(cookieHeader, "[REDACTED]") {
-		t.Errorf("cookie value should not contain [REDACTED] after restoration, got: %s", cookieHeader)
+	if strings.Contains(cookieHeader, "[REDACTED:") {
+		t.Errorf("cookie value should not contain alias after restoration, got: %s", cookieHeader)
 	}
 }
 

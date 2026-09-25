@@ -17,10 +17,13 @@ type BodyResult struct {
 }
 
 type RewriteOpts struct {
-	Origins      *OriginMapper
-	SRIPipeline  *sri.Pipeline
-	UpstreamBase *url.URL
-	BaseRequest  *http.Request
+	Origins         *OriginMapper
+	SRIPipeline     *sri.Pipeline
+	UpstreamBase    *url.URL
+	BaseRequest     *http.Request
+	RegisterVersion func(upstreamURL, bodyVersion string) string
+	// ResourceURL handles configured opaque resources before generic scrubbing.
+	ResourceURL func(raw string, base *url.URL) (string, bool)
 }
 
 func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate, paranoid bool, opts ...RewriteOpts) BodyResult {
@@ -35,11 +38,13 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 	case strings.HasPrefix(ct, "text/html"):
 		meta := extractHTMLMetadata(body)
 		var sr *sriRewriter
-		if opt.SRIPipeline != nil {
+		if opt.SRIPipeline != nil || opt.ResourceURL != nil {
 			sr = &sriRewriter{
-				pipeline:     opt.SRIPipeline,
-				upstreamBase: opt.UpstreamBase,
-				baseReq:      opt.BaseRequest,
+				pipeline:        opt.SRIPipeline,
+				upstreamBase:    opt.UpstreamBase,
+				baseReq:         opt.BaseRequest,
+				registerVersion: opt.RegisterVersion,
+				resourceURL:     opt.ResourceURL,
 			}
 		}
 		return BodyResult{Body: rewriteHTML(body, gate, paranoid, opt.Origins, sr), Metadata: meta}

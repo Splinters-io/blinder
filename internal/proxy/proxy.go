@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Splinters-io/blinder/internal/cache"
+	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/har"
 	"github.com/Splinters-io/blinder/internal/manifest"
@@ -37,6 +39,8 @@ var revalidationPolicyHeaders = []string{
 	"Permissions-Policy",
 	"Strict-Transport-Security",
 	"Cross-Origin-Resource-Policy",
+	"Cross-Origin-Opener-Policy",
+	"Cross-Origin-Embedder-Policy",
 	"X-Frame-Options",
 }
 
@@ -48,19 +52,24 @@ type Stats struct {
 }
 
 type Server struct {
-	cfg         *config.Config
-	gate        *scrub.Gate
-	origins     *rewriter.OriginMapper
-	transport   http.RoundTripper
-	server      *http.Server
-	wsProxy     *ws.Proxy
-	harWriter   *har.Writer
-	manifest    *manifest.Session
-	sriCache      *sri.Cache
-	sriPipeline   *sri.Pipeline
-	responseCache *cache.ResponseCache
-	stats         Stats
-	done          chan struct{}
+	cfg                  *config.Config
+	gate                 *scrub.Gate
+	origins              *rewriter.OriginMapper
+	transport            http.RoundTripper
+	server               *http.Server
+	wsProxy              *ws.Proxy
+	harWriter            *har.Writer
+	manifest             *manifest.Session
+	sriCache             *sri.Cache
+	sriPipeline          *sri.Pipeline
+	responseCache        *cache.ResponseCache
+	versionRefs          *versionRegistry
+	captchaMatcher       *captcha.Matcher
+	captchaQueue         *captcha.ChallengeQueue
+	captchaOperator      *captcha.OperatorHandler
+	captchaOperatorToken string
+	stats                Stats
+	done                 chan struct{}
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -73,6 +82,14 @@ func New(cfg *config.Config) (*Server, error) {
 
 // NewWithCertificate uses the exact identity inspected during CLI preflight.
 func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, error) {
+	keyDir := cfg.VersionKeyDir
+	if keyDir == "" {
+		keyDir = cfg.CertDir
+	}
+	versionRefs, err := persistentVersionRegistry(1024, keyDir)
+	if err != nil {
+		return nil, fmt.Errorf("version signing key: %w", err)
+	}
 	targetHost := cfg.TargetURL.Hostname()
 	targetDomains := append([]string{targetHost}, extractSubdomains(targetHost)...)
 	for _, extra := range cfg.ExtraOrigins {
@@ -82,6 +99,32 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	}
 
 	gate := scrub.NewGate(targetDomains, cfg.IdentityTokens, cfg.AliasDomain)
+
+	if cfg.Captcha != nil {
+		var preserveDomains []string
+		for _, p := range cfg.Captcha.Providers {
+			if len(p.URLRegexes) > 0 {
+				continue
+			}
+			for _, origin := range p.ResourceOrigins {
+				if u, err := url.Parse(origin); err == nil && u.Hostname() != "" {
+					preserveDomains = append(preserveDomains, u.Hostname())
+				}
+			}
+		}
+		if len(preserveDomains) > 0 {
+			gate.PreserveDomains(preserveDomains)
+		}
+		if cfg.Captcha.Matcher != nil {
+			gate.SetPreserveURLCheck(func(fullURL string) bool {
+				u, err := url.Parse(fullURL)
+				if err != nil {
+					return false
+				}
+				return cfg.Captcha.Matcher.IsProviderResource(u)
+			})
+		}
+	}
 
 	var extraRoutes []rewriter.OriginRoute
 	seenAliases := map[string]string{cfg.AliasDomain: cfg.TargetURL.Host}
@@ -174,18 +217,36 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 
 	sriPipeline := sri.NewPipeline(sriCfg)
 
+	var captchaCfg *captcha.Config
+	if cfg.Captcha != nil {
+		captchaCfg = cfg.Captcha
+	} else {
+		captchaCfg = &captcha.Config{}
+	}
+
+	matcher := captcha.NewMatcher(captchaCfg)
+	matcher.SetPrimaryHost(cfg.TargetURL.Hostname())
+	challengeQueue := captcha.NewChallengeQueue(10 * time.Minute)
+	operatorHandler, operatorToken := captcha.NewOperatorHandler(challengeQueue, matcher, transport, cfg.UseTor())
+	operatorHandler.SetResourceTimeout(upstreamTimeout)
+
 	s := &Server{
-		cfg:           cfg,
-		gate:          gate,
-		origins:       origins,
-		transport:     transport,
-		wsProxy:       wsProxy,
-		harWriter:     harWriter,
-		manifest:      session,
-		sriCache:      sriCache,
-		sriPipeline:   sriPipeline,
-		responseCache: cache.New(4096),
-		done:          make(chan struct{}),
+		cfg:                  cfg,
+		gate:                 gate,
+		origins:              origins,
+		transport:            transport,
+		wsProxy:              wsProxy,
+		harWriter:            harWriter,
+		manifest:             session,
+		sriCache:             sriCache,
+		sriPipeline:          sriPipeline,
+		responseCache:        cache.New(4096),
+		versionRefs:          versionRefs,
+		captchaMatcher:       matcher,
+		captchaQueue:         challengeQueue,
+		captchaOperator:      operatorHandler,
+		captchaOperatorToken: operatorToken,
+		done:                 make(chan struct{}),
 	}
 
 	if harWriter != nil && cfg.HAR != nil {
@@ -193,6 +254,7 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	}
 
 	mux := http.NewServeMux()
+	mux.Handle("/__blinder/captcha/", s.captchaOperator)
 	mux.HandleFunc("/", s.handleRequest)
 
 	clientTimeout := time.Duration(cfg.ClientTimeout) * time.Second
@@ -228,11 +290,16 @@ func (s *Server) ListenAndServeOnListener(ln net.Listener) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.done)
 	s.wsProxy.Close()
+	s.captchaQueue.Shutdown()
 	return s.server.Shutdown(ctx)
 }
 
 func (s *Server) Gate() *scrub.Gate {
 	return s.gate
+}
+
+func (s *Server) CaptchaOperatorToken() string {
+	return s.captchaOperatorToken
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -338,6 +405,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), leakCount)
 	}()
 
+	upstream := s.origins.Resolve(r.Host)
+	if upstream == nil {
+		upstream = s.cfg.TargetURL
+	}
+
 	if r.ContentLength > maxRequestBody {
 		status = http.StatusRequestEntityTooLarge
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
@@ -361,21 +433,165 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			s.stats.Errors.Add(1)
 			return
 		}
+		ct := r.Header.Get("Content-Type")
+		normCT := strings.ToLower(strings.TrimSpace(ct))
+		if i := strings.IndexByte(normCT, ';'); i >= 0 {
+			normCT = strings.TrimSpace(normCT[:i])
+		}
+		if strings.HasPrefix(normCT, "application/x-www-form-urlencoded") {
+			if formValues, err := url.ParseQuery(string(reqBodyBuf)); err == nil {
+				needsRestore := false
+				for key, vals := range formValues {
+					if gate.ContainsAlias(key) || gate.ContainsEscape(key) {
+						needsRestore = true
+						break
+					}
+					for _, v := range vals {
+						if gate.ContainsAlias(v) || gate.ContainsEscape(v) {
+							needsRestore = true
+							break
+						}
+					}
+					if needsRestore {
+						break
+					}
+				}
+				if needsRestore {
+					restored := make(url.Values, len(formValues))
+					for key, vals := range formValues {
+						rk := gate.RestoreBody(key)
+						for _, v := range vals {
+							if s.captchaMatcher.SubmissionHasOpaqueFields(r, rk, upstream.Hostname()) {
+								restored.Add(rk, v)
+							} else {
+								restored.Add(rk, gate.RestoreBody(v))
+							}
+						}
+					}
+					reqBodyBuf = []byte(restored.Encode())
+				}
+			}
+		} else if normCT == "application/json" || strings.HasSuffix(normCT, "+json") {
+			opaqueKeys := s.opaqueJSONKeys(r, upstream.Hostname())
+			if len(opaqueKeys) > 0 {
+				restored, restoreErr := s.restoreJSONWithOpaqueKeys(gate, reqBodyBuf, opaqueKeys)
+				if restoreErr != nil {
+					status = http.StatusBadRequest
+					http.Error(w, "ambiguous request body", http.StatusBadRequest)
+					return
+				}
+				reqBodyBuf = restored
+			} else {
+				restored := gate.RestoreJSON(reqBodyBuf)
+				if restored == nil {
+					status = http.StatusBadRequest
+					http.Error(w, "ambiguous request body", http.StatusBadRequest)
+					return
+				}
+				reqBodyBuf = restored
+			}
+		} else {
+			reqBodyBuf = []byte(gate.RestoreBody(string(reqBodyBuf)))
+		}
 		r.Body = io.NopCloser(bytes.NewReader(reqBodyBuf))
+		r.ContentLength = int64(len(reqBodyBuf))
 	}
 
-	upstream := s.origins.Resolve(r.Host)
-	if upstream == nil {
-		upstream = s.cfg.TargetURL
+	if rawQuery := r.URL.RawQuery; rawQuery != "" {
+		if q, err := url.ParseQuery(rawQuery); err == nil {
+			restored := make(url.Values, len(q))
+			changed := false
+			for key, vals := range q {
+				rk := gate.RestoreBody(key)
+				if rk != key {
+					changed = true
+				}
+				for _, v := range vals {
+					rv := gate.RestoreBody(v)
+					if rv != v {
+						changed = true
+					}
+					restored.Add(rk, rv)
+				}
+			}
+			if changed {
+				r.URL.RawQuery = restored.Encode()
+			}
+		}
 	}
 
-	upstreamURL := upstream.Scheme + "://" + upstream.Host + r.URL.RequestURI()
-	if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
-		upstreamURL = orig
-	}
-
+	var upstreamURL string
 	var sriBodyVersion string
-	upstreamURL, sriBodyVersion = stripBodyVersion(upstreamURL)
+
+	blvHandled := false
+	for _, v := range r.URL.Query()["__blv"] {
+		ref, isProxy, found := s.versionRefs.VerifyAndLookup(v)
+		if !isProxy {
+			continue
+		}
+		if !found {
+			status = http.StatusBadGateway
+			http.Error(w, "resource version expired", http.StatusBadGateway)
+			s.stats.Errors.Add(1)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			status = http.StatusBadGateway
+			http.Error(w, "resource version expired", http.StatusBadGateway)
+			s.stats.Errors.Add(1)
+			return
+		}
+		parsed, err := url.Parse(ref.UpstreamURL)
+		if err != nil {
+			status = http.StatusBadGateway
+			http.Error(w, "resource version expired", http.StatusBadGateway)
+			s.stats.Errors.Add(1)
+			return
+		}
+		if !sameOrigin(upstream, parsed) {
+			status = http.StatusBadGateway
+			http.Error(w, "resource version expired", http.StatusBadGateway)
+			s.stats.Errors.Add(1)
+			return
+		}
+		appQuery := r.URL.Query()
+		blvVals := appQuery["__blv"]
+		var remaining []string
+		for _, qv := range blvVals {
+			if qv != v {
+				remaining = append(remaining, qv)
+			}
+		}
+		if len(remaining) > 0 {
+			appQuery["__blv"] = remaining
+		} else {
+			delete(appQuery, "__blv")
+		}
+		appURI := r.URL.Path
+		if encoded := appQuery.Encode(); encoded != "" {
+			appURI += "?" + encoded
+		}
+		candidateURL := s.unaliasURL(upstream.Scheme + "://" + upstream.Host + appURI)
+		parsedCandidate, parseErr := url.Parse(candidateURL)
+		if parseErr != nil || parsedCandidate.Path != ref.Path || parsedCandidate.Query().Encode() != ref.Query {
+			status = http.StatusBadGateway
+			http.Error(w, "resource version expired", http.StatusBadGateway)
+			s.stats.Errors.Add(1)
+			return
+		}
+		upstream = &url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
+		stripVersionBLV(r, v)
+		upstreamURL = ref.UpstreamURL
+		sriBodyVersion = ref.BodyVersion
+		blvHandled = true
+		break
+	}
+	if !blvHandled {
+		upstreamURL = upstream.Scheme + "://" + upstream.Host + r.URL.RequestURI()
+		if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
+			upstreamURL = orig
+		}
+	}
 
 	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
@@ -405,12 +621,19 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					if cached.IsFresh() {
 						inm := r.Header.Get("If-None-Match")
 						if cache.MatchesETag(inm, cached.ETag) {
-							for _, name := range revalidationPolicyHeaders {
-								for _, v := range cached.Headers.Values(name) {
+							for name, values := range cached.Headers {
+								for _, v := range values {
 									w.Header().Add(name, v)
 								}
 							}
+							if cached.UpstreamACAO != "" && s.origins != nil {
+								w.Header().Set("Access-Control-Allow-Origin",
+									s.origins.RewriteResponseOrigin(cached.UpstreamACAO, r.Header.Get("Origin")))
+							}
 							w.Header().Set("ETag", cached.ETag)
+							w.Header().Del("Content-Length")
+							w.Header().Del("Content-Encoding")
+							w.Header().Del("Transfer-Encoding")
 							status = http.StatusNotModified
 							w.WriteHeader(http.StatusNotModified)
 							return
@@ -544,12 +767,19 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 		inm := r.Header.Get("If-None-Match")
 		if cache.MatchesETag(inm, refreshed.ETag) {
-			for _, name := range revalidationPolicyHeaders {
-				for _, v := range refreshed.Headers.Values(name) {
+			for name, values := range refreshed.Headers {
+				for _, v := range values {
 					w.Header().Add(name, v)
 				}
 			}
+			if refreshed.UpstreamACAO != "" && s.origins != nil {
+				w.Header().Set("Access-Control-Allow-Origin",
+					s.origins.RewriteResponseOrigin(refreshed.UpstreamACAO, r.Header.Get("Origin")))
+			}
 			w.Header().Set("ETag", refreshed.ETag)
+			w.Header().Del("Content-Length")
+			w.Header().Del("Content-Encoding")
+			w.Header().Del("Transfer-Encoding")
 			status = http.StatusNotModified
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -577,22 +807,134 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	s.stats.Bytes.Add(int64(len(body)))
 
-	if r.Method == http.MethodGet && s.sriPipeline != nil {
-		sriKey := sri.CacheKey(upstreamURL, r)
-		if sriBodyVersion != "" {
-			sriKey += "\x01" + sriBodyVersion
+	if detection := s.captchaMatcher.DetectChallenge(body, resp.Header.Get("Content-Type"), resp.StatusCode); detection.IsCaptcha {
+		challengeID := s.captchaQueue.Submit(
+			detection.ProviderName,
+			upstreamURL,
+			body,
+			resp.Header.Get("Content-Type"),
+			detection.FormAction,
+			detection.FormMethod,
+		)
+		if len(detection.FormFields) > 0 {
+			s.captchaQueue.SetFormFields(challengeID, detection.FormFields)
 		}
-		integrityOK := s.sriCache.CheckBodyIntegrity(sriKey, body)
-		if integrityOK && sriBodyVersion == "" {
-			if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
-				integrityOK = s.sriCache.CheckBodyIntegrity(sri.CacheKey(orig, r), body)
+		log.Printf("[captcha] %s challenge detected on %s (id=%s), waiting for operator",
+			detection.ProviderName, r.URL.Path, challengeID)
+
+		solution, ok := s.captchaQueue.WaitForCompletion(r.Context(), challengeID, 5*time.Minute)
+		if !ok {
+			log.Printf("[captcha] challenge %s timed out, cancelled or expired", challengeID)
+			s.captchaQueue.Cancel(challengeID)
+		} else if len(solution) > 0 {
+			log.Printf("[captcha] challenge %s completed by operator (%d fields), re-submitting to target", challengeID, len(solution))
+			ch, _ := s.captchaQueue.GetCompleted(challengeID)
+			retryMethod, retryURL, usedForm := s.captchaRetryTarget(ch, r, upstream)
+			var retryBodyBytes []byte
+			if usedForm && ch != nil {
+				form := url.Values{}
+				if strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]), "application/x-www-form-urlencoded") {
+					if original, err := url.ParseQuery(string(reqBodyBuf)); err == nil {
+						form = original
+					}
+				}
+				for k, v := range ch.FormFields {
+					form.Set(k, v)
+				}
+				for k, v := range solution {
+					form.Set(k, v)
+				}
+				retryBodyBytes = []byte(form.Encode())
+			} else {
+				retryBodyBytes = s.buildCaptchaRetryBody(reqBodyBuf, r.Header.Get("Content-Type"), solution)
+			}
+			if retryMethod == http.MethodGet || retryMethod == http.MethodHead {
+				if target, err := url.Parse(retryURL); err == nil {
+					query := target.Query()
+					if fields, err := url.ParseQuery(string(retryBodyBytes)); err == nil {
+						for name, values := range fields {
+							query[name] = values
+						}
+					}
+					target.RawQuery = query.Encode()
+					retryURL = target.String()
+				}
+				retryBodyBytes = nil
+			}
+			retryReq, retryErr := http.NewRequestWithContext(r.Context(), retryMethod, retryURL, bytes.NewReader(retryBodyBytes))
+			if retryErr != nil {
+				log.Printf("[captcha] failed to build retry request: %v", retryErr)
+			} else {
+				for k, vv := range upstreamReq.Header {
+					retryReq.Header[k] = vv
+				}
+				if usedForm || retryMethod != r.Method {
+					retryReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				} else if len(retryBodyBytes) > 0 && retryReq.Header.Get("Content-Type") == "" {
+					retryReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				}
+				if retryMethod == http.MethodGet || retryMethod == http.MethodHead {
+					retryReq.Header.Del("Content-Type")
+				}
+				retryReq.ContentLength = int64(len(retryBodyBytes))
+				s.mergeChallengeResponseCookies(retryReq, resp)
+				retryCtx, retryCancel := context.WithTimeout(retryReq.Context(), time.Duration(s.cfg.UpstreamTimeout)*time.Second)
+				defer retryCancel()
+				retryReq = retryReq.WithContext(retryCtx)
+				retryStart := time.Now()
+				retryResp, retryRespErr := s.transport.RoundTrip(retryReq)
+				retryElapsed := time.Since(retryStart)
+				if retryRespErr != nil {
+					log.Printf("[captcha] upstream re-submission failed: %v", retryRespErr)
+					if s.harWriter != nil {
+						s.harWriter.RecordError(retryReq, retryBodyBytes, http.StatusBadGateway, retryRespErr.Error(), retryElapsed)
+					}
+				} else {
+					retryRespBody, readErr := s.readResponseBody(retryResp)
+					retryResp.Body.Close()
+					if readErr != nil {
+						log.Printf("[captcha] reading retry response: %v", readErr)
+					} else {
+						if s.harWriter != nil {
+							s.harWriter.Record(retryReq, retryBodyBytes, retryResp, retryRespBody, retryElapsed)
+						}
+						body = retryRespBody
+						resp = retryResp
+					}
+				}
 			}
 		}
-		if !integrityOK {
-			status = http.StatusBadGateway
-			http.Error(w, "resource integrity changed", http.StatusBadGateway)
-			s.stats.Errors.Add(1)
-			return
+	}
+
+	if r.Method == http.MethodGet && s.sriPipeline != nil {
+		if sriBodyVersion != "" {
+			sriKey := sri.CacheKey(upstreamURL, r) + "\x01" + sriBodyVersion
+			if !s.sriCache.HasDigest(sriKey) {
+				status = http.StatusBadGateway
+				http.Error(w, "resource version expired", http.StatusBadGateway)
+				s.stats.Errors.Add(1)
+				return
+			}
+			if !s.sriCache.CheckBodyIntegrity(sriKey, body) {
+				status = http.StatusBadGateway
+				http.Error(w, "resource integrity changed", http.StatusBadGateway)
+				s.stats.Errors.Add(1)
+				return
+			}
+		} else {
+			sriKey := sri.CacheKey(upstreamURL, r)
+			integrityOK := s.sriCache.CheckBodyIntegrity(sriKey, body)
+			if integrityOK {
+				if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
+					integrityOK = s.sriCache.CheckBodyIntegrity(sri.CacheKey(orig, r), body)
+				}
+			}
+			if !integrityOK {
+				status = http.StatusBadGateway
+				http.Error(w, "resource integrity changed", http.StatusBadGateway)
+				s.stats.Errors.Add(1)
+				return
+			}
 		}
 	}
 
@@ -612,12 +954,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Path:   r.URL.Path,
 	}
 	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
-		Origins:      s.origins,
-		SRIPipeline:  s.sriPipeline,
-		UpstreamBase: docURL,
-		BaseRequest:  r,
+		Origins:         s.origins,
+		SRIPipeline:     s.sriPipeline,
+		UpstreamBase:    docURL,
+		BaseRequest:     r,
+		RegisterVersion: s.versionRefs.Register,
+		ResourceURL: func(raw string, base *url.URL) (string, bool) {
+			return s.captchaMatcher.RewriteResourceURL(raw, base, s.cfg.UseTor())
+		},
 	})
 	s.stats.Scrubbed.Add(1)
+
 	leakCount = gate.ResidualLeakCount(string(result.Body))
 
 	outHeaders := rewriter.RewriteResponseHeaders(
@@ -630,6 +977,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			RequestOrigin: r.Header.Get("Origin"),
 		},
 	)
+
+	if cspEntries := s.captchaMatcher.CSPDirectives(); len(cspEntries) > 0 {
+		outHeaders = injectCaptchaCSP(outHeaders, cspEntries)
+	}
 
 	etag := cache.ComputeETag(result.Body)
 
@@ -762,15 +1113,10 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 	}
 
 	etag := cache.ComputeETag(entry.ScrubbedBody)
-	inm := r.Header.Get("If-None-Match")
-	if cache.MatchesETag(inm, etag) {
-		w.Header().Set("ETag", etag)
-		w.WriteHeader(http.StatusNotModified)
-		return true
-	}
 
+	var sriOutHeaders http.Header
 	if entry.ResponseHeaders != nil {
-		outHeaders := rewriter.RewriteResponseHeaders(
+		sriOutHeaders = rewriter.RewriteResponseHeaders(
 			entry.ResponseHeaders,
 			gate,
 			s.cfg.AliasDomain,
@@ -780,10 +1126,26 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 				RequestOrigin: r.Header.Get("Origin"),
 			},
 		)
-		for name, values := range outHeaders {
+	}
+
+	inm := r.Header.Get("If-None-Match")
+	if cache.MatchesETag(inm, etag) {
+		for name, values := range sriOutHeaders {
 			for _, v := range values {
 				w.Header().Add(name, v)
 			}
+		}
+		w.Header().Set("ETag", etag)
+		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Encoding")
+		w.Header().Del("Transfer-Encoding")
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+
+	for name, values := range sriOutHeaders {
+		for _, v := range values {
+			w.Header().Add(name, v)
 		}
 	}
 
@@ -862,48 +1224,6 @@ func (s *Server) unaliasURL(upstreamURL string) string {
 	return upstreamURL
 }
 
-func stripBodyVersion(rawURL string) (string, string) {
-	idx := strings.Index(rawURL, "_bv=")
-	if idx < 0 {
-		return rawURL, ""
-	}
-	sepIdx := idx - 1
-	if sepIdx < 0 || (rawURL[sepIdx] != '?' && rawURL[sepIdx] != '&') {
-		return rawURL, ""
-	}
-	end := strings.IndexByte(rawURL[idx:], '&')
-	var version string
-	if end < 0 {
-		version = rawURL[idx+4:]
-	} else {
-		version = rawURL[idx+4 : idx+end]
-	}
-	if !isProxyBodyVersion(version) {
-		return rawURL, ""
-	}
-	if end < 0 {
-		rawURL = rawURL[:sepIdx]
-	} else if rawURL[sepIdx] == '?' {
-		rawURL = rawURL[:sepIdx+1] + rawURL[idx+end+1:]
-	} else {
-		rawURL = rawURL[:sepIdx] + rawURL[idx+end:]
-	}
-	return rawURL, version
-}
-
-func isProxyBodyVersion(s string) bool {
-	if len(s) != 16 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
-
 func varyEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -926,4 +1246,307 @@ func extractSubdomains(host string) []string {
 		subs = append(subs, strings.Join(parts[i:], "."))
 	}
 	return subs
+}
+
+func stripVersionBLV(r *http.Request, token string) {
+	q := r.URL.Query()
+	vals := q["__blv"]
+	var remaining []string
+	for _, v := range vals {
+		if v != token {
+			remaining = append(remaining, v)
+		}
+	}
+	if len(remaining) > 0 {
+		q["__blv"] = remaining
+	} else {
+		q.Del("__blv")
+	}
+	r.URL.RawQuery = q.Encode()
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	if !strings.EqualFold(a.Scheme, b.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	ap, bp := a.Port(), b.Port()
+	if ap == "" {
+		if strings.EqualFold(a.Scheme, "https") {
+			ap = "443"
+		} else {
+			ap = "80"
+		}
+	}
+	if bp == "" {
+		if strings.EqualFold(b.Scheme, "https") {
+			bp = "443"
+		} else {
+			bp = "80"
+		}
+	}
+	return ap == bp
+}
+
+func (s *Server) opaqueJSONKeys(r *http.Request, upstreamHost string) map[string]bool {
+	keys := make(map[string]bool)
+	for _, p := range s.captchaMatcher.Providers() {
+		for _, field := range p.OpaqueFields {
+			if s.captchaMatcher.SubmissionHasOpaqueFields(r, field, upstreamHost) {
+				keys[field] = true
+			}
+		}
+	}
+	return keys
+}
+
+func (s *Server) captchaRetryTarget(ch *captcha.Challenge, originalReq *http.Request, upstream *url.URL) (method, targetURL string, usedForm bool) {
+	fallback := upstream.Scheme + "://" + upstream.Host + originalReq.URL.RequestURI()
+
+	if ch == nil || ch.FormAction == "" || ch.FormMethod == "" {
+		return originalReq.Method, fallback, false
+	}
+
+	base := &url.URL{
+		Scheme: upstream.Scheme,
+		Host:   upstream.Host,
+		Path:   originalReq.URL.Path,
+	}
+	resolved, err := base.Parse(ch.FormAction)
+	if err != nil {
+		return originalReq.Method, fallback, false
+	}
+
+	if resolved.Scheme != upstream.Scheme || resolved.Host != upstream.Host {
+		return originalReq.Method, fallback, false
+	}
+
+	return ch.FormMethod, resolved.String(), true
+}
+
+func (s *Server) mergeChallengeResponseCookies(retryReq *http.Request, challengeResp *http.Response) {
+	newCookies := challengeResp.Cookies()
+	if len(newCookies) == 0 {
+		return
+	}
+	replacements := make(map[string]*http.Cookie, len(newCookies))
+	for _, c := range newCookies {
+		if c.MaxAge < 0 {
+			replacements[c.Name] = nil
+		} else {
+			replacements[c.Name] = c
+		}
+	}
+	existing := retryReq.Cookies()
+	retryReq.Header.Del("Cookie")
+	for _, c := range existing {
+		if replacement, found := replacements[c.Name]; found {
+			if replacement != nil {
+				retryReq.AddCookie(replacement)
+			}
+			delete(replacements, c.Name)
+			continue
+		}
+		retryReq.AddCookie(c)
+	}
+	for _, c := range newCookies {
+		if c, ok := replacements[c.Name]; ok && c != nil {
+			retryReq.AddCookie(c)
+		}
+	}
+}
+
+func (s *Server) buildCaptchaRetryBody(originalBody []byte, contentType string, solution map[string]string) []byte {
+	normCT := strings.ToLower(strings.TrimSpace(contentType))
+	if i := strings.IndexByte(normCT, ';'); i >= 0 {
+		normCT = strings.TrimSpace(normCT[:i])
+	}
+	if strings.HasPrefix(normCT, "application/x-www-form-urlencoded") {
+		form, err := url.ParseQuery(string(originalBody))
+		if err != nil {
+			form = make(url.Values)
+		}
+		for k, v := range solution {
+			form.Set(k, v)
+		}
+		return []byte(form.Encode())
+	}
+	if normCT == "application/json" || strings.HasSuffix(normCT, "+json") {
+		dec := json.NewDecoder(bytes.NewReader(originalBody))
+		dec.UseNumber()
+		var obj map[string]interface{}
+		if err := dec.Decode(&obj); err != nil || obj == nil {
+			obj = make(map[string]interface{})
+		}
+		for k, v := range solution {
+			obj[k] = v
+		}
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return originalBody
+		}
+		return out
+	}
+	form := make(url.Values)
+	for k, v := range solution {
+		form.Set(k, v)
+	}
+	return []byte(form.Encode())
+}
+
+func (s *Server) restoreJSONWithOpaqueKeys(gate *scrub.Gate, input []byte, opaqueKeys map[string]bool) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.UseNumber()
+	var parsed interface{}
+	if err := dec.Decode(&parsed); err != nil {
+		return []byte(gate.RestoreBody(string(input))), nil
+	}
+	if len(bytes.TrimSpace(input[dec.InputOffset():])) > 0 {
+		return input, nil
+	}
+
+	result, ok := restoreJSONExcludingOpaque(gate, parsed, opaqueKeys)
+	if !ok {
+		return nil, fmt.Errorf("ambiguous JSON body")
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return input, nil
+	}
+	return out, nil
+}
+
+func restoreJSONExcludingOpaque(gate *scrub.Gate, v interface{}, opaqueKeys map[string]bool) (interface{}, bool) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{}, len(val))
+		for key, value := range val {
+			restoredKey := gate.RestoreBody(key)
+			if _, exists := result[restoredKey]; exists {
+				return nil, false
+			}
+			if opaqueKeys[restoredKey] {
+				result[restoredKey] = value
+			} else {
+				rv, ok := restoreJSONExcludingOpaque(gate, value, opaqueKeys)
+				if !ok {
+					return nil, false
+				}
+				result[restoredKey] = rv
+			}
+		}
+		return result, true
+	case []interface{}:
+		result := make([]interface{}, len(val))
+		for i, item := range val {
+			rv, ok := restoreJSONExcludingOpaque(gate, item, opaqueKeys)
+			if !ok {
+				return nil, false
+			}
+			result[i] = rv
+		}
+		return result, true
+	case json.Number:
+		return val, true
+	case string:
+		return gate.RestoreBody(val), true
+	default:
+		return v, true
+	}
+}
+
+func injectCaptchaCSP(headers http.Header, captchaEntries []string) http.Header {
+	existing := headers.Values("Content-Security-Policy")
+	if len(existing) == 0 {
+		return headers
+	}
+
+	merged := make(map[string]map[string]bool)
+	for _, entry := range captchaEntries {
+		parts := strings.SplitN(entry, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		directive, source := parts[0], parts[1]
+		if merged[directive] == nil {
+			merged[directive] = make(map[string]bool)
+		}
+		merged[directive][source] = true
+	}
+
+	result := headers.Clone()
+	result.Del("Content-Security-Policy")
+	for _, csp := range existing {
+		result.Add("Content-Security-Policy", mergeCSPPolicy(csp, merged))
+	}
+	return result
+}
+
+func mergeCSPPolicy(policy string, captchaSources map[string]map[string]bool) string {
+	directives := strings.Split(policy, ";")
+	seen := make(map[string]bool)
+	var result []string
+
+	var defaultSrcSources []string
+
+	for _, d := range directives {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		parts := strings.Fields(d)
+		if len(parts) == 0 {
+			continue
+		}
+		directive := parts[0]
+		seen[directive] = true
+
+		if directive == "default-src" {
+			defaultSrcSources = parts[1:]
+		}
+
+		if sources, ok := captchaSources[directive]; ok {
+			for s := range sources {
+				found := false
+				for _, existing := range parts[1:] {
+					if existing == s {
+						found = true
+						break
+					}
+				}
+				if !found {
+					parts = append(parts, s)
+				}
+			}
+		}
+		result = append(result, strings.Join(parts, " "))
+	}
+
+	for directive, sources := range captchaSources {
+		if seen[directive] {
+			continue
+		}
+		parts := []string{directive}
+		if len(defaultSrcSources) > 0 {
+			parts = append(parts, defaultSrcSources...)
+		}
+		for s := range sources {
+			found := false
+			for _, existing := range parts[1:] {
+				if existing == s {
+					found = true
+					break
+				}
+			}
+			if !found {
+				parts = append(parts, s)
+			}
+		}
+		result = append(result, strings.Join(parts, " "))
+	}
+
+	return strings.Join(result, "; ")
 }

@@ -206,8 +206,8 @@ func TestProxy_TextFrameScrubbing(t *testing.T) {
 	if strings.Contains(echoed, "SecretOrg") {
 		t.Errorf("text frame should have SecretOrg scrubbed, got: %s", echoed)
 	}
-	if !strings.Contains(echoed, "[REDACTED]") {
-		t.Errorf("text frame should contain [REDACTED], got: %s", echoed)
+	if !strings.Contains(echoed, "[REDACTED:") {
+		t.Errorf("text frame should contain reversible alias, got: %s", echoed)
 	}
 
 	closeFrame := []byte{finBit | opcodeClose, maskBit | 0}

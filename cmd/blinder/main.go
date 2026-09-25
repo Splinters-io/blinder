@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/proxy"
 	"github.com/Splinters-io/blinder/internal/scrub"
@@ -56,6 +57,7 @@ func run() int {
 		preflight   bool
 		trustCert   bool
 		ephemeral   bool
+		captchaConf string
 	)
 
 	flag.StringVar(&target, "target", "", "Real target URL (required unless running certificate setup)")
@@ -80,6 +82,7 @@ func run() int {
 	flag.BoolVar(&preflight, "preflight", false, "Prepare/check local certificate and platform trust, then exit (2 if trust is needed)")
 	flag.BoolVar(&trustCert, "trust-cert", false, "Prepare certificate, request approval for macOS user trust, then exit")
 	flag.BoolVar(&ephemeral, "ephemeral-cert", false, "Use an in-memory certificate for this run; do not save or install trust")
+	flag.StringVar(&captchaConf, "captcha-config", "", "Path to CAPTCHA provider YAML config")
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
 
 	flag.Parse()
@@ -156,12 +159,33 @@ func run() int {
 		}
 		return 0
 	}
+	// An ephemeral TLS certificate does not discard ownership of outstanding
+	// resource references. Keep a separate random signing key in the endpoint store.
+	cfg.VersionKeyDir = cfg.CertDir
+	if cfg.VersionKeyDir == "" {
+		cfg.VersionKeyDir, err = blindertls.DefaultDir(cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "version key setup failed: %v\n", err)
+			return 1
+		}
+	}
+
+	cfg.CaptchaConfigPath = captchaConf
+	if err := cfg.LoadCaptchaConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
 
 	printBanner(cfg)
 	srv, err := proxy.NewWithCertificate(cfg, localTLS.Certificate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
+	}
+
+	if token := srv.CaptchaOperatorToken(); token != "" && cfg.Captcha != nil && len(cfg.Captcha.Providers) > 0 {
+		log.Printf("  CAPTCHA operator token: %s", token)
+		log.Printf("  Use: curl -H 'Authorization: Bearer %s' https://%s/__blinder/captcha/", token, cfg.ListenAddr)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -280,6 +304,20 @@ func printBanner(cfg *config.Config) {
 	}
 	if len(cfg.IdentityTokens) > 0 {
 		fmt.Printf("  Scrub:   %d identity token(s)\n", len(cfg.IdentityTokens))
+	}
+
+	if cfg.Captcha != nil && cfg.Captcha.Matcher != nil {
+		providers := cfg.Captcha.Matcher.ProviderNames()
+		if len(providers) > 0 {
+			fmt.Printf("  CAPTCHA: %d provider(s): %s\n", len(providers), strings.Join(providers, ", "))
+			if cfg.UseTor() {
+				for _, p := range cfg.Captcha.Providers {
+					if p.TorPolicy == captcha.TorPolicyDirect {
+						fmt.Printf("           %s: direct (bypasses Tor)\n", p.Name)
+					}
+				}
+			}
+		}
 	}
 
 	if !cfg.VerifyTargetTLS {

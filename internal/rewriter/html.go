@@ -23,10 +23,12 @@ const loremText = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
 var loremWords = strings.Fields(loremText)
 
 type sriRewriter struct {
-	pipeline      *sri.Pipeline
-	upstreamBase  *url.URL
-	effectiveBase *url.URL
-	baseReq       *http.Request
+	pipeline        *sri.Pipeline
+	upstreamBase    *url.URL
+	effectiveBase   *url.URL
+	baseReq         *http.Request
+	registerVersion func(upstreamURL, bodyVersion string) string
+	resourceURL     func(raw string, base *url.URL) (string, bool)
 }
 
 type sriAction int
@@ -44,6 +46,7 @@ type sriDecision struct {
 	replacementHash string
 	integrityVal    string
 	bodyVersion     string
+	resolvedURL     string
 }
 
 func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMapper, sr *sriRewriter) []byte {
@@ -104,7 +107,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 				attrs = collectTagAttrs(z)
 			}
 
-			if tagName == "base" && sr != nil {
+			if tagName == "base" && sr != nil && sr.upstreamBase != nil {
 				for _, a := range attrs {
 					if a.key == "href" && a.val != "" {
 						if baseHref, err := sr.upstreamBase.Parse(a.val); err == nil {
@@ -125,7 +128,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 
 			out.WriteByte('<')
 			out.WriteString(tagName)
-			writeScrubbedAttrs(&out, tagName, attrs, gate, origins, sriDec)
+			writeScrubbedAttrs(&out, tagName, attrs, gate, origins, sriDec, sr)
 
 			if tt == html.SelfClosingTagToken {
 				out.WriteString(" /")
@@ -195,6 +198,15 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 	if resourceURL == "" {
 		return sriDecision{integrityVal: integrityVal}
 	}
+	if sr != nil && sr.resourceURL != nil {
+		base := sr.upstreamBase
+		if sr.effectiveBase != nil {
+			base = sr.effectiveBase
+		}
+		if _, handled := sr.resourceURL(resourceURL, base); handled {
+			return sriDecision{action: sriKeep, integrityVal: integrityVal}
+		}
+	}
 
 	resolvedURL := resourceURL
 	if sr != nil {
@@ -209,7 +221,7 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 		return sriDecision{integrityVal: integrityVal}
 	}
 
-	if integrityVal != "" && sr != nil {
+	if integrityVal != "" && sr != nil && sr.pipeline != nil {
 		ct := guessContentTypeFromTag(tagName)
 		pageOrigin := sr.upstreamBase
 		result := sr.pipeline.Process(resolvedURL, integrityVal, ct, crossoriginVal, pageOrigin, sr.baseReq)
@@ -218,9 +230,9 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 		}
 		if result != nil && result.UpstreamValid {
 			if result.BytesModified {
-				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityVal: integrityVal, bodyVersion: result.BodyVersion}
+				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityVal: integrityVal, bodyVersion: result.BodyVersion, resolvedURL: resolvedURL}
 			}
-			return sriDecision{action: sriKeep, integrityVal: integrityVal, bodyVersion: result.BodyVersion}
+			return sriDecision{action: sriKeep, integrityVal: integrityVal, bodyVersion: result.BodyVersion, resolvedURL: resolvedURL}
 		}
 		return sriDecision{action: sriKeep, integrityVal: integrityVal}
 	}
@@ -232,7 +244,7 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 	return sriDecision{}
 }
 
-func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sri sriDecision) {
+func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sri sriDecision, sr *sriRewriter) {
 	relVal := ""
 	if tagName == "link" {
 		for _, a := range attrs {
@@ -271,19 +283,36 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 		out.WriteByte(' ')
 		out.WriteString(a.key)
 		out.WriteString(`="`)
-		val := scrubAttrValue(tagName, a.key, a.val, relVal, gate, origins)
-		if sri.bodyVersion != "" && ((tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href")) {
+		var val string
+		handled := false
+		if sr != nil && sr.resourceURL != nil && isURLAttr(tagName, a.key) {
+			base := sr.upstreamBase
+			if sr.effectiveBase != nil {
+				base = sr.effectiveBase
+			}
+			val, handled = sr.resourceURL(a.val, base)
+		}
+		if !handled {
+			val = scrubAttrValue(tagName, a.key, a.val, relVal, gate, origins)
+		}
+		if sri.bodyVersion != "" && sr != nil && sr.registerVersion != nil &&
+			((tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href")) {
+			regURL := sri.resolvedURL
+			if idx := strings.IndexByte(regURL, '#'); idx >= 0 {
+				regURL = regURL[:idx]
+			}
+			token := sr.registerVersion(regURL, sri.bodyVersion)
+			base := val
 			frag := ""
 			if idx := strings.IndexByte(val, '#'); idx >= 0 {
+				base = val[:idx]
 				frag = val[idx:]
-				val = val[:idx]
 			}
-			if strings.Contains(val, "?") {
-				val += "&_bv=" + sri.bodyVersion
+			if strings.Contains(base, "?") {
+				val = base + "&__blv=" + token + frag
 			} else {
-				val += "?_bv=" + sri.bodyVersion
+				val = base + "?__blv=" + token + frag
 			}
-			val += frag
 		}
 		out.WriteString(html.EscapeString(val))
 		out.WriteByte('"')

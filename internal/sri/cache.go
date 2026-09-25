@@ -115,6 +115,13 @@ func (c *Cache) IndexDigest(key string, rawBody []byte) {
 	c.digestIndex[key] = sha256.Sum256(rawBody)
 }
 
+func (c *Cache) HasDigest(key string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, ok := c.digestIndex[key]
+	return ok
+}
+
 func (c *Cache) CheckBodyIntegrity(key string, rawBody []byte) bool {
 	c.mu.RLock()
 	stored, ok := c.digestIndex[key]

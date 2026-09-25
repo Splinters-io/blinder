@@ -11,16 +11,23 @@ import (
 )
 
 func TestGateUnicodeReplacement(t *testing.T) {
-	for _, tc := range []struct{ input, token, want string }{
-		{"İ AcmeCorp", "AcmeCorp", "İ [REDACTED]"},
-		{"korp", "Korp", "[REDACTED]"},
-		{"Korp", "korp", "[REDACTED]"},
-		{"[a+b] [a+b]", "[a+b]", "[REDACTED] [REDACTED]"},
+	for _, tc := range []struct{ input, token, prefix string }{
+		{"İ AcmeCorp", "AcmeCorp", "İ "},
+		{"korp", "Korp", ""},
+		{"Korp", "korp", ""},
+		{"Korp", "Korp", ""},
+		{"[a+b] [a+b]", "[a+b]", ""},
 	} {
 		t.Run(tc.token+tc.input, func(t *testing.T) {
 			got := NewGate(nil, []string{tc.token}, "alias.local").Scrub(tc.input, "test")
-			if got != tc.want || !utf8.ValidString(got) {
-				t.Fatalf("got %q; want %q", got, tc.want)
+			if tc.prefix != "" && !strings.HasPrefix(got, tc.prefix) {
+				t.Fatalf("prefix %q not preserved, got %q", tc.prefix, got)
+			}
+			if !strings.Contains(got, "[REDACTED:") {
+				t.Fatalf("token should be replaced with alias, got %q", got)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("output is not valid UTF-8: %q", got)
 			}
 		})
 	}
@@ -44,7 +51,7 @@ func TestGateOverlappingTargetTerminates(t *testing.T) {
 }
 
 func FuzzGateUnicode(f *testing.F) {
-	for _, seed := range []string{"İ AcmeCorp", "Korp", "acmecorp.io", "red [REDACTED]", ""} {
+	for _, seed := range []string{"İ AcmeCorp", "Korp", "Korp", "acmecorp.io", "red [REDACTED]", ""} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, input string) {

@@ -38,6 +38,10 @@ WebSocket manifest coverage and complete metadata extraction remain open. Raw ev
 
 ## Remaining delivery gates
 
+Configured CAPTCHA resource URLs are handled before identity scrubbing, with full-origin and optional URL-regex scope. HTML-decoded paths, query values and fragments are preserved. Direct mode leaves these references intact; Tor mode relays matched `route-with-target` references through the target transport. This also applies to the operator's sandboxed challenge and nested provider HTML. The operator's Tor CSP blocks unhandled direct resource requests; `tor_policy: direct` is an explicit exception. Dynamically assembled provider URLs, provider session/CORS requirements and real human completion still need provider-specific browser acceptance. Synthetic widget loading is not universal CAPTCHA compatibility.
+
+SRI version-reference ownership uses a random persistent signing key, independent of public configuration and certificate renewal. Authentic references whose in-memory records are gone fail closed; unissued application query values pass through even if they resemble a token. CLI restarts retain this key, including with ephemeral TLS. Embedded callers must supply `VersionKeyDir` or `CertDir` for ownership across server instances; an empty directory selects an in-memory registry.
+
 These are implementation work and acceptance criteria, not waived requirements.
 
 | Workstream | Completion criterion |
