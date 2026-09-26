@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/blinder-header.svg" alt="Blinder — less identity, more signal. A content-blind reverse proxy." width="100%">
+  <img src="assets/blinder-header.svg" alt="Blinder -- less identity, more signal. A content-blind reverse proxy." width="100%">
 </p>
 
 <p align="center">
   <strong>A local reverse proxy for content-blind security scanning.</strong><br>
-  Go · Local HTTPS · HTTP &amp; WebSocket · Tor / SOCKS5
+  Go / Local HTTPS / HTTP &amp; WebSocket / Tor / SOCKS5
 </p>
 
 <p align="center">
@@ -27,13 +27,13 @@ Blinder removes that decision. To the downstream AI, the target looks like a loc
 This is content-blind scanning: the operator controls who the target is; the AI focuses on what it does.
 
 ```text
- AI scanner / browser ── HTTPS ── Blinder ── direct or Tor ── Target
-                                    │
+ AI scanner / browser -- HTTPS -- Blinder -- direct or Tor -- Target
+                                    |
                          looks like localhost    real identity
                          no brand, no domain     stays here
-                                    │
-                                    ├── Scrubbed content → AI sees technical surface only
-                                    └── Original evidence → operator keeps full fidelity
+                                    |
+                                    +-- Scrubbed content -> AI sees technical surface only
+                                    +-- Original evidence -> operator keeps full fidelity
 ```
 
 ## What it does
@@ -44,12 +44,12 @@ This is content-blind scanning: the operator controls who the target is; the AI 
 | **Resource integrity** | SRI attributes stripped on proxied resources (where content will be scrubbed), preserved on external CDN references. Version-tagged body references survive cache revalidation. |
 | **Response cache** | Separate upstream/downstream cache validators. 304 revalidation merges security-policy headers. Vary-aware eviction. |
 | **Session handling** | Reversible cookie names with per-value scrubbing. Multi-origin routing via `--extra-origin` with deterministic alias hostnames, Host-header routing and CORS origin translation. |
-| **CAPTCHA relay** | Operator-facing challenge queue with browser isolation. Provider resources routed through the configured transport. Challenge pages sandboxed without same-origin access. |
+| **CAPTCHA relay** | Operator-facing challenge queue with host injection. Provider resources routed through the configured transport. |
 | **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
 | **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
 | **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. |
 
-**Development release.** The tested workflow is single-target and multi-origin scanning. Full browser containment verification and complete anonymization of arbitrary input remain open; review [supported behavior and delivery gates](docs/capabilities.md) before connecting a sensitive target.
+**Development release.** The tested workflow is single-target and multi-origin scanning. Full browser containment verification and complete anonymization of arbitrary input remain open; review [supported behavior and delivery gates](capabilities.md) before connecting a sensitive target.
 
 ## Quick start
 
@@ -87,7 +87,7 @@ Use `--cert-dir DIR` for a chosen private store. Certificates persist across res
 
 The endpoint store also holds a private `version-signing.key` for resource-reference ownership, independent of certificate renewal. Keep it across restarts so expired references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
 
-[Certificate setup, OS guidance and renewal](docs/testing.md#local-certificate-trust)
+[Certificate setup, OS guidance and renewal](testing.md#local-certificate-trust)
 
 ## Tor
 
@@ -101,7 +101,7 @@ Start your Tor service and wait for bootstrap, then select its SOCKS endpoint:
 
 Clearnet targets can use the same route. Target TLS verification stays enabled. Tor failures return an error without falling back to a direct target connection.
 
-[Tor setup and live acceptance checklist](docs/testing.md#live-tor-uat)
+[Tor setup and live acceptance checklist](testing.md#live-tor-uat)
 
 ## CAPTCHA
 
@@ -153,7 +153,7 @@ Keep original captures on the operator's side; they contain real target data.
 
 JSON reports are saved under `--output DIR` with owner-only file permissions. `--har-max-body` bounds each captured request/response body, with truncation recorded in the HAR. Shutdown attempts both HAR and report output even if one fails.
 
-[Capture behavior and artifact format](docs/capabilities.md#evidence)
+[Capture behavior and artifact format](capabilities.md#evidence)
 
 ## Development
 
@@ -166,12 +166,12 @@ make test-functional   # 35 functional scenarios: CLI, TLS, sessions,
 
 All tests pass with `-race`. Browser-level acceptance tests are opt-in via `BLINDER_REVIEW_BROWSER=1`.
 
-[Testing and UAT guide](docs/testing.md) · [Delivery gates](docs/capabilities.md#remaining-delivery-gates) · [Technical specification](SPEC.md)
+[Testing and UAT guide](testing.md) / [Delivery gates](capabilities.md#remaining-delivery-gates) / [Technical specification](https://github.com/Splinters-io/blinder/blob/main/SPEC.md)
 
 ---
 
 <p align="center">
-  <img src="docs/assets/blinder-mark.svg" alt="Blinder's redacted empty-set project mark" width="48" height="48"><br>
+  <img src="assets/blinder-mark.svg" alt="Blinder's redacted empty-set project mark" width="48" height="48"><br>
   <sub>LESS IDENTITY. MORE SIGNAL.</sub><br>
-  <sub><a href="docs/brand.md">Project artwork</a></sub>
+  <sub><a href="brand.md">Project artwork</a></sub>
 </p>
