@@ -6,6 +6,8 @@ The [provider-origin report](testing-results-2026-09-26-provider-origins.md) rec
 
 The [behavior-preservation checkpoint](testing-results-2026-09-26-behavior.md) records the current image, JavaScript-navigation and malformed-source work. An initial browser comparison exposed a percent-encoded JavaScript URL acquiring a CSP grant. The decoded-hash correction has package regressions; the final expanded browser comparison is pending and must not be inferred from earlier passing pairs.
 
+The [content-contract checkpoint](testing-results-2026-09-26-content-contract.md) records generated-filler identity checks, response-level content requirements and the replacement of the outdated preview process that still emitted removal labels. Its live root-response check is separate from browser workflow acceptance.
+
 ## Automated checks
 
 Run from the repository root with Go 1.26+, on macOS or Linux:
