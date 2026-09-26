@@ -82,6 +82,15 @@ Run `go test -race -count=1 ./internal/rewriter -run '^TestProse'` for prose byt
 
 Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^TestBodySize|^TestTitle|^TestHTMLQuotedAttrEdits'` for whole-HTML size matching. These tests compare differently sized responses, including gzip input, and require each final decoded length and the signed difference between them to match upstream. They also verify that fitting occurs after provider URL expansion, that SQL-style diagnostics, script text and form values survive, and that insufficient adjustment space is reported rather than taken from functional content. These are synthetic fidelity fixtures, not proof of SQL injection detection on arbitrary sites.
 
+For the offline [paired response comparator](response-deltas.md), run:
+
+```sh
+go test -race -count=1 ./internal/delta ./cmd/blinder-diff
+go test -race -count=1 ./internal/proxy ./internal/manifest -run 'TestDelta|TestRequestIdentity'
+```
+
+The HTTP acceptance fixture uses real local transports, repeated stable baselines, equal-length changed prose, a larger page and an upstream 503 diagnostic. It checks exact body lengths and changed-content signals without exposing original data in the report. Set `BLINDER_DELTA_EVIDENCE_DIR` to a private directory to save its synthetic manifest, selections and report. Separate regressions cover lost/introduced changes, constant size overhead, partial writes, cache provenance, session/context isolation and missing measurements. No browser, live target or certificate changes are required for these checks.
+
 For a local browser form/diagnostic check:
 
 ```sh

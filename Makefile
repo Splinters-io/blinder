@@ -2,10 +2,13 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-.PHONY: build test test-functional clean release lint
+.PHONY: build build-diff test test-functional clean release lint
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o blinder ./cmd/blinder
+
+build-diff:
+	CGO_ENABLED=0 go build -o blinder-diff ./cmd/blinder-diff
 
 test:
 	go test -race -count=1 ./...

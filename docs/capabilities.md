@@ -53,11 +53,14 @@ Untouched HTML retains source spelling: tag case, attribute order/quoting, entit
 
 Each HTTP manifest request now has `response` measurements:
 
+Ordinary target HTTP requests also have a session-scoped `request_id`, returned as `X-Blinder-Request-ID`, their method, and private `context_tag`/`request_tag` equality signals. The offline [response comparison tool](response-deltas.md) accepts explicit baseline/test IDs from one session, reports per-response size fidelity and content/status changes, and keeps baseline variation visible. It excludes cached, incomplete and otherwise unavailable bodies from fresh-upstream comparisons. Provider/operator requests and WebSocket messages are outside this first comparator.
+
 | Field | Meaning |
 | --- | --- |
 | `source` | `upstream`, `cache`, `sri-cache`, or a proxy-generated response |
 | `upstream[]` | Main-resource attempts, including CAPTCHA retries: actual upstream status, encoded payload bytes read, decoded bytes read, completion and a generic failure category. HTTP framing/TLS overhead is excluded. Status 0 means no upstream response. SRI prefetches and provider-relay requests are separate transactions. |
 | `original_body_tag` | Session-keyed HMAC of the complete decoded original body, also exposed as `X-Blinder-Original-Body-Tag`. Retained across response/SRI cache hits and associated conditional responses. Absent for unavailable originals, uncached HEAD/304 and proxy errors. It is an equality signal, not a public fingerprint or an exploit verdict; it changes across proxy sessions. |
+| `rewritten_body_tag` / `body_complete` | SHA-256 of the full rewritten body accepted by the HTTP writer, only when the original is known and the complete ordinary representation was written without error. Missing/false for HEAD, bodyless statuses, local failures and partial writes. These fields do not prove receipt by the client. |
 | `original_body_bytes` / `rewritten_body_bytes` | Representation sizes, retained across response/SRI cache hits when measured. Unknown values are -1. |
 | `downstream_body_bytes` | Body bytes accepted by the HTTP writer; zero for HEAD/304. This is not proof of client delivery. |
 | `rewrite_delta_bytes` | Rewritten minus original representation bytes, or null when either size is unavailable. |

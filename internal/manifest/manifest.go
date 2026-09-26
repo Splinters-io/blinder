@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +14,10 @@ import (
 )
 
 type RequestEntry struct {
+	RequestID  string           `json:"request_id,omitempty"`
+	Method     string           `json:"method,omitempty"`
+	ContextTag string           `json:"context_tag,omitempty"`
+	RequestTag string           `json:"request_tag,omitempty"`
 	Path       string           `json:"path"`
 	StatusCode int              `json:"status_code"`
 	ScrubCount int              `json:"scrub_count"` // Identity/domain matches replaced for this request.
@@ -34,6 +40,8 @@ type ResponseMetrics struct {
 	Source             string     `json:"source"`
 	Upstream           []BodyRead `json:"upstream"`
 	OriginalBodyTag    string     `json:"original_body_tag,omitempty"`
+	RewrittenBodyTag   string     `json:"rewritten_body_tag,omitempty"`
+	BodyComplete       bool       `json:"body_complete"`
 	OriginalBodyBytes  int64      `json:"original_body_bytes"`
 	RewrittenBodyBytes int64      `json:"rewritten_body_bytes"`
 	DownstreamBytes    int64      `json:"downstream_body_bytes"`
@@ -72,6 +80,7 @@ type IdentityEntry struct {
 
 type ManifestFile struct {
 	Version       string          `json:"version"`
+	SessionID     string          `json:"session_id,omitempty"`
 	AliasDomain   string          `json:"alias_domain"`
 	TargetURL     string          `json:"target_url"`
 	StartedAt     string          `json:"started_at"`
@@ -98,6 +107,8 @@ type ScrubReport struct {
 }
 
 type Session struct {
+	sessionID   string
+	nextRequest uint64
 	aliasDomain string
 	targetURL   string
 	startedAt   time.Time
@@ -110,12 +121,28 @@ type Session struct {
 }
 
 func NewSession(aliasDomain, targetURL string) *Session {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		panic("manifest session randomness unavailable")
+	}
 	return &Session{
+		sessionID:   hex.EncodeToString(id[:]),
 		aliasDomain: aliasDomain,
 		targetURL:   targetURL,
 		startedAt:   time.Now(),
 		aliases:     make(map[string]string),
 	}
+}
+
+// SessionID scopes request identifiers and private equality tags to this run.
+func (s *Session) SessionID() string { return s.sessionID }
+
+// NewRequestID reserves an identifier at arrival, independent of completion order.
+func (s *Session) NewRequestID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextRequest++
+	return fmt.Sprintf("%s:%d", s.sessionID, s.nextRequest)
 }
 
 func (s *Session) AliasDomain() string {
@@ -131,9 +158,18 @@ func (s *Session) RecordRequest(path string, statusCode, scrubCount, leakCount i
 		Timestamp:  time.Now().Format(time.RFC3339Nano),
 	}
 	if len(response) > 0 {
-		entry.Response = cloneResponse(&response[0])
+		entry.Response = &response[0]
 	}
 
+	s.RecordExchange(entry)
+}
+
+// RecordExchange snapshots a completed exchange without retaining caller-owned data.
+func (s *Session) RecordExchange(entry RequestEntry) {
+	if entry.Timestamp == "" {
+		entry.Timestamp = time.Now().Format(time.RFC3339Nano)
+	}
+	entry.Response = cloneResponse(entry.Response)
 	s.mu.Lock()
 	s.requests = append(s.requests, entry)
 	s.mu.Unlock()
@@ -274,6 +310,7 @@ func (s *Session) Flush(dir string) error {
 
 	manifest := ManifestFile{
 		Version:       "2.0.0",
+		SessionID:     s.sessionID,
 		AliasDomain:   s.aliasDomain,
 		TargetURL:     s.targetURL,
 		StartedAt:     s.startedAt.Format(time.RFC3339Nano),

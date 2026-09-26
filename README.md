@@ -47,7 +47,7 @@ This is content-blind scanning: the operator controls who the target is; the AI 
 | **CAPTCHA relay** | Operator-facing challenge queue and separate provider origins. Tor-routed resources keep provider cookies, CSP and CORS separate from the target and operator. |
 | **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
 | **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
-| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. |
+| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. |
 
 **Development release.** The tested workflow is single-target and multi-origin scanning. Full browser containment verification and complete anonymization of arbitrary input remain open; review [supported behavior and delivery gates](docs/capabilities.md) before connecting a sensitive target.
 

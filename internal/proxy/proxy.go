@@ -437,6 +437,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	var leakCount int
 	observed := newResponseObserver(w, r.Method)
+	evidence := newRequestEvidence(s.manifest, gate, r)
+	observed.requestID = evidence.entry.RequestID
 	w = observed
 	defer func() {
 		if observed.status != 0 {
@@ -445,7 +447,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if observed.metrics.Source == "proxy" {
 			observed.metrics.RewrittenBodyBytes = observed.writtenBytes
 		}
-		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), leakCount, observed.metrics)
+		observed.finish()
+		evidence.entry.Path = r.URL.Path
+		evidence.entry.StatusCode = status
+		evidence.entry.ScrubCount = gate.ReplacementCount()
+		evidence.entry.LeakCount = leakCount
+		evidence.entry.Response = &observed.metrics
+		s.manifest.RecordExchange(evidence.entry)
 	}()
 
 	upstream := s.origins.Resolve(r.Host)
@@ -455,6 +463,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestOrigins := s.origins.ForRequestHost(r.Host)
+	evidence.observeContext(gate, r, upstream)
 	restoreSubmittedValue := func(value string) string {
 		return rewriter.RestoreResourceValue(value, gate, requestOrigins)
 	}
@@ -473,6 +482,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reqBodyBuf []byte
+	if r.Body == nil {
+		evidence.observeBody(gate, nil)
+	}
 	if r.Body != nil {
 		var readErr error
 		reqBodyBuf, readErr = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
@@ -488,6 +500,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			s.stats.Errors.Add(1)
 			return
 		}
+		evidence.observeBody(gate, reqBodyBuf)
 		ct := r.Header.Get("Content-Type")
 		normCT := strings.ToLower(strings.TrimSpace(ct))
 		if i := strings.IndexByte(normCT, ';'); i >= 0 {

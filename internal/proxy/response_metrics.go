@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strconv"
@@ -19,11 +22,14 @@ type responseObserver struct {
 	status            int
 	head              bool
 	writtenBytes      int64
+	requestID         string
+	bodyHash          hash.Hash
+	writeFailed       bool
 	beforeFinalHeader func(http.Header)
 }
 
 func newResponseObserver(w http.ResponseWriter, method string) *responseObserver {
-	return &responseObserver{ResponseWriter: w, head: method == http.MethodHead, metrics: manifest.ResponseMetrics{
+	return &responseObserver{ResponseWriter: w, head: method == http.MethodHead, bodyHash: sha256.New(), metrics: manifest.ResponseMetrics{
 		Source: "proxy", Upstream: []manifest.BodyRead{}, OriginalBodyBytes: -1, RewrittenBodyBytes: -1,
 	}}
 }
@@ -43,6 +49,10 @@ func (w *responseObserver) WriteHeader(status int) {
 		w.beforeFinalHeader(w.Header())
 	}
 	w.Header().Set("X-Blinder-View", "transformed")
+	w.Header().Del("X-Blinder-Request-ID")
+	if w.requestID != "" {
+		w.Header().Set("X-Blinder-Request-ID", w.requestID)
+	}
 	// This is a session-keyed equality signal for a complete original body,
 	// not a public content hash or an assertion of exploit success.
 	w.Header().Del("X-Blinder-Original-Body-Tag")
@@ -68,11 +78,33 @@ func (w *responseObserver) Write(body []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	n, err := w.ResponseWriter.Write(body)
+	if err != nil || n != len(body) {
+		w.writeFailed = true
+	}
 	w.writtenBytes += int64(n)
 	if !w.head && w.status != http.StatusNoContent && w.status != http.StatusNotModified {
 		w.metrics.DownstreamBytes += int64(n)
+		if n > 0 && n <= len(body) {
+			_, _ = w.bodyHash.Write(body[:n])
+		}
 	}
 	return n, err
+}
+
+// finish describes bytes accepted by the HTTP writer, not delivery to the client.
+// No-body responses and incomplete writes must never look like equal empty pages.
+func (w *responseObserver) finish() {
+	w.metrics.BodyComplete = false
+	w.metrics.RewrittenBodyTag = ""
+	encoding := strings.ToLower(strings.TrimSpace(strings.Join(w.Header().Values("Content-Encoding"), ",")))
+	if w.head || w.status < 200 || w.status == http.StatusNoContent || w.status == http.StatusNotModified ||
+		w.metrics.Source == "proxy" || w.writeFailed || w.metrics.OriginalBodyTag == "" ||
+		w.metrics.OriginalBodyBytes < 0 || w.metrics.RewrittenBodyBytes < 0 ||
+		w.metrics.DownstreamBytes != w.metrics.RewrittenBodyBytes || (encoding != "" && encoding != "identity") {
+		return
+	}
+	w.metrics.BodyComplete = true
+	w.metrics.RewrittenBodyTag = hex.EncodeToString(w.bodyHash.Sum(nil))
 }
 
 func (w *responseObserver) representation(source string, original, rewritten int64, tag ...string) {
