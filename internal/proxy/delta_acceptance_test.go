@@ -115,9 +115,9 @@ func TestDeltaAcceptancePairedHTTPResponses(t *testing.T) {
 	}
 }
 
-func TestDeltaAcceptanceDetectsActualMaskingCollision(t *testing.T) {
-	// A two-byte title has a finite filler vocabulary. Exercise an actual
-	// information-loss case, rather than fabricating mismatched fingerprint data.
+func TestDeltaAcceptanceReportsShortTextSaturation(t *testing.T) {
+	// More than 64 one-byte labels cannot fit uniquely into the safe alphabet.
+	// Explicit fallback evidence and the original fingerprint remain available.
 	current := ""
 	s := mappingReviewServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) {
 		resp := audit267SRIResponse("text/html", current)
@@ -126,7 +126,10 @@ func TestDeltaAcceptanceDetectsActualMaskingCollision(t *testing.T) {
 	})
 	s.cfg.Paranoid = true
 	seen := map[string]string{}
-	for ch := rune(0x100); ch < 0x800; ch++ {
+	for ch := rune('!'); ch <= '~'; ch++ {
+		if strings.ContainsRune("<&>", ch) {
+			continue
+		}
 		current = "<title>" + string(ch) + "</title>"
 		got := audit267CacheRequest(s, "GET", "/", nil)
 		id := got.Header().Get("X-Blinder-Request-ID")
@@ -140,9 +143,12 @@ func TestDeltaAcceptanceDetectsActualMaskingCollision(t *testing.T) {
 				c.RewrittenBodyDeltaBytes == nil || *c.RewrittenBodyDeltaBytes != 0 || c.RequestChanged == nil || *c.RequestChanged {
 				t.Fatalf("actual equal-size lost change missed: %+v", c)
 			}
+			if report.Tests[0].ShortTextFallbacks == 0 {
+				t.Fatal("short-text saturation was hidden from the comparison report")
+			}
 			return
 		}
 		seen[got.Body.String()] = id
 	}
-	t.Fatal("synthetic short-title collision not found")
+	t.Fatal("synthetic one-byte alphabet saturation not found")
 }

@@ -44,26 +44,28 @@ type cookieValueMapping struct {
 }
 
 type Gate struct {
-	parent           *Gate    // Per-request counters; aliases and aggregate findings stay shared.
-	contentKey       [32]byte // Private session key; never derived from or exposed by Seed.
-	targetDomains    []string
-	identityTokens   []string
-	domainPatterns   []*regexp.Regexp
-	tokenPatterns    []*regexp.Regexp
-	aliasDomain      string
-	escapePrefix     string
-	preserveDomains  map[string]bool
-	preserveURLCheck func(fullURL string) bool
-	mu               sync.Mutex
-	leaks            map[string]*LeakEntry
-	aliases          map[string]string               // alias → real domain
-	cookieAliases    map[string]string               // alias → original cookie name
-	cookieValues     map[string][]cookieValueMapping // aliased cookie name → value mappings
-	tokenAliases     map[string]string               // alias → original token text
-	emailAliases     map[string]string               // alias → original email
-	ipv4Aliases      map[string]string               // alias → original IPv4
-	ipv6Aliases      map[string]string               // alias → original IPv6
-	opaqueAliases    map[string]string               // grammar-constrained alias → original value
+	parent             *Gate    // Per-request counters; aliases and aggregate findings stay shared.
+	contentKey         [32]byte // Private session key; never derived from or exposed by Seed.
+	targetDomains      []string
+	identityTokens     []string
+	domainPatterns     []*regexp.Regexp
+	tokenPatterns      []*regexp.Regexp
+	aliasDomain        string
+	escapePrefix       string
+	preserveDomains    map[string]bool
+	preserveURLCheck   func(fullURL string) bool
+	mu                 sync.Mutex
+	leaks              map[string]*LeakEntry
+	aliases            map[string]string               // alias → real domain
+	cookieAliases      map[string]string               // alias → original cookie name
+	cookieValues       map[string][]cookieValueMapping // aliased cookie name → value mappings
+	tokenAliases       map[string]string               // alias → original token text
+	emailAliases       map[string]string               // alias → original email
+	ipv4Aliases        map[string]string               // alias → original IPv4
+	ipv6Aliases        map[string]string               // alias → original IPv6
+	opaqueAliases      map[string]string               // grammar-constrained alias → original value
+	shortText          *shortTextStore                 // Bounded display-only reservations; never restored as request data.
+	shortTextFallbacks int                             // Request-local count; root gate also aggregates delegated calls.
 }
 
 // ForRequest keeps replacement counts isolated from concurrent requests while
@@ -535,35 +537,6 @@ func (g *Gate) RestoreCookieHeader(header, origin string) string {
 		parts = append(parts, originalName+"="+originalValue)
 	}
 	return strings.Join(parts, "; ")
-}
-
-func (g *Gate) aliasToken(original string) string {
-	if g.parent != nil {
-		return g.parent.aliasToken(original)
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for alias, orig := range g.tokenAliases {
-		if orig == original {
-			return alias
-		}
-	}
-	h := sha256.Sum256([]byte(original))
-	for size := 3; size <= len(h); size++ {
-		alias := ValueAliasPrefix + hex.EncodeToString(h[:size]) + "]"
-		if _, exists := g.tokenAliases[alias]; !exists {
-			g.tokenAliases[alias] = original
-			return alias
-		}
-	}
-	// Even a full digest collision must not overwrite an existing inverse map.
-	for suffix := 1; ; suffix++ {
-		alias := fmt.Sprintf("%s%x-%d]", ValueAliasPrefix, h, suffix)
-		if _, exists := g.tokenAliases[alias]; !exists {
-			g.tokenAliases[alias] = original
-			return alias
-		}
-	}
 }
 
 func (g *Gate) aliasEmail(original, domain string) string {

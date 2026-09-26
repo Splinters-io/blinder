@@ -31,6 +31,7 @@ type Observation struct {
 	UpstreamStatus     *int     `json:"upstream_status"`
 	DownstreamStatus   *int     `json:"downstream_status"`
 	StatusPreserved    *bool    `json:"status_preserved"`
+	ShortTextFallbacks int      `json:"short_text_fallbacks"`
 	OriginalBodyBytes  *int64   `json:"original_body_bytes"`
 	RewrittenBodyBytes *int64   `json:"rewritten_body_bytes"`
 	RewriteDeltaBytes  *int64   `json:"rewrite_delta_bytes"`
@@ -176,6 +177,7 @@ func observe(sessionID string, e manifest.RequestEntry) Observation {
 		o.Reasons = append(o.Reasons, "response_evidence_missing")
 		return o
 	}
+	o.ShortTextFallbacks = m.ShortTextFallbacks
 	if m.Source != "upstream" {
 		reason := "response_source_unknown"
 		switch m.Source {

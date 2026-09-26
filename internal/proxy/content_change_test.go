@@ -55,9 +55,8 @@ func TestContentChangeEqualSizeEvidence(t *testing.T) {
 }
 
 func TestContentChangeShortBodyTag(t *testing.T) {
-	// Short visible filler has finite capacity. Search synthetic Unicode
-	// originals with the same UTF-8 length for an actual output collision,
-	// then require the independent original tag to distinguish them.
+	// Distinct observed two-byte Unicode titles must retain a body-level
+	// signal, not merely differ in the separate original-body fingerprint.
 	current := ""
 	s := mappingReviewServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) {
 		response := audit267SRIResponse("text/html", current)
@@ -70,18 +69,24 @@ func TestContentChangeShortBodyTag(t *testing.T) {
 		current = "<title>" + string(ch) + "</title>"
 		got := audit267CacheRequest(s, "GET", "/", nil)
 		view, tag := got.Body.String(), got.Header().Get(originalTagHeader)
-		if tag == "" {
-			t.Fatal("missing original tag")
+		if tag == "" || got.Body.Len() != len(current) {
+			t.Fatal("missing original tag or changed byte budget")
 		}
 		if prior, ok := seen[view]; ok {
-			if prior == tag {
-				t.Fatal("filler collision also erased original change signal")
-			}
-			return
+			t.Fatalf("different short titles collapsed: %s and %s", prior, tag)
 		}
 		seen[view] = tag
 	}
-	t.Fatal("fixture did not find a short-output collision")
+	if s.gate.ShortTextFallbackCount() != 0 {
+		t.Fatal("two-byte fixture unexpectedly exhausted its reservation budget")
+	}
+	for ch := rune(0x100); ch < 0x110; ch++ {
+		current = "<title>" + string(ch) + "</title>"
+		got := audit267CacheRequest(s, "GET", "/", nil)
+		if seen[got.Body.String()] != got.Header().Get(originalTagHeader) {
+			t.Fatal("previously issued short title changed after later reservations")
+		}
+	}
 }
 
 func TestContentChangeTagCacheHeadAndRevalidation(t *testing.T) {

@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -44,6 +45,66 @@ func TestProsePreservesHTMLTextByteBudget(t *testing.T) {
 	got := string(RewriteBody([]byte("<p>"+spaced+"</p>"), "text/html", "/", newTestGate(), true).Body)
 	if !strings.HasPrefix(got, "<p> \t\r\n") || !strings.HasSuffix(got, "\r\n\t </p>") {
 		t.Fatalf("boundary whitespace changed: %q", got)
+	}
+}
+
+func TestProseFittingKeepsShortChangesDistinct(t *testing.T) {
+	gate := newTestGate()
+	seen := make(map[string]string)
+	for i := range 100 {
+		tag := gate.ContentTag([]byte(fmt.Sprintf("long original source %d", i)))
+		body := []byte("<p>\t" + proseForLength(40, tag) + "\n</p>")
+		spans := []proseSpan{{start: 4, end: 44, contentTag: tag}}
+		got := string(fitProseToBodyLength(body, spans, 11, gate))
+		if len(got) != 11 || !strings.HasPrefix(got, "<p>\t") || !strings.HasSuffix(got, "\n</p>") {
+			t.Fatalf("fitting damaged the byte budget or literal boundaries: %q", got)
+		}
+		if prior, ok := seen[got]; ok {
+			t.Fatalf("short fitting collapsed tags %q / %q", prior, tag)
+		}
+		seen[got] = tag
+		if again := string(fitProseToBodyLength(body, spans, 11, gate.ForRequest())); again != got {
+			t.Fatalf("fitted source remapped: %q / %q", got, again)
+		}
+	}
+	if gate.ShortTextFallbackCount() != 0 {
+		t.Fatal("fitting unexpectedly exhausted short outputs")
+	}
+}
+
+func TestProseShortFittingReportsExhaustion(t *testing.T) {
+	gate := newTestGate().ForRequest()
+	for i := range 65 {
+		tag := gate.ContentTag([]byte(fmt.Sprintf("fitting source %d", i)))
+		body := []byte("<p>" + proseForLength(40, tag) + "</p>")
+		spans := []proseSpan{{start: 3, end: 43, contentTag: tag}}
+		got := fitProseToBodyLength(body, spans, 8, gate)
+		if len(got) != 8 {
+			t.Fatalf("exhaustion altered the byte budget: %q", got)
+		}
+	}
+	if gate.ShortTextFallbackCount() != 1 {
+		t.Fatalf("short fitting did not report finite capacity: %d", gate.ShortTextFallbackCount())
+	}
+}
+
+func TestProseShortTextKeepsRawEntityAndWhitespaceBudgets(t *testing.T) {
+	gate := newTestGate()
+	for _, raw := range []string{" \t&amp;\r\n", "\u2003&#65;\u2003", "\n\tĀ\r\n", "&#x123;", "A"} {
+		tag := gate.ContentTag([]byte(raw))
+		got := proseForHTMLText(raw, tag, gate)
+		left, right := proseContentBounds(raw)
+		if len(got) != len(raw) || !utf8.ValidString(got) || got[:left] != raw[:left] || got[right:] != raw[right:] {
+			t.Fatalf("short raw token budget changed: %q -> %q", raw, got)
+		}
+		if again := proseForHTMLText(raw, tag, gate.ForRequest()); again != got {
+			t.Fatal("raw token remapped across requests")
+		}
+	}
+	const longer = "ordinary longer prose keeps its previous generation"
+	tag := gate.ContentTag([]byte(longer))
+	if got := proseForBudget(len(longer), tag, gate); got != proseForLength(len(longer), tag) {
+		t.Fatal("short-text repair changed longer prose generation")
 	}
 }
 
@@ -126,7 +187,7 @@ func TestProseResizingRetainsSourceDependentGeneration(t *testing.T) {
 		makeBody := func(tag string) string {
 			original := "<p>" + proseForLength(240, tag) + "</p>"
 			spans := []proseSpan{{start: 3, end: 243, contentTag: tag}}
-			resized := fitProseToBodyLength([]byte(original), spans, target+7)
+			resized := fitProseToBodyLength([]byte(original), spans, target+7, gate)
 			if len(resized) != target+7 || !strings.HasPrefix(string(resized), "<p>") || !strings.HasSuffix(string(resized), "</p>") {
 				t.Fatalf("invalid resized prose: %q", resized)
 			}

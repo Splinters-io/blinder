@@ -448,6 +448,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			observed.metrics.RewrittenBodyBytes = observed.writtenBytes
 		}
 		observed.finish()
+		observed.metrics.ShortTextFallbacks = gate.ShortTextFallbackCount()
 		evidence.entry.Path = r.URL.Path
 		evidence.entry.StatusCode = status
 		evidence.entry.ScrubCount = gate.ReplacementCount()

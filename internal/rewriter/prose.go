@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"strings"
 	"unicode"
+
+	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
 // Rumi, The Mesnevi, Book I, XII; James W. Redhouse translation (1881).
@@ -23,7 +25,7 @@ var proseWords = strings.Fields(proseText)
 // boundary whitespace and the source byte count, including entity spellings.
 // Whole words are followed by spaces when the remaining budget is too small.
 // This is not a padding pass over the whole document or other media types.
-func proseForHTMLText(raw, contentTag string) string {
+func proseForHTMLText(raw, contentTag string, gate *scrub.Gate) string {
 	left, right := proseContentBounds(raw)
 	if left == right {
 		return raw
@@ -31,9 +33,17 @@ func proseForHTMLText(raw, contentTag string) string {
 	var out strings.Builder
 	out.Grow(len(raw))
 	out.WriteString(raw[:left])
-	out.WriteString(proseForLength(right-left, contentTag))
+	out.WriteString(proseForBudget(right-left, contentTag, gate))
 	out.WriteString(raw[right:])
 	return out.String()
+}
+
+func proseForBudget(n int, contentTag string, gate *scrub.Gate) string {
+	if n >= 1 && n <= 8 {
+		text, _ := gate.ShortTextAlias(contentTag, n)
+		return text
+	}
+	return proseForLength(n, contentTag)
 }
 
 func proseContentBounds(raw string) (int, int) {
@@ -105,7 +115,7 @@ type proseSpan struct {
 // It never cuts source markup/data or appends a new padding node. If the output
 // cannot shrink enough while keeping every prose span visible, it gets as close
 // as possible and the caller's actual-size measurements expose the remainder.
-func fitProseToBodyLength(body []byte, spans []proseSpan, target int) []byte {
+func fitProseToBodyLength(body []byte, spans []proseSpan, target int, gate *scrub.Gate) []byte {
 	if len(spans) == 0 || len(body) == target {
 		return body
 	}
@@ -150,7 +160,7 @@ func fitProseToBodyLength(body []byte, spans []proseSpan, target int) []byte {
 		if sizes[i] == span.end-span.start {
 			out.Write(body[span.start:span.end])
 		} else {
-			out.WriteString(proseForLength(sizes[i], span.contentTag))
+			out.WriteString(proseForBudget(sizes[i], span.contentTag, gate))
 		}
 		previous = span.end
 	}

@@ -181,11 +181,11 @@ func TestBodySizeFitReportsUnavoidableDifference(t *testing.T) {
 		name, body string
 		status     int
 	}{
-		{"no_prose", `<pre>E_INPUT: AcmeCorp invalid résumé</pre><textarea name="note">AcmeCorp</textarea>`, 200},
-		{"error_response", `<p>AcmeCorp service unavailable</p><pre>E_TIMEOUT: retry in 30 seconds</pre>`, 503},
+		{"no_prose", `<pre>E_INPUT: Org invalid résumé</pre><textarea name="note">Org</textarea>`, 200},
+		{"error_response", `<p>Org service unavailable</p><pre>E_TIMEOUT: retry in 30 seconds</pre>`, 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := mappingReviewServer(t, "https://main.example", []string{"AcmeCorp"}, func(*http.Request) (*http.Response, error) {
+			s := mappingReviewServer(t, "https://main.example", []string{"Org"}, func(*http.Request) (*http.Response, error) {
 				response := audit267SRIResponse("text/html", tc.body)
 				response.StatusCode = tc.status
 				response.Header.Set("Retry-After", "30")

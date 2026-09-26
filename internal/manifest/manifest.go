@@ -42,6 +42,7 @@ type ResponseMetrics struct {
 	OriginalBodyTag    string     `json:"original_body_tag,omitempty"`
 	RewrittenBodyTag   string     `json:"rewritten_body_tag,omitempty"`
 	BodyComplete       bool       `json:"body_complete"`
+	ShortTextFallbacks int        `json:"short_text_fallbacks"`
 	OriginalBodyBytes  int64      `json:"original_body_bytes"`
 	RewrittenBodyBytes int64      `json:"rewritten_body_bytes"`
 	DownstreamBytes    int64      `json:"downstream_body_bytes"`

@@ -1,8 +1,6 @@
 package scrub
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -59,19 +57,20 @@ func TestValueAliasesPreserveLegacyLiteralAppData(t *testing.T) {
 
 func TestValueAliasCollisionDoesNotOverwriteInverseMapping(t *testing.T) {
 	g := NewGate(nil, []string{"AcmeCorp"}, "alias.local")
-	h := sha256.Sum256([]byte("AcmeCorp"))
-	for size := 3; size <= len(h); size++ {
-		g.tokenAliases[ValueAliasPrefix+hex.EncodeToString(h[:size])+"]"] = fmt.Sprintf("existing-%d", size)
+	// Occupy the actual keyed candidates, not the obsolete public SHA aliases.
+	payload := g.tokenAliasPayload("AcmeCorp", len("AcmeCorp")-len(ValueAliasPrefix)-1)
+	for i := 0; i < 3; i++ {
+		g.tokenAliases[ValueAliasPrefix+string(payload)+"]"] = fmt.Sprintf("existing-%d", i)
+		incrementAliasPayload(payload)
 	}
-	fullCollision := fmt.Sprintf("%s%x-1]", ValueAliasPrefix, h)
-	g.tokenAliases[fullCollision] = "existing-full-collision"
+	want := ValueAliasPrefix + string(payload) + "]"
 	before := make(map[string]string, len(g.tokenAliases))
 	for alias, original := range g.tokenAliases {
 		before[alias] = original
 	}
 	alias := g.Scrub("AcmeCorp", "value")
-	if got := g.RestoreBody(alias); got != "AcmeCorp" {
-		t.Fatalf("new alias did not restore: %q -> %q", alias, got)
+	if got := g.RestoreBody(alias); alias != want || got != "AcmeCorp" {
+		t.Fatalf("fixed-width collision probing failed: %q -> %q, want alias %q", alias, got, want)
 	}
 	for alias, original := range before {
 		if got := g.RestoreBody(alias); got != original {

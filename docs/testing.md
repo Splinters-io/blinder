@@ -80,6 +80,16 @@ Run `go test -race -count=1 ./internal/proxy -run '^TestWebSocket(Refusal|Transp
 
 Run `go test -race -count=1 ./internal/rewriter -run '^TestProse'` for prose byte budgets, entity/Unicode handling, literal boundary whitespace, short text, and reversible textarea/option values, including slash-ended form elements.
 
+For compact identity aliases and short display reservations:
+
+```sh
+go test -race -count=1 ./internal/scrub -run '^(TestCompactValue|TestValueAlias|TestShortText)'
+go test -race -count=1 ./internal/proxy -run '^(TestCompactIdentity|TestContentChangeShortBodyTag|TestDelta)'
+go test -race -count=1 ./internal/rewriter -run '^(TestProse|TestWholeDocumentFit)'
+```
+
+These checks cover exact alias byte budgets, Unicode case restoration, literal marker safety, concurrent request views, fixed-width namespace exhaustion, bounded display reservations and fallback counts. Real HTTP fixtures verify equal response sizes without shortening diagnostics and restoration of submitted aliases. Short display outputs are distinct only while reservations succeed; one-byte exhaustion remains an explicit lost-signal case. The [size and change-signal report](testing-results-2026-09-26-size-signals.md) records this checkpoint.
+
 Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^TestBodySize|^TestTitle|^TestHTMLQuotedAttrEdits'` for whole-HTML size matching. These tests compare differently sized responses, including gzip input, and require each final decoded length and the signed difference between them to match upstream. They also verify that fitting occurs after provider URL expansion, that SQL-style diagnostics, script text and form values survive, and that insufficient adjustment space is reported rather than taken from functional content. These are synthetic fidelity fixtures, not proof of SQL injection detection on arbitrary sites.
 
 For the offline [paired response comparator](response-deltas.md), run:

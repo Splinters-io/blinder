@@ -36,6 +36,10 @@ For example, original bodies of 10,420 and 10,457 bytes should produce rewritten
 
 Changed original content with unchanged output is a lost body change. Unchanged original content with changed output is an introduced body change. When both change, the report establishes only that a change remains visible. It cannot determine whether a diagnostic, reflected payload, parser condition or execution outcome survived.
 
+Each observation also includes `short_text_fallbacks`: the number of short display-text generation attempts in that request that could not reserve a unique output. This can include intermediate prose that was subsequently resized; it is neither a count of affected responses nor proof that the final bodies collided. Cache hits perform no new generation. A nonzero count explains a possible lost signal, while zero does not guarantee that longer prose or other transformations preserved every change.
+
+Short display reservations cover 1–8-byte budgets, remain immutable within the session, and have a 4,096-entry cap and 8,192-probe allocation bound. One byte offers at most 64 outputs; fallback can therefore be unavoidable. Fixed-width identity aliases separately reduce size drift for configured matches of at least five UTF-8 bytes, but short identities, namespace exhaustion, source escapes and routing changes can still alter lengths. Continue checking both per-response sizes and paired content changes.
+
 Repeated baselines are compared separately. Their observed variation is reported, not discarded or automatically classified as harmless noise. Different request fingerprints flag different captured inputs. Matching fingerprints do not freeze server-side session state or prove that a later difference was caused by a test payload.
 
 ## Measurement boundary
@@ -46,4 +50,4 @@ Context fingerprints bind comparisons to the session, local scheme and authority
 
 The first comparator covers ordinary target HTTP responses. Provider/operator traffic, WebSocket messages, individual SRI prefetches, structural diffs, response-header semantics, timing analysis and browser execution need separate evidence. Exact content changes and size matching do not establish exploit success or universal control fidelity. The monitor reports fidelity failures; it does not repair the remaining size or semantic differences.
 
-The [local verification report](testing-results-2026-09-26-delta-monitor.md) records the real HTTP fixture results, regressions and the functional startup timeout followed by the unchanged passing rerun.
+The [local verification report](testing-results-2026-09-26-delta-monitor.md) records the first real HTTP fixture results, regressions and the functional startup timeout followed by the unchanged passing rerun. The [size and change-signal follow-up](testing-results-2026-09-26-size-signals.md) records compact identity aliases and bounded short-text reservations.

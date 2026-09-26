@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Splinters-io/blinder/internal/captcha"
+	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
 func TestBodySizeFitsWholeHTMLUsingOnlyProse(t *testing.T) {
@@ -53,8 +54,10 @@ func TestBodySizeDoesNotSacrificeDiagnosticsForExactLength(t *testing.T) {
 		{"json", `{"error":"AcmeCorp: SQLSTATE[42000] invalid input","number":900719925474099312345}`, "application/json", 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := string(RewriteBody([]byte(tc.body), tc.contentType, "/", newTestGate(), true, RewriteOpts{StatusCode: tc.status}).Body)
-			if !strings.Contains(got, "SQLSTATE[42000] invalid input") || len(got) <= len(tc.body) {
+			body := strings.ReplaceAll(tc.body, "AcmeCorp", "Org")
+			gate := scrub.NewGate(nil, []string{"Org"}, "alias.local")
+			got := string(RewriteBody([]byte(body), tc.contentType, "/", gate, true, RewriteOpts{StatusCode: tc.status}).Body)
+			if !strings.Contains(got, "SQLSTATE[42000] invalid input") || len(got) <= len(body) {
 				t.Fatalf("missing diagnostic or impossible size silently forced: %s", got)
 			}
 			if tc.name == "too-small" {
@@ -94,15 +97,15 @@ func TestBodySizeFitsAfterProviderResourceURLExpansion(t *testing.T) {
 }
 
 func TestBodySizeUsesAllAvailableProseWithoutErasingNodes(t *testing.T) {
-	gate := newTestGate()
+	gate := scrub.NewGate(nil, []string{"Org"}, "alias.local")
 	// Identity expansion requires more bytes than either prose node alone
 	// can supply. Title text no longer creates its own artificial expansion.
-	delta := len(gate.Scrub("AcmeCorp", "fixture")) - len("AcmeCorp")
+	delta := len(gate.Scrub("Org", "fixture")) - len("Org")
 	if delta < 2 {
 		t.Fatal("fixture needs an expanding identity alias")
 	}
 	budget := (delta+1)/2 + 1
-	body := `<div title="AcmeCorp"><p>` + strings.Repeat("a", budget) + `</p><p>` + strings.Repeat("b", budget) + `</p></div>`
+	body := `<div title="Org"><p>` + strings.Repeat("a", budget) + `</p><p>` + strings.Repeat("b", budget) + `</p></div>`
 	got := string(RewriteBody([]byte(body), "text/html", "/", gate, true).Body)
 	if len(got) != len(body) || strings.Count(got, "<p>") != 2 || strings.Contains(got, "<p></p>") {
 		t.Fatalf("prose capacity not shared: %s", got)

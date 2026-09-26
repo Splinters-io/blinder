@@ -122,7 +122,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 					if strings.TrimSpace(string(z.Text())) == "" {
 						out.Write(raw)
 					} else {
-						out.WriteString(proseForHTMLText(string(raw), gate.ContentTag(raw)))
+						out.WriteString(proseForHTMLText(string(raw), gate.ContentTag(raw), gate))
 					}
 					continue
 				}
@@ -134,7 +134,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 						left, right := proseContentBounds(string(raw))
 						contentTag := gate.ContentTag(raw)
 						proseSpans = append(proseSpans, proseSpan{start: out.Len() + left, end: out.Len() + right, contentTag: contentTag})
-						out.WriteString(proseForHTMLText(string(raw), contentTag))
+						out.WriteString(proseForHTMLText(string(raw), contentTag, gate))
 					} else {
 						out.Write(raw)
 					}
@@ -277,7 +277,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 	}
 
 	rewritten, proseSpans := rewriteCSPMetaSpans(out.Bytes(), proseSpans, policies, hashes)
-	return fitProseToBodyLength(rewritten, proseSpans, len(body))
+	return fitProseToBodyLength(rewritten, proseSpans, len(body), gate)
 }
 
 // Comments carry diagnostic and parser-relevant source. Ordinary comments have
