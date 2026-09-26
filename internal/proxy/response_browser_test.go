@@ -39,7 +39,7 @@ func TestResponseFidelityBrowser(t *testing.T) {
 		io.WriteString(w, formBody)
 	}))
 	defer target.Close()
-	s := mappingReviewServer(t, target.URL, []string{"AcmeCorp"}, nil)
+	s := mappingReviewEphemeralServer(t, target.URL, []string{"AcmeCorp"}, nil)
 	s.cfg.Paranoid = true
 	defer s.transport.(*http.Transport).CloseIdleConnections()
 	cleanup := make(chan struct{}, 1)

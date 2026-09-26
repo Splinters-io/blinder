@@ -334,6 +334,14 @@ func TestFlushRetryOnTransientFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "retry.har")
 	w := NewWriter(path, 1024, 1000)
+	cleanupCalls := 0
+	w.retireJournal = func(path, backup string) error {
+		cleanupCalls++
+		if cleanupCalls == 1 {
+			return os.ErrPermission
+		}
+		return retireJournalFile(path, backup)
+	}
 
 	req := httptest.NewRequest("GET", "https://target.invalid/page", nil)
 	resp := &http.Response{StatusCode: 200, Status: "200 OK", Header: http.Header{}, Proto: "HTTP/1.1"}
@@ -352,6 +360,9 @@ func TestFlushRetryOnTransientFailure(t *testing.T) {
 	}
 	if len(file.Log.Entries) != 1 {
 		t.Errorf("expected 1 entry after retry-capable flush, got %d", len(file.Log.Entries))
+	}
+	if cleanupCalls != 2 {
+		t.Fatalf("cleanup retry was not exercised: calls=%d", cleanupCalls)
 	}
 }
 

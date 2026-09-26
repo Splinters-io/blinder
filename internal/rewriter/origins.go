@@ -44,6 +44,11 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 	if err != nil {
 		port = "443"
 	}
+	// Origin keys already compare numeric effective ports. Use the same form
+	// for routing so an explicit leading zero cannot split the two models.
+	if number, err := strconv.ParseUint(port, 10, 16); err == nil {
+		port = strconv.FormatUint(number, 10)
+	}
 	m.listenPort = port
 
 	targetCopy := url.URL{Scheme: target.Scheme, Host: target.Host}
@@ -184,11 +189,22 @@ func (m *OriginMapper) Resolve(host string) *url.URL {
 	h, p, err := net.SplitHostPort(host)
 	if err != nil {
 		h = host
+		if strings.HasPrefix(h, "[") && strings.HasSuffix(h, "]") && net.ParseIP(h[1:len(h)-1]) != nil {
+			h = h[1 : len(h)-1]
+		} else if strings.ContainsAny(h, ":[]") {
+			return nil
+		}
 		if m.listenPort != "443" && m.listenPort != "0" {
 			return nil
 		}
-	} else if m.listenPort != "0" && p != m.listenPort {
-		return nil
+	} else {
+		number, parseErr := strconv.ParseUint(p, 10, 16)
+		if parseErr != nil || number == 0 {
+			return nil
+		}
+		if m.listenPort != "0" && strconv.FormatUint(number, 10) != m.listenPort {
+			return nil
+		}
 	}
 	return m.routes[strings.ToLower(h)]
 }
@@ -313,13 +329,19 @@ func (m *OriginMapper) RewriteResponseOrigin(value, requestOrigin string) string
 	if err != nil {
 		return value
 	}
+	// CORS compares a serialized origin, not an arbitrary URL's origin tuple.
+	// Never repair a path, empty query/fragment, or noncanonical spelling into
+	// a permission the original response did not grant.
+	if !isSerializedOrigin(value, u) {
+		return value
+	}
 	upKey := originKey(u)
 	if _, ok := m.upstreamToLocal[upKey]; !ok {
 		return value
 	}
 	if requestOrigin != "" {
 		ru, err := url.Parse(requestOrigin)
-		if err == nil {
+		if err == nil && isSerializedOrigin(requestOrigin, ru) {
 			if upstream, ok := m.clientToUpstream[originKey(ru)]; ok {
 				if originKey(&upstream) == upKey {
 					return requestOrigin
@@ -328,4 +350,29 @@ func (m *OriginMapper) RewriteResponseOrigin(value, requestOrigin string) string
 		}
 	}
 	return m.upstreamToLocal[upKey]
+}
+
+func isSerializedOrigin(value string, u *url.URL) bool {
+	key := originKey(u)
+	if key == "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(value, "#") {
+		return false
+	}
+	parts := strings.Split(key, "\x00")
+	scheme, host, port := parts[0], parts[1], parts[2]
+	for _, c := range host {
+		if c > 127 {
+			return false
+		} // Browser origins use ASCII host serialization.
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	} else {
+		host = net.JoinHostPort(host, port)
+	}
+	return value == scheme+"://"+host
 }

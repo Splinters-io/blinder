@@ -75,7 +75,7 @@ func run() int {
 	flag.BoolVar(&tor, "tor", false, "Route upstream through Tor SOCKS5 proxy")
 	flag.StringVar(&torAddr, "tor-addr", "", "Tor SOCKS5 address")
 	flag.BoolVar(&noVerifyTLS, "no-verify-tls", false, "Skip TLS verification on target")
-	flag.BoolVar(&paranoid, "paranoid", false, "Maximum scrubbing mode")
+	flag.BoolVar(&paranoid, "paranoid", false, "Replace ordinary prose and scrub identities (independent of --tor)")
 	flag.BoolVar(&bindAll, "bind-all", false, "Allow binding to non-loopback addresses")
 	flag.StringVar(&harPath, "har", "", "Write HAR 1.2 file with real (pre-scrub) transactions")
 	flag.Int64Var(&harMaxBody, "har-max-body", 10*1024*1024, "Max bytes per request/response body captured in HAR")
@@ -90,12 +90,14 @@ func run() int {
 
 	flag.Parse()
 
+	var fileConfig *config.FileConfig
 	if configFile != "" {
 		fc, err := config.LoadFile(configFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1
 		}
+		fileConfig = fc
 		if target == "" && fc.Target != "" {
 			target = fc.Target
 		}
@@ -192,16 +194,9 @@ func run() int {
 		return 1
 	}
 
-	if cfg.HAR != nil && configFile != "" {
-		fc, _ := config.LoadFile(configFile)
-		if fc != nil {
-			if fc.HAR.MaxEntries > 0 {
-				cfg.HAR.MaxEntries = fc.HAR.MaxEntries
-			}
-			if fc.HAR.CaptureBudget > 0 {
-				cfg.HAR.CaptureBudget = fc.HAR.CaptureBudget
-			}
-		}
+	if cfg.HAR != nil && fileConfig != nil {
+		cfg.HAR.MaxEntries = fileConfig.HAR.MaxEntries
+		cfg.HAR.CaptureBudget = fileConfig.HAR.CaptureBudget
 	}
 
 	// Report an unusable endpoint before certificate generation or platform trust

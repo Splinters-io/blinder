@@ -104,7 +104,7 @@ func TestCaptchaProviderOperatorChallengeBrowserRoute(t *testing.T) {
 	upURL, _ := url.Parse(upstream.URL)
 	socksAddr, seen := captchaRoutingSOCKS(t, map[string]bool{upURL.Host: true, providerURL.Host: true})
 	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      tor_policy: route-with-target\n", providerURL.String()))
-	cfg, err := config.New(upstream.URL, "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, socksAddr, "", 0, "", "", 10, 60)
+	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp"}, true, false, false, socksAddr, "", 0, "", "", 10, 60)
 	if err != nil {
 		t.Fatal(err)
 	}

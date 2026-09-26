@@ -107,6 +107,10 @@ type Writer struct {
 	maxEntries    int
 	captureBudget int
 	path          string
+	// Protected by flushMu. Once the HAR is committed, retire its journal before
+	// any retry can append new evidence or materialize those records again.
+	pendingJournal *journalRetirement
+	retireJournal  func(path, backup string) error
 }
 
 func NewWriter(path string, maxBodySize int64, maxEntries int) *Writer {
@@ -357,7 +361,14 @@ func (w *Writer) flushMerge(path string) error {
 // flushMergeLocked and materialize share flushMu for the entire export. Record
 // can still add in-memory entries while an export runs; journal appenders wait
 // until that export has committed and retired its input journal.
-func (w *Writer) flushMergeLocked(path string) error {
+func (w *Writer) flushMergeLocked(path string) (err error) {
+	retirementErr := w.retireJournalLocked()
+	if retirementErr != nil && !errors.Is(retirementErr, ErrRecoveryIncomplete) {
+		return retirementErr
+	}
+	// A recovery warning means retirement succeeded. Persist newer evidence to
+	// a fresh journal before surfacing the warning, including on shutdown.
+	defer func() { err = errors.Join(err, retirementErr) }()
 	w.mu.Lock()
 	if len(w.entries) == 0 {
 		w.mu.Unlock()

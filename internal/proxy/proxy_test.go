@@ -214,7 +214,7 @@ func TestProxy_RejectLargeContentLength(t *testing.T) {
 	srv, _ := startTestProxy(t, cfg)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/upload", strings.NewReader("small body"))
+	req := httptest.NewRequest("POST", "https://target-001.local/upload", strings.NewReader("small body"))
 	req.ContentLength = maxRequestBody + 1
 
 	srv.ServeHTTP(rec, req)

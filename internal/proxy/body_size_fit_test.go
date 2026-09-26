@@ -78,7 +78,7 @@ func TestBodySizeFitPreservesPairedResponseDifference(t *testing.T) {
 		w.Write(encoded[i])
 	}))
 	defer upstream.Close()
-	s := mappingReviewServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
+	s := mappingReviewEphemeralServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
 	s.cfg.Paranoid = true
 	defer s.transport.(*http.Transport).CloseIdleConnections()
 	completed := make(chan struct{}, 1)

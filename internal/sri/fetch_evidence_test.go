@@ -94,7 +94,7 @@ func TestFetchEvidenceAlreadyDecompressedSizeIsUnknown(t *testing.T) {
 	pipeline := NewPipeline(PipelineConfig{Transport: evidenceTransport(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Status: "200 OK", Proto: "HTTP/2.0", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Uncompressed: true}, nil
 	}), OnFetch: func(rec FetchRecord) { record = rec }})
-	_, _, _, err := pipeline.fetch("https://fixture.invalid/asset", false, httptest.NewRequest("GET", "https://fixture.invalid/page", nil))
+	_, _, _, err := pipeline.fetch("https://fixture.invalid/asset", false, httptest.NewRequest("GET", "https://fixture.invalid/page", nil), "")
 	if err != nil || record.EncodedBytes != -1 || record.DecodedBytes != int64(len(body)) || !record.BodyComplete || record.HTTPVersion != "HTTP/2.0" {
 		t.Fatalf("invented encoded length: error=%v record=%+v", err, record)
 	}
@@ -110,7 +110,7 @@ func TestFetchEvidenceBodyLimitPreservesPartialAndObservedCounts(t *testing.T) {
 	defer server.Close()
 	var record FetchRecord
 	pipeline := NewPipeline(PipelineConfig{Transport: server.Client().Transport, OnFetch: func(rec FetchRecord) { record = rec }})
-	body, _, _, err := pipeline.fetch(server.URL+"/asset", false, httptest.NewRequest("GET", server.URL+"/page", nil))
+	body, _, _, err := pipeline.fetch(server.URL+"/asset", false, httptest.NewRequest("GET", server.URL+"/page", nil), "")
 	if err == nil || len(body) != 0 || !strings.Contains(err.Error(), "resource too large") || len(record.Body) != maxFetchSize || record.DecodedBytes != maxFetchSize+1 || record.EncodedBytes <= 0 || record.EncodedBytes > int64(len(wire)) || record.BodyComplete {
 		t.Fatalf("limit evidence incorrect: err=%v validBody=%d captured=%d encoded=%d decoded=%d complete=%t", err, len(body), len(record.Body), record.EncodedBytes, record.DecodedBytes, record.BodyComplete)
 	}
@@ -132,7 +132,7 @@ func TestFetchEvidenceTimeoutKeepsPartialNon200Body(t *testing.T) {
 	var record FetchRecord
 	pipeline := NewPipeline(PipelineConfig{Transport: server.Client().Transport, FetchTimeout: 100 * time.Millisecond, OnFetch: func(rec FetchRecord) { record = rec }})
 	start := time.Now()
-	body, _, _, err := pipeline.fetch(server.URL+"/asset", false, httptest.NewRequest("GET", server.URL+"/page", nil))
+	body, _, _, err := pipeline.fetch(server.URL+"/asset", false, httptest.NewRequest("GET", server.URL+"/page", nil), "")
 	if err == nil || len(body) != 0 || time.Since(start) > 2*time.Second || record.Status != 503 || string(record.Body) != "partial" || record.EncodedBytes != 7 || record.DecodedBytes != 7 || record.BodyComplete {
 		t.Fatalf("timeout lost partial response: err=%v record=%+v", err, record)
 	}

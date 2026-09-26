@@ -41,6 +41,10 @@ func LoadFile(path string) (*FileConfig, error) {
 	if err := yaml.Unmarshal(data, fc); err != nil {
 		return nil, fmt.Errorf("config file: %w", err)
 	}
+	har := &HARConfig{MaxEntries: fc.HAR.MaxEntries, CaptureBudget: fc.HAR.CaptureBudget}
+	if err := har.Validate(); err != nil {
+		return nil, fmt.Errorf("config file: %w", err)
+	}
 
 	return fc, nil
 }

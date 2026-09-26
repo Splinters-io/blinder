@@ -34,7 +34,7 @@ func TestFollowupRequestReadErrorStopsForwarding(t *testing.T) {
 		called = true
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/plain"}}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
 	})
-	req := httptest.NewRequest("POST", "/action", nil)
+	req := httptest.NewRequest("POST", "https://target-001.local/action", nil)
 	req.Body = &followupBrokenBody{}
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()

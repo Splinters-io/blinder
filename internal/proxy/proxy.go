@@ -86,6 +86,9 @@ func New(cfg *config.Config) (*Server, error) {
 
 // NewWithCertificate uses the exact identity inspected during CLI preflight.
 func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, error) {
+	if err := cfg.HAR.Validate(); err != nil {
+		return nil, err
+	}
 	keyDir := cfg.VersionKeyDir
 	if keyDir == "" {
 		keyDir = cfg.CertDir
@@ -411,7 +414,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	upstream := s.origins.Resolve(r.Host)
 	if upstream == nil {
-		upstream = s.cfg.TargetURL
+		status = http.StatusMisdirectedRequest
+		http.Error(w, "unknown proxy origin", status)
+		return
 	}
 	// Restore issued path mappings before submission scoping, version checks
 	// and cache keys. Preserve escaped segment boundaries just as WS does.
@@ -559,7 +564,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// --- SRI cache (GET only, pre-fetched resources) ---
 	if r.Method == http.MethodGet {
-		if served := s.tryServeSRICache(w, r, upstreamURL, sriBodyVersion, gate); served {
+		if served := s.tryServeSRICache(w, r, upstream, upstreamURL, sriBodyVersion, gate); served {
 			return
 		}
 	}
@@ -681,7 +686,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		scrubbedRespHeaders := rewriter.RewriteResponseHeaders(
-			resp.Header, gate, s.cfg.AliasDomain, s.cfg.TargetURL.Host,
+			resp.Header, gate, s.cfg.AliasDomain, upstream.Host,
 			rewriter.ResponseHeaderOpts{
 				OriginMapper:  s.origins,
 				RequestOrigin: r.Header.Get("Origin"),
@@ -787,7 +792,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodHead {
 		observed.representation("upstream", -1, -1)
-		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, s.cfg.TargetURL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstream.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
 		for name, values := range out {
 			w.Header()[name] = values
 		}
@@ -954,7 +959,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			original, rewritten = -1, -1
 		}
 		observed.representation("upstream", original, rewritten)
-		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, s.cfg.TargetURL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstream.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
 		for name, values := range out {
 			w.Header()[name] = values
 		}
@@ -993,7 +998,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Header,
 		gate,
 		s.cfg.AliasDomain,
-		s.cfg.TargetURL.Host,
+		upstream.Host,
 		rewriter.ResponseHeaderOpts{
 			OriginMapper:  s.origins,
 			RequestOrigin: r.Header.Get("Origin"),
@@ -1101,7 +1106,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstreamURL, sriBodyVersion string, gate *scrub.Gate) bool {
+func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstream *url.URL, upstreamURL, sriBodyVersion string, gate *scrub.Gate) bool {
 	reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
 	if reqCC.NoCache {
 		return false
@@ -1149,7 +1154,7 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 			entry.ResponseHeaders,
 			gate,
 			s.cfg.AliasDomain,
-			s.cfg.TargetURL.Host,
+			upstream.Host,
 			rewriter.ResponseHeaderOpts{
 				OriginMapper:  s.origins,
 				RequestOrigin: r.Header.Get("Origin"),

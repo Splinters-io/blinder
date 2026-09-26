@@ -18,9 +18,51 @@ var errInvalidHAR = errors.New("invalid existing HAR")
 // some journal records were unreadable and have been preserved as a backup.
 var ErrRecoveryIncomplete = errors.New("journal recovery incomplete")
 
+type journalRetirement struct {
+	path, backup string
+	skipped      int
+}
+
+// retireJournalLocked completes an already committed export. Keeping this phase
+// separate prevents a failed cleanup from causing replay on a later Flush. The
+// checkpoint is in memory: a process crash between HAR rename and retirement
+// still requires external recovery to distinguish an already exported journal.
+func (w *Writer) retireJournalLocked() error {
+	pending := w.pendingJournal
+	if pending == nil {
+		return nil
+	}
+	retire := w.retireJournal
+	if retire == nil {
+		retire = retireJournalFile
+	}
+	if err := retire(pending.path, pending.backup); err != nil {
+		return err
+	}
+	w.pendingJournal = nil
+	if pending.skipped > 0 {
+		return fmt.Errorf("%w: %d record(s) unreadable, journal preserved as %s", ErrRecoveryIncomplete, pending.skipped, filepath.Base(pending.backup))
+	}
+	return nil
+}
+
+func retireJournalFile(path, backup string) error {
+	if backup != "" {
+		if err := os.Rename(path, backup); err != nil {
+			return fmt.Errorf("preserve corrupt journal: %w", err)
+		}
+	} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove exported journal: %w", err)
+	}
+	return nil
+}
+
 // materialize requires flushMu. It holds at most one decoded HAR entry or one
 // journal record, rather than retaining either full capture file in memory.
 func (w *Writer) materialize(path string) error {
+	if w.pendingJournal != nil {
+		return w.retireJournalLocked()
+	}
 	w.mu.Lock()
 	budget := w.captureBudget
 	w.mu.Unlock()
@@ -107,17 +149,11 @@ func (w *Writer) materialize(path string) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
+	w.pendingJournal = &journalRetirement{path: jpath, skipped: skipped}
 	if skipped > 0 {
-		backup := jpath + ".corrupt." + time.Now().Format("20060102-150405.000000000")
-		if err := os.Rename(jpath, backup); err != nil {
-			return fmt.Errorf("preserve corrupt journal: %w", err)
-		}
-		return fmt.Errorf("%w: %d record(s) unreadable, journal preserved as %s", ErrRecoveryIncomplete, skipped, filepath.Base(backup))
+		w.pendingJournal.backup = jpath + ".corrupt." + time.Now().Format("20060102-150405.000000000")
 	}
-	if err := os.Remove(jpath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove exported journal: %w", err)
-	}
-	return nil
+	return w.retireJournalLocked()
 }
 
 func streamJournalEntries(input io.Reader, emit func(*Entry) error) (int, error) {

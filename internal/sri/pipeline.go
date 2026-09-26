@@ -138,7 +138,14 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		}
 	}
 
-	body, respCT, respHeaders, fetchErr := p.fetch(resourceURL, sendCreds, baseReq)
+	cookieOrigin := ""
+	if sendCreds {
+		// A same-origin absolute URL may spell the host or default port
+		// differently. Use the configured page route's cookie namespace, just
+		// as the normal request path does, rather than the resource spelling.
+		cookieOrigin = pageOrigin.Host
+	}
+	body, respCT, respHeaders, fetchErr := p.fetch(resourceURL, sendCreds, baseReq, cookieOrigin)
 	if fetchErr != nil {
 		cached := &CacheEntry{FetchError: fetchErr.Error()}
 		p.cache.Put(cacheKey, cached)
@@ -219,7 +226,7 @@ func verifyDigests(stored map[string][]byte, entries []HashEntry) bool {
 	return false
 }
 
-func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Request) ([]byte, string, http.Header, error) {
+func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Request, cookieOrigin string) ([]byte, string, http.Header, error) {
 	ctx, cancel := context.WithTimeout(baseReq.Context(), p.fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", resourceURL, nil)
@@ -232,7 +239,7 @@ func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Reque
 		if cookie := baseReq.Header.Get("Cookie"); cookie != "" {
 			restored := cookie
 			if p.cookieRestoreFn != nil {
-				restored = p.cookieRestoreFn(cookie, req.URL.Host)
+				restored = p.cookieRestoreFn(cookie, cookieOrigin)
 			}
 			req.Header.Set("Cookie", restored)
 		}

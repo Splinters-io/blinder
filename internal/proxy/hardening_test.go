@@ -54,7 +54,7 @@ func TestMetadataScrubsBeforeJSONEscaping(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/pdf"}}, Body: io.NopCloser(strings.NewReader("%PDF-1.7\n/Producer (<Internal>)\n%%EOF"))}, nil
 	})
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/doc.pdf", nil))
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "https://target-001.local/doc.pdf", nil))
 	if strings.Contains(rec.Header().Get("X-Blinder-Meta"), "Internal") {
 		t.Fatalf("metadata leaks escaped identity: %s", rec.Header().Get("X-Blinder-Meta"))
 	}
@@ -69,7 +69,7 @@ func TestUnsupportedResponseEncodingReturnsGenericError(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/plain"}, "Content-Encoding": []string{"br"}}, Body: io.NopCloser(strings.NewReader("AcmeCorp"))}, nil
 	})
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "https://target-001.local/", nil))
 	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "AcmeCorp") {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
 	}
@@ -97,7 +97,7 @@ func TestUpstreamTimeoutCoversResponseBody(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	started := time.Now()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/slow", nil))
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "https://target-001.local/slow", nil))
 	if rec.Code != http.StatusBadGateway || time.Since(started) > 3*time.Second {
 		t.Fatalf("status=%d elapsed=%s", rec.Code, time.Since(started))
 	}

@@ -133,7 +133,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	tu, _ := url.Parse(upstream.URL)
 	socks, seen := captchaRoutingSOCKS(t, map[string]bool{tu.Host: true, pu.Host: true})
 	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      opaque_fields: [fixture-response]\n", providerOrigin))
-	cfg, err := config.New(upstream.URL, "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, socks, "", 0, "", "", 10, 180)
+	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp"}, true, false, false, socks, "", 0, "", "", 10, 180)
 	if err != nil {
 		t.Fatal(err)
 	}

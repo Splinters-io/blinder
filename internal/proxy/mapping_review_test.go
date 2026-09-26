@@ -20,7 +20,19 @@ import (
 
 func mappingReviewServer(t *testing.T, target string, tokens []string, fn audit267SRITransport, extra ...string) *Server {
 	t.Helper()
-	cfg, err := config.New(target, "127.0.0.1:18099", "alias.local", tokens, true, false, false, "", "", 0, "", "", 30, 60, extra...)
+	return mappingReviewServerAt(t, target, "127.0.0.1:18099", tokens, fn, extra...)
+}
+
+// Synthetic HTTP front ends bind an ephemeral port. Declare that explicitly
+// when the test exercises body fidelity rather than emitted local-origin URLs.
+func mappingReviewEphemeralServer(t *testing.T, target string, tokens []string, fn audit267SRITransport, extra ...string) *Server {
+	t.Helper()
+	return mappingReviewServerAt(t, target, "127.0.0.1:0", tokens, fn, extra...)
+}
+
+func mappingReviewServerAt(t *testing.T, target, listen string, tokens []string, fn audit267SRITransport, extra ...string) *Server {
+	t.Helper()
+	cfg, err := config.New(target, listen, "alias.local", tokens, true, false, false, "", "", 0, "", "", 30, 60, extra...)
 	if err != nil {
 		t.Fatal(err)
 	}

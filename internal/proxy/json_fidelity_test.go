@@ -39,7 +39,7 @@ func TestJSONFidelityDirectAndProxyPreserveWireBytes(t *testing.T) {
 				io.WriteString(w, tc.body)
 			}))
 			defer upstream.Close()
-			s := mappingReviewServer(t, upstream.URL, nil, nil)
+			s := mappingReviewEphemeralServer(t, upstream.URL, nil, nil)
 			defer s.transport.(*http.Transport).CloseIdleConnections()
 			mirror := httptest.NewServer(s)
 			defer mirror.Close()
@@ -91,7 +91,7 @@ func TestJSONFidelityMalformedErrorRemainsObservable(t *testing.T) {
 				io.WriteString(w, source)
 			}))
 			defer upstream.Close()
-			s := mappingReviewServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
+			s := mappingReviewEphemeralServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
 			defer s.transport.(*http.Transport).CloseIdleConnections()
 			alias := s.gate.Scrub("AcmeCorp", "fixture")
 			want := strings.NewReplacer("AcmeCorp", alias, `\u0041cmeCorp`, alias).Replace(source)
@@ -138,7 +138,7 @@ func TestJSONFidelityOnlyChangedStringTokensAreReplaced(t *testing.T) {
 		io.WriteString(w, responseBody)
 	}))
 	defer upstream.Close()
-	s := mappingReviewServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
+	s := mappingReviewEphemeralServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
 	defer s.transport.(*http.Transport).CloseIdleConnections()
 	alias := s.gate.Scrub("AcmeCorp", "fixture")
 	if alias == "AcmeCorp" {
@@ -196,7 +196,7 @@ captcha:
 		io.WriteString(w, `{"status":"accepted"}`)
 	}))
 	defer upstream.Close()
-	cfg, err := config.New(upstream.URL, "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60)
+	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
 	}

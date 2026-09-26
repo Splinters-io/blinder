@@ -173,7 +173,7 @@ func TestResponseFidelityCacheHeadAndConditionalSizes(t *testing.T) {
 }
 
 func TestResponseFidelityUncachedHEADDoesNotInventRepresentation(t *testing.T) {
-	s := mappingReviewServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) {
+	s := mappingReviewEphemeralServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) {
 		resp := audit267SRIResponse("text/html", "")
 		resp.Header.Set("Content-Encoding", "gzip")
 		resp.Header.Set("Content-Length", "9876")

@@ -26,7 +26,7 @@ func TestReviewPDFProducerIsScrubbed(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/doc.pdf", nil))
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "https://target-001.local/doc.pdf", nil))
 	if rec.Header().Get("Content-Type") != "image/gif" || !strings.HasPrefix(rec.Body.String(), "GIF89a") {
 		t.Fatal("replacement media type does not describe the delivered body")
 	}
@@ -55,12 +55,12 @@ func TestReviewCookieRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	login := httptest.NewRecorder()
-	srv.ServeHTTP(login, httptest.NewRequest("GET", "/login", nil))
+	srv.ServeHTTP(login, httptest.NewRequest("GET", "https://target-001.local/login", nil))
 	cookies := login.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("cookies: %v", cookies)
 	}
-	req := httptest.NewRequest("GET", "/private", nil)
+	req := httptest.NewRequest("GET", "https://target-001.local/private", nil)
 	req.AddCookie(cookies[0])
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -85,8 +85,8 @@ func TestReviewHARCapturesUpstreamPOST(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/submit?q=1", strings.NewReader("x=secret"))
-	req.Host = "alias.local"
+	req := httptest.NewRequest("POST", "https://target-001.local/submit?q=1", strings.NewReader("x=secret"))
+	req.Host = cfg.AliasDomain
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.ServeHTTP(rec, req)
 	if rec.Code != 200 || received != "x=secret" {
@@ -123,7 +123,7 @@ func TestReviewUnknownLengthUploadIsCapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest("POST", "/upload", io.LimitReader(zeroReviewReader{}, maxRequestBody+1))
+	req := httptest.NewRequest("POST", "https://target-001.local/upload", io.LimitReader(zeroReviewReader{}, maxRequestBody+1))
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)

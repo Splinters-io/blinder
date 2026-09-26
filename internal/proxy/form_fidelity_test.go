@@ -84,7 +84,7 @@ func TestFormFidelityDirectAndProxyPreserveWireBytes(t *testing.T) {
 	} {
 		t.Run(source, func(t *testing.T) {
 			upstream, received := formFidelityUpstream(t)
-			s := mappingReviewServer(t, upstream.URL, nil, nil)
+			s := mappingReviewEphemeralServer(t, upstream.URL, nil, nil)
 			mirror := formFidelityMirror(t, s)
 			direct := formFidelitySend(t, upstream.Client(), upstream.URL+"/fixture", "POST", source, source, received)
 			proxied := formFidelitySend(t, mirror.Client(), mirror.URL+"/fixture", "POST", source, source, received)
@@ -102,7 +102,7 @@ func TestFormFidelityOnlyAliasComponentsChange(t *testing.T) {
 	for _, mode := range []string{"encoded_value_only", "encoded_key_and_value"} {
 		t.Run(mode, func(t *testing.T) {
 			upstream, received := formFidelityUpstream(t)
-			s := mappingReviewServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
+			s := mappingReviewEphemeralServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
 			mirror := formFidelityMirror(t, s)
 			alias := s.gate.Scrub("AcmeCorp", "form-fidelity")
 			if alias == "AcmeCorp" {
@@ -133,7 +133,7 @@ func TestFormFidelityOnlyAliasComponentsChange(t *testing.T) {
 
 func TestFormFidelityOpaqueValuesUseRestoredKeyAndSubmissionScope(t *testing.T) {
 	upstream, received := formFidelityUpstream(t)
-	cfg, err := config.New(upstream.URL, "127.0.0.1:18099", "alias.local", []string{"AcmeCorp", "challenge-token"}, true, false, false, "", "", 0, "", "", 30, 60)
+	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp", "challenge-token"}, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestFormFidelityMalformedEncodingReachesUpstreamUnchanged(t *testing.T) {
 	for _, malformed := range []string{"bad=%", "bad=%0", "bad=%GG", "bad%q=value"} {
 		t.Run(malformed, func(t *testing.T) {
 			upstream, received := formFidelityUpstream(t)
-			s := mappingReviewServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
+			s := mappingReviewEphemeralServer(t, upstream.URL, []string{"AcmeCorp"}, nil)
 			mirror := formFidelityMirror(t, s)
 			alias := url.QueryEscape(s.gate.Scrub("AcmeCorp", "form-fidelity"))
 			// A valid alias before the bad escape must not be partially

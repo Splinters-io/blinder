@@ -30,7 +30,7 @@ func TestManifestCountsAreRequestLocalAndFlushIsIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+			srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "https://target-001.local/", nil))
 		}()
 	}
 	wg.Wait()
@@ -67,7 +67,7 @@ func TestManifestRecordsHTTPFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest("POST", "/too-large", nil)
+	req := httptest.NewRequest("POST", "https://target-001.local/too-large", nil)
 	req.ContentLength = maxRequestBody + 1
 	srv.ServeHTTP(httptest.NewRecorder(), req)
 	entries := srv.Manifest().Requests()

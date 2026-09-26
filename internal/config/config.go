@@ -23,6 +23,19 @@ type HARConfig struct {
 	CaptureBudget int
 }
 
+func (h *HARConfig) Validate() error {
+	if h == nil {
+		return nil
+	}
+	if h.MaxEntries < 0 {
+		return errors.New("har.max_entries must be non-negative (0 uses the default)")
+	}
+	if h.CaptureBudget < 0 {
+		return errors.New("har.capture_budget must be non-negative (0 means unlimited)")
+	}
+	return nil
+}
+
 type Config struct {
 	TargetURL         *url.URL
 	ExtraOrigins      []*url.URL
@@ -44,13 +57,12 @@ type Config struct {
 }
 
 var (
-	ErrNoTarget            = errors.New("--target is required")
-	ErrBadScheme           = errors.New("target must use http or https scheme")
-	ErrOnionRequiresTor    = errors.New(".onion targets require --tor")
-	ErrParanoidRequiresTor = errors.New("--paranoid requires --tor to prevent operator IP disclosure to upstream origins")
-	ErrShortToken          = errors.New("identity tokens must be at least 3 characters")
-	ErrTooManyTokens       = errors.New("maximum 100 identity tokens")
-	ErrNonLoopback         = errors.New("binding to non-loopback address requires --bind-all")
+	ErrNoTarget         = errors.New("--target is required")
+	ErrBadScheme        = errors.New("target must use http or https scheme")
+	ErrOnionRequiresTor = errors.New(".onion targets require --tor")
+	ErrShortToken       = errors.New("identity tokens must be at least 3 characters")
+	ErrTooManyTokens    = errors.New("maximum 100 identity tokens")
+	ErrNonLoopback      = errors.New("binding to non-loopback address requires --bind-all")
 )
 
 var allowedSchemes = map[string]bool{
@@ -94,9 +106,6 @@ func New(
 	isOnion := strings.HasSuffix(strings.ToLower(strings.TrimSuffix(u.Hostname(), ".")), ".onion")
 	if isOnion && torAddr == "" {
 		return nil, ErrOnionRequiresTor
-	}
-	if paranoid && torAddr == "" {
-		return nil, ErrParanoidRequiresTor
 	}
 
 	if len(tokens) > 100 {

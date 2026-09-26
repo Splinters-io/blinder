@@ -172,7 +172,14 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 				scrubbed := make([]string, len(values))
 				for i, v := range values {
 					rewritten := originMapper.RewriteResponseOrigin(v, requestOrigin)
-					scrubbed[i] = gate.Scrub(rewritten, "header:"+lower)
+					// Mapped origins are already in the proxy namespace. Do not
+					// rescrub them or the CORS protocol values; only raw upstream
+					// values still need generic identity scrubbing.
+					if rewritten != v || v == "*" || v == "null" {
+						scrubbed[i] = rewritten
+					} else {
+						scrubbed[i] = gate.Scrub(v, "header:"+lower)
+					}
 				}
 				out[name] = scrubbed
 				continue
