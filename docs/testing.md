@@ -27,6 +27,35 @@ Run `go test -race -count=1 ./internal/proxy -run '^TestPathFidelity'` for real 
 
 Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^(TestRequestOrigin|TestResource|TestCompleteResource|TestBodyOrigin|TestTargetContainmentPrimaryURLRoutes)'` for validated entry-origin URL mapping and cache/SRI isolation. Registered primary resource URLs in HTML, CSS and complete unescaped JavaScript literals must keep the hostname and port used to enter the proxy; extra origins must retain their separate aliases. Browser checks must also verify every extra alias resolves locally and passes certificate verification. A failed extra-origin fetch remains a failed acceptance case even when the primary script, CSS, fetch and WebSocket paths work.
 
+For repeatable browser containment UAT, prepare a separate certificate store with the stable extra-origin name:
+
+```sh
+./blinder --preflight --listen 127.0.0.1:18199 --alias localhost \
+  --extra-origin https://127.0.0.1:18181 \
+  --cert-dir /private/tmp/blinder-containment-certs
+```
+
+Review its fingerprint and verify browser trust for `127.0.0.1` and `host-a9950799.localhost`, the two hostnames used by this fixture. `localhost` remains the configured primary alias and a certificate SAN; this browser entry uses the IP. On macOS, multiple hostname constraints belong in one trust operation: repeated single-host installations replace that certificate's existing trust settings. The system command supports repeated `-s` arguments in one invocation. [Apple implementation](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/trusted_cert_add.c). After explicit operator approval, the scoped command is:
+
+```sh
+/usr/bin/security add-trusted-cert -r trustRoot -p ssl \
+  -s 127.0.0.1 -s host-a9950799.localhost \
+  -k "$HOME/Library/Keychains/login.keychain-db" \
+  /private/tmp/blinder-containment-certs/certificate.pem
+```
+
+Then run:
+
+```sh
+BLINDER_REVIEW_BROWSER=1 \
+BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-containment-certs \
+BLINDER_REVIEW_PROXY_LISTEN=127.0.0.1:18199 \
+BLINDER_REVIEW_EXTRA_LISTEN=127.0.0.1:18181 \
+go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestTargetContainmentBrowser$' -v
+```
+
+Open the URL in `/private/tmp/blinder-containment-browser-url.txt` within 180 seconds. The fixture automatically records the script, CSS, fetch, WebSocket, submitted-URL round trip and extra-origin results in `/private/tmp/blinder-containment-browser-result.json`. Its recording SOCKS relay and separate direct canaries use only local servers. The command does not generate certificates or install trust; each browser hostname must pass certificate verification. Explicit listener addresses require loopback IPs and nonzero ports; occupied ports fail without falling back. Omitting the two listener variables retains random ports, and ordinary wire tests always use their own random ports.
+
 Run `go test -race -count=1 ./internal/formedit` and `go test -race -count=1 ./internal/proxy -run '^TestFormFidelity'` for form/query source fidelity. Exact upstream bytes, duplicates, pair ordering, percent-escape spelling, bare keys and opaque CAPTCHA values are compared with direct requests, including malformed percent escapes. Only ampersands are treated as separators; unchanged literal semicolons are retained.
 
 Run `go test -race -count=1 ./internal/rewriter -run '^TestResponseHeaderFidelity'` for custom diagnostic headers, configured identity redaction and exclusion of hop-by-hop/Connection-nominated fields and invalid representation metadata. These do not establish byte-range translation or safe reversible mapping of identity-bearing custom field names.

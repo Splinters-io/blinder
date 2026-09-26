@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -45,9 +46,33 @@ func newContainmentFixture(t *testing.T, cert tls.Certificate, aliases ...string
 	if len(aliases) > 0 {
 		alias = aliases[0]
 	}
+	return newContainmentFixtureWithListeners(t, cert, alias, "", "")
+}
+
+// Explicit browser addresses make extra-origin aliases and their certificate
+// names repeatable. Ordinary package tests never read the browser environment.
+func newContainmentFixtureWithListeners(t *testing.T, cert tls.Certificate, alias, proxyListen, extraListen string) *containmentFixture {
+	t.Helper()
+	for _, address := range []string{proxyListen, extraListen} {
+		if err := validateContainmentListen(address); err != nil {
+			t.Fatal(err)
+		}
+	}
 	f := &containmentFixture{report: make(chan json.RawMessage, 1)}
-	start := func(h http.Handler) *httptest.Server {
+	unstarted := func(h http.Handler, address string) *httptest.Server {
 		s := httptest.NewUnstartedServer(h)
+		if address != "" {
+			s.Listener.Close()
+			listener, err := listenContainment(address)
+			if err != nil {
+				t.Fatalf("bind requested containment listener %s: %v", address, err)
+			}
+			s.Listener = listener
+		}
+		return s
+	}
+	start := func(h http.Handler, address string) *httptest.Server {
+		s := unstarted(h, address)
 		if len(cert.Certificate) > 0 {
 			s.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 		}
@@ -65,8 +90,8 @@ func newContainmentFixture(t *testing.T, cert tls.Certificate, aliases ...string
 			io.WriteString(w, "direct-canary")
 		})
 	}
-	primaryCanary := start(canary("primary"))
-	extraCanary := start(canary("extra"))
+	primaryCanary := start(canary("primary"), "")
+	extraCanary := start(canary("extra"), extraListen)
 	f.target, f.extra = primaryCanary.URL, extraCanary.URL
 	backing := start(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -127,13 +152,13 @@ catch(e){results.reportFetchError=String(e);const form=document.createElement('f
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	}), "")
 	pURL, _ := url.Parse(primaryCanary.URL)
 	eURL, _ := url.Parse(extraCanary.URL)
 	bURL, _ := url.Parse(backing.URL)
 	socksAddr, seen := containmentSOCKS(t, map[string]string{pURL.Host: bURL.Host, eURL.Host: bURL.Host})
 	f.socks = seen
-	proxyServer := httptest.NewUnstartedServer(nil)
+	proxyServer := unstarted(nil, proxyListen)
 	cfg, err := config.New(f.target, proxyServer.Listener.Addr().String(), alias, nil, false, false, false, socksAddr, "", 0, "", "", 10, 30, f.extra)
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +207,103 @@ catch(e){results.reportFetchError=String(e);const form=document.createElement('f
 	return f
 }
 
+func validateContainmentListen(address string) error {
+	if address == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid containment listener %q: %w", address, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("containment listener %q requires an explicit loopback IP", address)
+	}
+	number, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || number == 0 {
+		return fmt.Errorf("containment listener %q requires a port from 1 through 65535", address)
+	}
+	return nil
+}
+
+func listenContainment(address string) (net.Listener, error) {
+	if err := validateContainmentListen(address); err != nil {
+		return nil, err
+	}
+	if address == "" {
+		address = "127.0.0.1:0"
+	}
+	return net.Listen("tcp", address)
+}
+
+func TestTargetContainmentExplicitListeners(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:http", "0.0.0.0:18199", "192.0.2.1:18199", "[::]:18199", "example.com:18199", "localhost:18199", ":18199"} {
+		if err := validateContainmentListen(address); err == nil {
+			t.Errorf("unsafe or ephemeral explicit address accepted: %q", address)
+		}
+	}
+	for _, address := range []string{"", "127.0.0.1:18199", "[::1]:18199"} {
+		if err := validateContainmentListen(address); err != nil {
+			t.Errorf("valid loopback address %q rejected: %v", address, err)
+		}
+	}
+	occupied, err := listenContainment("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	if fallback, err := listenContainment(occupied.Addr().String()); err == nil {
+		fallback.Close()
+		t.Fatal("occupied explicit address silently selected another listener")
+	}
+}
+
+func TestTargetContainmentFixedListenerRouting(t *testing.T) {
+	// Reserve free, nonprivileged addresses together, then give exactly those
+	// addresses to the fixture. A lost race must fail, never select new ports.
+	proxyReservation, err := listenContainment("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extraReservation, err := listenContainment("")
+	if err != nil {
+		proxyReservation.Close()
+		t.Fatal(err)
+	}
+	proxyAddress, extraAddress := proxyReservation.Addr().String(), extraReservation.Addr().String()
+	proxyReservation.Close()
+	extraReservation.Close()
+	f := newContainmentFixtureWithListeners(t, tls.Certificate{}, "localhost", proxyAddress, extraAddress)
+	if f.proxyURL != "https://"+proxyAddress || f.extra != "https://"+extraAddress {
+		t.Fatalf("configured listeners changed: proxy=%s extra=%s", f.proxyURL, f.extra)
+	}
+	extraLocal, err := url.Parse(f.extraLocalURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := http.NewRequest(http.MethodGet, f.proxyURL+"/fetch", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Host = extraLocal.Host
+	resp, err := f.client.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK || string(body) != "proxied-fixture" {
+		t.Fatalf("fixed extra-origin route failed: status=%d body=%q err=%v", resp.StatusCode, body, err)
+	}
+	if got := f.socks(); len(got) != 1 || got[0] != extraAddress {
+		t.Fatalf("fixed origin did not use the expected SOCKS destination: %v", got)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.direct) != 0 {
+		t.Fatalf("extra-origin request reached direct canary: %v", f.direct)
+	}
+}
+
 func TestTargetContainmentBrowser(t *testing.T) {
 	if os.Getenv("BLINDER_REVIEW_BROWSER") != "1" {
 		t.Skip("requires local browser with the acceptance certificate trusted")
@@ -194,7 +316,7 @@ func TestTargetContainmentBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := newContainmentFixture(t, cert)
+	f := newContainmentFixtureWithListeners(t, cert, "localhost", os.Getenv("BLINDER_REVIEW_PROXY_LISTEN"), os.Getenv("BLINDER_REVIEW_EXTRA_LISTEN"))
 	if err := os.WriteFile("/private/tmp/blinder-containment-browser-url.txt", []byte(f.proxyURL), 0600); err != nil {
 		t.Fatal(err)
 	}
