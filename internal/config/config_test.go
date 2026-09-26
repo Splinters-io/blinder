@@ -254,3 +254,31 @@ func TestIdentityTokenValidationUsesCharacters(t *testing.T) {
 		}
 	}
 }
+
+func TestNew_ParanoidRequiresTor(t *testing.T) {
+	_, err := New(
+		"https://example.com", "", "", nil,
+		true, true, false,
+		"", "", 0, "", "", 0, 0,
+	)
+	if err != ErrParanoidRequiresTor {
+		t.Errorf("expected ErrParanoidRequiresTor, got %v", err)
+	}
+}
+
+func TestNew_ParanoidWithTorSucceeds(t *testing.T) {
+	cfg, err := New(
+		"https://example.com", "", "", nil,
+		true, true, false,
+		"127.0.0.1:9050", "", 0, "", "", 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("paranoid with Tor should succeed, got %v", err)
+	}
+	if !cfg.Paranoid {
+		t.Error("expected Paranoid to be true")
+	}
+	if !cfg.UseTor() {
+		t.Error("expected UseTor() to be true")
+	}
+}
