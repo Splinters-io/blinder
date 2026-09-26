@@ -1,6 +1,7 @@
 package captcha
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -97,11 +99,38 @@ func (h *OperatorHandler) setAuthCookie(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (h *OperatorHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "missing token parameter", http.StatusBadRequest)
+		return
+	}
+	hash := hashToken(token)
+	if subtle.ConstantTimeCompare(hash[:], h.bearerHash[:]) != 1 {
+		http.Error(w, "invalid token", http.StatusForbidden)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     operatorCookieName,
+		Value:    token,
+		Path:     "/__blinder/captcha/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, "/__blinder/captcha/", http.StatusSeeOther)
+}
+
 func (h *OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/__blinder/captcha")
 
 	if path == "/res" {
 		h.serveResource(w, r)
+		return
+	}
+
+	if path == "/login" {
+		h.handleLogin(w, r)
 		return
 	}
 
@@ -134,6 +163,9 @@ func (h *OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	case strings.HasPrefix(path, "/solve/"):
+		id := strings.TrimPrefix(path, "/solve/")
+		h.serveSolvePage(w, r, id)
 	case strings.HasPrefix(path, "/page/"):
 		id := strings.TrimPrefix(path, "/page/")
 		h.serveChallengePage(w, r, id)
@@ -231,12 +263,13 @@ iframe { width: 100%%; height: 500px; border: 1px solid #ddd; border-radius: 4px
 <div>Page: %s</div>
 <div>ID: %s</div>
 </div>
-<p>Complete the CAPTCHA in the frame below. Enter the response tokens and click Submit.</p>
+<p>Complete the CAPTCHA below. If the widget does not load in the preview, <a href="/__blinder/captcha/solve/%s" target="_blank" rel="noopener">solve in a new window</a> (auto-submits on completion).</p>
 <iframe srcdoc="%s" sandbox="allow-scripts allow-forms"></iframe>
 <form method="POST" action="/__blinder/captcha/challenge/%s" class="fields">`,
 		html.EscapeString(ch.ProviderName),
 		html.EscapeString(ch.ProviderName),
 		html.EscapeString(ch.PageURL),
+		html.EscapeString(ch.ID),
 		html.EscapeString(ch.ID),
 		html.EscapeString(string(pageBody)),
 		html.EscapeString(ch.ID))
@@ -290,6 +323,101 @@ func (h *OperatorHandler) completeChallenge(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (h *OperatorHandler) serveSolvePage(w http.ResponseWriter, r *http.Request, id string) {
+	ch, ok := h.queue.Get(id)
+	if !ok {
+		http.Error(w, "challenge not found or expired", http.StatusNotFound)
+		return
+	}
+
+	opaqueFields := []string{}
+	for _, p := range h.matcher.providers {
+		if p.Name == ch.ProviderName {
+			opaqueFields = p.OpaqueFields
+			break
+		}
+	}
+
+	ct := ch.ContentType
+	if ct == "" {
+		ct = "text/html; charset=utf-8"
+	}
+
+	pageBody := ch.PageBody
+	if h.routeResources && strings.HasPrefix(strings.ToLower(ct), "text/html") {
+		base, _ := url.Parse(ch.PageURL)
+		pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
+		pageBody = h.injectRuntime(pageBody, base, r, id)
+	}
+
+	targetHost := ""
+	if parsed, err := url.Parse(ch.PageURL); err == nil {
+		targetHost = parsed.Hostname()
+	}
+
+	if targetHost != "" {
+		hostParam := "host=" + url.QueryEscape(targetHost)
+		pageBody = rewriteCaptchaScriptHost(pageBody, hostParam)
+	}
+
+	var fieldsJSON []byte
+	fieldsJSON, _ = json.Marshal(opaqueFields)
+
+	submitScript := fmt.Sprintf(`<script>
+(function(){
+  var fields = %s;
+  var submitURL = '/__blinder/captcha/challenge/%s';
+  function trySend() {
+    var form = new FormData();
+    var found = false;
+    for (var i = 0; i < fields.length; i++) {
+      var el = document.querySelector('[name="'+fields[i]+'"]');
+      var ta = document.querySelector('textarea[name="'+fields[i]+'"]');
+      var val = '';
+      if (el) val = el.value;
+      if (ta) val = ta.value;
+      if (!val) {
+        var inp = document.querySelector('input[name="'+fields[i]+'"]');
+        if (inp) val = inp.value;
+      }
+      if (val) { form.append(fields[i], val); found = true; }
+    }
+    if (!found) return false;
+    fetch(submitURL, {method:'POST', body: new URLSearchParams(form)})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        document.body.innerHTML = '<div style="text-align:center;padding:3rem;font-family:system-ui">'
+          + '<h2>Solution submitted</h2><p>You can close this window.</p></div>';
+      })
+      .catch(function(e){ console.error('submit failed', e); });
+    return true;
+  }
+  var observer = new MutationObserver(function(){
+    for (var i = 0; i < fields.length; i++) {
+      var el = document.querySelector('[name="'+fields[i]+'"]');
+      var ta = document.querySelector('textarea[name="'+fields[i]+'"]');
+      if ((el && el.value) || (ta && ta.value)) { trySend(); return; }
+    }
+  });
+  observer.observe(document.body, {childList:true, subtree:true, attributes:true, characterData:true});
+  setInterval(function(){
+    for (var i = 0; i < fields.length; i++) {
+      var el = document.querySelector('[name="'+fields[i]+'"]');
+      var ta = document.querySelector('textarea[name="'+fields[i]+'"]');
+      if ((el && el.value) || (ta && ta.value)) { trySend(); return; }
+    }
+  }, 500);
+})();
+</script>`, string(fieldsJSON), html.EscapeString(id))
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	injected := bytes.Replace(pageBody, []byte("</body>"), []byte(submitScript+"</body>"), 1)
+	if len(injected) == len(pageBody) {
+		injected = append(pageBody, []byte(submitScript)...)
+	}
+	w.Write(injected)
+}
+
 func (h *OperatorHandler) serveChallengePage(w http.ResponseWriter, r *http.Request, id string) {
 	ch, ok := h.queue.Get(id)
 	if !ok {
@@ -309,4 +437,27 @@ func (h *OperatorHandler) serveChallengePage(w http.ResponseWriter, r *http.Requ
 		body = h.injectRuntime(body, base, r, id)
 	}
 	w.Write(body)
+}
+
+var captchaScriptRe = regexp.MustCompile(`(<script\s[^>]*src=["']https://js\.hcaptcha\.com/1/api\.js)(\?[^"']*)?["']`)
+
+func rewriteCaptchaScriptHost(body []byte, hostParam string) []byte {
+	return captchaScriptRe.ReplaceAllFunc(body, func(match []byte) []byte {
+		loc := captchaScriptRe.FindSubmatchIndex(match)
+		if loc == nil {
+			return match
+		}
+		base := match[loc[2]:loc[3]]
+		var result []byte
+		if loc[4] >= 0 {
+			existing := string(match[loc[4]:loc[5]])
+			result = append(result, base...)
+			result = append(result, []byte(existing+"&"+hostParam)...)
+		} else {
+			result = append(result, base...)
+			result = append(result, []byte("?"+hostParam)...)
+		}
+		result = append(result, '"')
+		return result
+	})
 }

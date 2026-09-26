@@ -114,9 +114,24 @@ captcha:
     - hcaptcha
 ```
 
-The operator authenticates at `/__blinder/captcha/` using the bearer token printed at startup. Challenge pages are rendered in a sandboxed iframe (`allow-scripts allow-forms`, no `allow-same-origin`) so the provider page cannot read the operator's session. Anti-framing headers (`X-Frame-Options: DENY`, `frame-ancestors 'none'`) prevent proxied pages from embedding operator endpoints.
+The operator authenticates at `/__blinder/captcha/` using the bearer token printed at startup. Challenge pages are served at `/__blinder/captcha/solve/<id>` with the target's hostname injected into the CAPTCHA provider script URL (`?host=<target_hostname>`), so the provider validates against the target's registered domain rather than Blinder's listen address. Anti-framing headers (`X-Frame-Options: DENY`, `frame-ancestors 'none'`) prevent proxied pages from embedding operator endpoints.
 
 Provider resources with `tor_policy: route-with-target` (the default) are relayed through the configured SOCKS transport via `/__blinder/captcha/res?u=`. Providers with `tor_policy: direct` bypass Tor. Custom providers are supported with explicit `resource_origins`, `resource_url_regex`, `opaque_fields` and `submissions`.
+
+### Local testing
+
+CAPTCHA providers (hcaptcha, reCAPTCHA, Turnstile) reject `localhost` and `127.0.0.1` as hostnames. To test locally, add a hosts entry and use that hostname as the `--target`:
+
+```
+# /etc/hosts
+127.0.0.1 uat.blinder.test
+```
+
+```
+blinder --target http://uat.blinder.test:9999 ...
+```
+
+The hcaptcha test sitekey is `10000000-ffff-ffff-ffff-000000000001` (secret: `0x0000000000000000000000000000000000000000`). It works on any non-localhost domain and always passes without a visual challenge.
 
 ## Evidence
 
