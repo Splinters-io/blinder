@@ -21,6 +21,18 @@ Coverage includes CLI validation, authentication with a real cookie jar, relativ
 
 Response-fidelity regressions cover Unicode byte lengths, compressed/chunked payloads, original versus rewritten sizes, cache/HEAD/304 provenance, bodyless 204/304 responses, partial-read evidence, transport failures, HTML error diagnostics and HTTP 200 JSON validation errors. Run `go test -race -count=1 ./internal/proxy -run '^TestResponseFidelity'` for this group. Browser checks remain opt-in rather than being counted as passed when skipped.
 
+Replicated controls must produce the same allow/block decision on the direct target and its corresponding proxy representation. Test permitted and denied operations, as well as report-only behavior. A page loading successfully is not sufficient evidence: a removed restriction can make a broken replication look functional. Preserve the original policy in operator evidence and record any unsupported translation separately.
+
+For CSP, run the ordinary regressions with `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^TestCSP|^TestControlFidelityCSPWire|^TestCaptchaCSP'`. Then run the paired browser fixture using an existing certificate trusted by the selected browser for `127.0.0.1`:
+
+```sh
+BLINDER_REVIEW_BROWSER=1 \
+BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-acceptance-certs \
+go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestControlFidelityBrowser$' -v
+```
+
+Open the URL in `/private/tmp/blinder-csp-browser-url.txt` within 180 seconds. The fixture runs the direct baseline, navigates to Blinder, and compares execution, computed style and policy-violation events. It records `/private/tmp/blinder-csp-browser-result.json`. Both stages use local synthetic targets; the command does not install trust or bypass certificate warnings. See the [CSP acceptance report](testing-results-2026-09-26-csp.md) for measured coverage and remaining work.
+
 Run `go test -race -count=1 ./internal/jsonedit` and `go test -race -count=1 ./internal/proxy -run '^TestJSONFidelity'` for JSON source fidelity. Real HTTP fixtures compare direct and proxied request/response bytes, including duplicate keys, whitespace/order, string escapes, large integers, exponent spellings and negative zero. They verify minimal alias edits and nested CAPTCHA opacity scoped to the configured submission path. Malformed error fixtures retain HTTP 500, SQL-style diagnostics and original broken grammar while redacting escaped identities. Ambiguous escapes and cross-fragment residual identities still exercise the `null` fallback.
 
 Run `go test -race -count=1 ./internal/proxy -run '^TestPathFidelity'` for real upstream path restoration, encoded slashes/reserved characters, untouched escape spelling, restored cache identities and SRI version constraints.

@@ -41,15 +41,21 @@ type sriDecision struct {
 	resolvedURL     string
 }
 
-func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, origins *OriginMapper, sr *sriRewriter) []byte {
+func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, origins *OriginMapper, sr *sriRewriter, policyHashes ...*CSPHashes) []byte {
+	hashes := &CSPHashes{}
+	if len(policyHashes) > 0 && policyHashes[0] != nil {
+		hashes = policyHashes[0]
+	}
 	z := html.NewTokenizer(bytes.NewReader(body))
 	var out bytes.Buffer
 	out.Grow(len(body))
 
 	var rawTextTag string
+	var externalScript bool
 	var suppressElement bool
 	var diagnosticElements []diagnosticElement
 	var proseSpans []proseSpan
+	var policies []cspMetaSpan
 
 	for {
 		tt := z.Next()
@@ -88,9 +94,15 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			}
 			switch rawTextTag {
 			case "script":
-				out.Write(rewriteJS(raw, gate, "html:script", origins))
+				rewritten := rewriteJS(raw, gate, "html:script", origins)
+				if !externalScript {
+					rewritten = append(rewritten, hashes.record("script", out.Len(), cspRawText(raw), cspRawText(rewritten))...)
+				}
+				out.Write(rewritten)
 			case "style":
-				out.Write(rewriteCSS(raw, gate, "html:style", origins))
+				rewritten := rewriteCSS(raw, gate, "html:style", origins)
+				rewritten = append(rewritten, hashes.record("style", out.Len(), cspRawText(raw), cspRawText(rewritten))...)
+				out.Write(rewritten)
 			case "title":
 				// An error response may carry its only diagnostic in the title.
 				// Apply identity masking there just as in the rest of its body.
@@ -131,6 +143,15 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			if hasAttr {
 				attrs = collectTagAttrs(z)
 			}
+			if tagName == "script" {
+				externalScript = false
+				for _, a := range attrs {
+					if a.key == "src" {
+						externalScript = true
+						break
+					}
+				}
+			}
 			diagnosticElements = enterDiagnosticElement(diagnosticElements, tagName, attrs, tt == html.SelfClosingTagToken)
 
 			if tagName == "base" && sr != nil && sr.upstreamBase != nil {
@@ -153,6 +174,39 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			}
 
 			transformedAttrs, changed := rewriteTagAttrs(tagName, attrs, gate, origins, sriDec, sr)
+			seenAttrs := make(map[string]bool)
+			for _, a := range attrs {
+				if seenAttrs[a.key] {
+					continue
+				}
+				seenAttrs[a.key] = true
+				kind := ""
+				if a.key == "style" {
+					kind = "style-attr"
+				} else if strings.HasPrefix(a.key, "on") {
+					kind = "script-attr"
+				}
+				if kind != "" {
+					for i, transformed := range transformedAttrs {
+						if transformed.key == a.key {
+							suffix := hashes.record(kind, out.Len(), cspUTF8([]byte(a.val)), cspUTF8([]byte(transformed.val)))
+							if len(suffix) > 0 {
+								transformedAttrs[i].val += string(suffix)
+								changed = true
+							}
+							break
+						}
+					}
+				}
+			}
+			// Meta policies are left at their original document position. Delay
+			// serialising their final hashes until subsequent source is known.
+			if isCSPMeta(tagName, attrs) {
+				start := out.Len()
+				writeHTMLStartTag(&out, tagName, transformedAttrs, tt == html.SelfClosingTagToken)
+				policies = append(policies, cspMetaSpan{start: start, end: out.Len(), attrs: transformedAttrs, selfClosing: tt == html.SelfClosingTagToken})
+				continue
+			}
 			if !changed && gate.ResidualLeakCount(html.UnescapeString(string(raw))) == 0 {
 				out.Write(raw)
 				continue
@@ -200,7 +254,8 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 		}
 	}
 
-	return fitProseToBodyLength(out.Bytes(), proseSpans, len(body))
+	rewritten, proseSpans := rewriteCSPMetaSpans(out.Bytes(), proseSpans, policies, hashes)
+	return fitProseToBodyLength(rewritten, proseSpans, len(body))
 }
 
 // Comments carry diagnostic and parser-relevant source. Ordinary comments have
@@ -337,6 +392,34 @@ func rewriteTagAttrs(tagName string, attrs []tagAttr, gate *scrub.Gate, origins 
 	}
 
 	for _, a := range attrs {
+		if a.key == "http-equiv" && isCSPMeta(tagName, attrs) {
+			appendAttr(a, a.val)
+			continue
+		}
+		if tagName == "iframe" && a.key == "sandbox" {
+			tokens := strings.FieldsFunc(a.val, cspASCIIWhitespace)
+			changedFlag := false
+			for i, token := range tokens {
+				if !cspControlKeyword("sandbox", strings.ToLower(token)) {
+					tokens[i] = gate.Scrub(token, "html:sandbox")
+					changedFlag = changedFlag || tokens[i] != token
+				}
+			}
+			value := a.val
+			if changedFlag {
+				value = strings.Join(tokens, " ")
+			}
+			appendAttr(a, value)
+			continue
+		}
+		if a.key == "nonce" {
+			appendAttr(a, RewriteCSPNonce(a.val, gate))
+			continue
+		}
+		if a.key == "content" && isCSPMeta(tagName, attrs) {
+			appendAttr(a, rewriteCSP(a.val, gate, "", origins))
+			continue
+		}
 		if tagName == "script" || tagName == "link" {
 			if a.key == "integrity" {
 				switch sri.action {
@@ -448,6 +531,9 @@ func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate,
 
 	if attrName == "style" {
 		return string(rewriteCSS([]byte(attrVal), gate, "html:style-attr", origins))
+	}
+	if strings.HasPrefix(attrName, "on") {
+		return string(rewriteJS([]byte(attrVal), gate, "html:event-handler", origins))
 	}
 	if origins != nil && isURLAttr(tagName, attrName) {
 		return scrubResourceURL(attrVal, gate, "html:"+attrName, origins)

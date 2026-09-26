@@ -60,6 +60,7 @@ type Gate struct {
 	emailAliases     map[string]string               // alias → original email
 	ipv4Aliases      map[string]string               // alias → original IPv4
 	ipv6Aliases      map[string]string               // alias → original IPv6
+	opaqueAliases    map[string]string               // grammar-constrained alias → original value
 }
 
 // ForRequest keeps replacement counts isolated from concurrent requests while
@@ -112,6 +113,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		emailAliases:   make(map[string]string),
 		ipv4Aliases:    make(map[string]string),
 		ipv6Aliases:    make(map[string]string),
+		opaqueAliases:  make(map[string]string),
 	}
 	for _, domain := range domains {
 		g.domainPatterns = append(g.domainPatterns, literalPattern(domain))
@@ -155,7 +157,7 @@ func literalPattern(value string) *regexp.Regexp {
 func (g *Gate) escapeMarkers(input string) string {
 	prefix := g.escapePrefix
 	const target = ValueAliasPrefix
-	if !strings.Contains(input, prefix) && !strings.Contains(input, target) {
+	if !strings.Contains(input, prefix) && !strings.Contains(input, target) && !strings.Contains(input, OpaqueValueAliasPrefix) {
 		return input
 	}
 	var out strings.Builder
@@ -170,6 +172,10 @@ func (g *Gate) escapeMarkers(input string) string {
 			out.WriteString(prefix)
 			out.WriteByte('R')
 			i += len(target)
+		} else if strings.HasPrefix(input[i:], OpaqueValueAliasPrefix) {
+			out.WriteString(prefix)
+			out.WriteByte('O')
+			i += len(OpaqueValueAliasPrefix)
 		} else {
 			out.WriteByte(input[i])
 			i++
@@ -196,6 +202,9 @@ func (g *Gate) unescapeMarkers(input string) string {
 					i++
 				case 'E':
 					out.WriteString(prefix)
+					i++
+				case 'O':
+					out.WriteString(OpaqueValueAliasPrefix)
 					i++
 				default:
 					out.WriteString(prefix)
@@ -310,7 +319,7 @@ func (g *Gate) scrubIdentityTokens(input, context string) string {
 		}
 		segments = append(segments, segment{text: remaining[:index]})
 		end := index + len(g.escapePrefix)
-		if end < len(remaining) && (remaining[end] == 'E' || remaining[end] == 'R') {
+		if end < len(remaining) && (remaining[end] == 'E' || remaining[end] == 'R' || remaining[end] == 'O') {
 			end++
 		}
 		segments = append(segments, segment{text: remaining[index:end], opaque: true})
@@ -627,7 +636,7 @@ func (g *Gate) RestoreBody(input string) string {
 		result = strings.ReplaceAll(result, alias, original)
 	}
 
-	result = g.unescapeMarkers(result)
+	result = g.restoreOpaqueAliasesAndMarkers(result)
 
 	return result
 }
@@ -663,7 +672,7 @@ func (g *Gate) ContainsAlias(input string) bool {
 			return true
 		}
 	}
-	return false
+	return g.containsOpaqueAlias(input)
 }
 
 func (g *Gate) scrubDomainsURLAware(input, context string) string {

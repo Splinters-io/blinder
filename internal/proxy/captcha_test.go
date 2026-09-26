@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -274,7 +275,7 @@ captcha:
 	}
 }
 
-func TestCaptchaCSPMergesWithUpstreamCSP(t *testing.T) {
+func TestCaptchaConfigurationPreservesUpstreamCSPDecisions(t *testing.T) {
 	captchaCfg, err := captcha.ParseConfig([]byte(`
 version: 1
 captcha:
@@ -285,20 +286,43 @@ captcha:
 		t.Fatal(err)
 	}
 
-	s := captchaServer(t, captchaCfg, func(r *http.Request) (*http.Response, error) {
-		resp := audit267SRIResponse("text/html", "<html><body>ok</body></html>")
-		resp.Header.Set("Content-Security-Policy", "script-src 'self'; style-src 'self'")
-		return resp, nil
-	})
-
-	got := audit267CacheRequest(s, "GET", "/page", nil)
-	csp := got.Header().Get("Content-Security-Policy")
-
-	if !strings.Contains(csp, "'self'") {
-		t.Fatalf("upstream CSP sources lost: %s", csp)
-	}
-	if !strings.Contains(csp, "hcaptcha.com") {
-		t.Fatalf("CAPTCHA sources not merged into CSP: %s", csp)
+	for _, tc := range []struct {
+		name       string
+		enforcing  []string
+		reportOnly []string
+		want       []string
+	}{
+		{name: "no_policy"},
+		{name: "deny_all", enforcing: []string{"default-src 'none'"}, want: []string{"default-src 'none'"}},
+		{name: "inherited_self", enforcing: []string{"default-src 'self'"}, want: []string{"default-src 'self'"}},
+		{name: "explicit_denial", enforcing: []string{"script-src 'none'; frame-src 'none'; connect-src 'none'"}, want: []string{"script-src 'none'; frame-src 'none'; connect-src 'none'"}},
+		{name: "already_allowed", enforcing: []string{"script-src https://js.hcaptcha.com; frame-src https://hcaptcha.com"}, want: []string{"script-src https://js.hcaptcha.com; frame-src https://hcaptcha.com"}},
+		{name: "report_only", reportOnly: []string{"default-src 'none'"}},
+		{name: "independent_policies", enforcing: []string{"script-src https://js.hcaptcha.com", "script-src 'none'"}, reportOnly: []string{"default-src 'self'"}, want: []string{"script-src https://js.hcaptcha.com", "script-src 'none'"}},
+		{name: "origin_mapping_only", enforcing: []string{"script-src https://main.example https://js.hcaptcha.com; frame-src 'none'"}, want: []string{"script-src https://127.0.0.1:18099 https://js.hcaptcha.com; frame-src 'none'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := captchaServer(t, captchaCfg, func(r *http.Request) (*http.Response, error) {
+				resp := audit267SRIResponse("text/html", "<html><body>ok</body></html>")
+				for _, value := range tc.enforcing {
+					resp.Header.Add("Content-Security-Policy", value)
+				}
+				for _, value := range tc.reportOnly {
+					resp.Header.Add("Content-Security-Policy-Report-Only", value)
+				}
+				return resp, nil
+			})
+			got := audit267CacheRequest(s, "GET", "/page", nil)
+			if got.Code != http.StatusOK {
+				t.Fatalf("status = %d; body = %s", got.Code, got.Body)
+			}
+			if values := got.Header().Values("Content-Security-Policy"); !slices.Equal(values, tc.want) {
+				t.Fatalf("CAPTCHA configuration changed enforcing policy: got %q, want %q", values, tc.want)
+			}
+			if values := got.Header().Values("Content-Security-Policy-Report-Only"); !slices.Equal(values, tc.reportOnly) {
+				t.Fatalf("CAPTCHA configuration changed report-only policy: got %q, want %q", values, tc.reportOnly)
+			}
+		})
 	}
 }
 

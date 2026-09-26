@@ -1019,10 +1019,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			RequestOrigin: r.Header.Get("Origin"),
 		},
 	)
-
-	if cspEntries := s.captchaMatcher.CSPDirectives(); len(cspEntries) > 0 {
-		outHeaders = injectCaptchaCSP(outHeaders, cspEntries)
-	}
+	result.CSPHashes.RewriteHeaders(outHeaders)
 
 	etag := cache.ComputeETag(result.Body)
 
@@ -1435,97 +1432,4 @@ func (s *Server) buildCaptchaRetryBody(originalBody []byte, contentType string, 
 
 func (s *Server) restoreJSONWithOpaqueKeys(gate *scrub.Gate, input []byte, opaqueKeys map[string]bool, restorers ...func(string) string) ([]byte, error) {
 	return gate.RestoreJSONWithOpaqueKeys(input, opaqueKeys, restorers...)
-}
-
-func injectCaptchaCSP(headers http.Header, captchaEntries []string) http.Header {
-	existing := headers.Values("Content-Security-Policy")
-	if len(existing) == 0 {
-		return headers
-	}
-
-	merged := make(map[string]map[string]bool)
-	for _, entry := range captchaEntries {
-		parts := strings.SplitN(entry, " ", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		directive, source := parts[0], parts[1]
-		if merged[directive] == nil {
-			merged[directive] = make(map[string]bool)
-		}
-		merged[directive][source] = true
-	}
-
-	result := headers.Clone()
-	result.Del("Content-Security-Policy")
-	for _, csp := range existing {
-		result.Add("Content-Security-Policy", mergeCSPPolicy(csp, merged))
-	}
-	return result
-}
-
-func mergeCSPPolicy(policy string, captchaSources map[string]map[string]bool) string {
-	directives := strings.Split(policy, ";")
-	seen := make(map[string]bool)
-	var result []string
-
-	var defaultSrcSources []string
-
-	for _, d := range directives {
-		d = strings.TrimSpace(d)
-		if d == "" {
-			continue
-		}
-		parts := strings.Fields(d)
-		if len(parts) == 0 {
-			continue
-		}
-		directive := parts[0]
-		seen[directive] = true
-
-		if directive == "default-src" {
-			defaultSrcSources = parts[1:]
-		}
-
-		if sources, ok := captchaSources[directive]; ok {
-			for s := range sources {
-				found := false
-				for _, existing := range parts[1:] {
-					if existing == s {
-						found = true
-						break
-					}
-				}
-				if !found {
-					parts = append(parts, s)
-				}
-			}
-		}
-		result = append(result, strings.Join(parts, " "))
-	}
-
-	for directive, sources := range captchaSources {
-		if seen[directive] {
-			continue
-		}
-		parts := []string{directive}
-		if len(defaultSrcSources) > 0 {
-			parts = append(parts, defaultSrcSources...)
-		}
-		for s := range sources {
-			found := false
-			for _, existing := range parts[1:] {
-				if existing == s {
-					found = true
-					break
-				}
-			}
-			if !found {
-				parts = append(parts, s)
-			}
-		}
-		result = append(result, strings.Join(parts, " "))
-	}
-
-	return strings.Join(result, "; ")
 }

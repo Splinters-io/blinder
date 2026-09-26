@@ -171,41 +171,30 @@ captcha:
 	}
 }
 
-func captchaDeliveryDirective(policy, name string) string {
-	for _, d := range strings.Split(policy, ";") {
-		parts := strings.Fields(d)
-		if len(parts) > 0 && parts[0] == name {
-			return strings.Join(parts[1:], " ")
-		}
-	}
-	return ""
-}
-func TestCaptchaDeliveryCSPPreservesApplicationAndSDK(t *testing.T) {
-	for _, mode := range []string{"no_original_policy", "inherited_self", "hcaptcha_sdk"} {
-		t.Run(mode, func(t *testing.T) {
+func TestCaptchaDeliveryCSPPreservesApplicationAndSDKAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+	}{
+		{name: "no_original_policy"},
+		{name: "sdk_blocked_by_inherited_self", policy: "default-src 'self'"},
+		{name: "sdk_explicitly_allowed", policy: "default-src 'self'; script-src 'self' https://js.hcaptcha.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			s := captchaServer(t, captchaDeliveryConfig(t, captchaDeliveryBuiltin), func(r *http.Request) (*http.Response, error) {
 				resp := audit267SRIResponse("text/html", `<script src="/app"></script><script src="https://js.hcaptcha.com/1/api.js"></script>`)
-				if mode != "no_original_policy" {
-					resp.Header.Set("Content-Security-Policy", "default-src 'self'")
+				if tc.policy != "" {
+					resp.Header.Set("Content-Security-Policy", tc.policy)
 				}
 				return resp, nil
 			})
 			got := audit267CacheRequest(s, "GET", "/page", nil)
 			policy := got.Header().Get("Content-Security-Policy")
-			script := captchaDeliveryDirective(policy, "script-src")
-			switch mode {
-			case "no_original_policy":
-				if policy != "" {
-					t.Fatalf("CAPTCHA configuration creates a new policy restricting ordinary app scripts: %q", policy)
-				}
-			case "inherited_self":
-				if script != "" && !strings.Contains(script, "'self'") {
-					t.Fatalf("new script-src loses inherited default-src self: %q", policy)
-				}
-			case "hcaptcha_sdk":
-				if !strings.Contains(script, "https://js.hcaptcha.com") && !strings.Contains(script, "https://*.hcaptcha.com") {
-					t.Fatalf("injected policy blocks official hCaptcha SDK at js.hcaptcha.com: %q", policy)
-				}
+			if policy != tc.policy {
+				t.Fatalf("SDK delivery changes the target's authorization: got %q, want %q", policy, tc.policy)
+			}
+			if !strings.Contains(got.Body.String(), `src="https://js.hcaptcha.com/1/api.js"`) {
+				t.Fatalf("SDK source changed in direct mode: %s", got.Body)
 			}
 		})
 	}

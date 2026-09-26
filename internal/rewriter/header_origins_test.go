@@ -46,7 +46,8 @@ func TestCSPRegisteredOriginsFollowRequestAuthority(t *testing.T) {
 func TestCSPPreservesProtocolTokensAndDirectiveNames(t *testing.T) {
 	gate := scrub.NewGate(nil, []string{"script", "unsafe", "self", "AcmeCorp", "Custom", "report"}, "alias.local")
 	policy := "script-src 'SELF' 'unsafe-inline' 'unsafe-eval' 'strict-dynamic' 'unsafe-hashes' 'report-sample' 'unsafe-allow-redirects' 'wasm-unsafe-eval' 'trusted-types-eval' 'inline-speculation-rules' 'report-sha256' 'report-sha384' 'report-sha512' 'unsafe-webtransport-hashes' 'nonce-AcmeCorp_-==' 'sha256-AcmeCorp_-==' 'SHA384-AcmeCorp+/=' 'sha512-AcmeCorp' Custom.Scheme: data: blob: https: wss: *; object-src 'none'"
-	if got := rewriteCSP(policy, gate, "alias.local"); got != policy {
+	want := strings.Replace(policy, "'nonce-AcmeCorp_-=='", "'nonce-"+RewriteCSPNonce("AcmeCorp_-==", gate)+"'", 1)
+	if got := rewriteCSP(policy, gate, "alias.local"); got != want {
 		t.Fatalf("CSP protocol values were treated as identity text:\n%s", got)
 	}
 }

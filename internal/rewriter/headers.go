@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"encoding/base64"
 	"net/http"
 	"regexp"
 	"strings"
@@ -127,6 +128,43 @@ var cspKeywords = map[string]bool{
 
 var cspSchemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:$`)
 var cspNonceHashRe = regexp.MustCompile(`(?i)^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/_-]+={0,2}'$`)
+var cspNonceValueRe = regexp.MustCompile(`^[A-Za-z0-9+/_-]+={0,2}$`)
+
+var cspSourceDirectives = map[string]bool{
+	"default-src": true, "child-src": true, "connect-src": true,
+	"font-src": true, "frame-src": true, "img-src": true,
+	"manifest-src": true, "media-src": true, "object-src": true,
+	"script-src": true, "script-src-elem": true, "script-src-attr": true,
+	"style-src": true, "style-src-elem": true, "style-src-attr": true,
+	"worker-src": true, "base-uri": true, "form-action": true,
+	"frame-ancestors": true,
+}
+
+// RewriteCSPNonce coordinates nonce-source values with HTML nonce attributes.
+// Only identity-bearing values change. The valid-base64 namespace escapes
+// literal values bearing our prefix, so an unchanged nonce cannot accidentally
+// equal a generated nonce. Invalid inputs stay invalid instead of acquiring a
+// valid source expression as a side effect of masking.
+func RewriteCSPNonce(value string, gate *scrub.Gate) string {
+	const prefix = scrub.OpaqueValueAliasPrefix
+	masked := gate.Scrub(value, "csp:nonce")
+	if !cspNonceValueRe.MatchString(value) {
+		if cspNonceValueRe.MatchString(masked) {
+			return "~" + masked
+		}
+		return masked
+	}
+	if masked != value {
+		alias := prefix + "a-" + base64.RawURLEncoding.EncodeToString([]byte(masked))
+		if gate.RegisterOpaqueValueAlias(alias, value) {
+			return alias
+		}
+		// Conflicting registrations must never overwrite another value's
+		// inverse or authorise that value through a shared nonce.
+		return "~" + alias
+	}
+	return value
+}
 
 type ResponseHeaderOpts struct {
 	OriginMapper  *OriginMapper
@@ -266,25 +304,72 @@ func rewriteCSP(csp string, gate *scrub.Gate, aliasDomain string, origins ...*Or
 	if len(origins) > 0 {
 		originMapper = origins[0]
 	}
-	directives := strings.Split(csp, ";")
+	// A single field value can contain multiple independently enforced policies.
+	// A comma is a policy delimiter even when no whitespace surrounds it.
+	policies := strings.Split(csp, ",")
+	for i, policy := range policies {
+		policies[i] = rewriteCSPPolicy(policy, gate, originMapper)
+	}
+	return strings.Join(policies, ",")
+}
+
+func cspASCIIWhitespace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f'
+}
+
+func cspHasNonASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteCSPPolicy(policy string, gate *scrub.Gate, originMapper *OriginMapper) string {
+	directives := strings.Split(policy, ";")
 	rewritten := make([]string, 0, len(directives))
 
 	for _, directive := range directives {
-		directive = strings.TrimSpace(directive)
+		directive = strings.TrimFunc(directive, cspASCIIWhitespace)
 		if directive == "" {
 			continue
 		}
 
-		tokens := strings.Fields(directive)
+		// CSP discards non-ASCII directives. Unicode whitespace normalization or
+		// masking must not turn such an ignored directive into an active one.
+		if cspHasNonASCII(directive) {
+			masked := gate.Scrub(directive, "csp:invalid")
+			if !cspHasNonASCII(masked) {
+				masked = "\uFFFD" + masked
+			}
+			rewritten = append(rewritten, masked)
+			continue
+		}
+		tokens := strings.FieldsFunc(directive, cspASCIIWhitespace)
 		if len(tokens) == 0 {
 			continue
 		}
 
 		name := tokens[0]
+		if !cspSourceDirectives[strings.ToLower(name)] && !strings.EqualFold(name, "report-uri") {
+			// Fixed control grammar is not identity text. Application-defined
+			// policy/report names still need masking; preserving every token
+			// here would newly expose identities through these directives.
+			for i, token := range tokens[1:] {
+				if !cspControlKeyword(strings.ToLower(name), strings.ToLower(token)) {
+					tokens[i+1] = gate.Scrub(token, "csp:control-name")
+				}
+			}
+			rewritten = append(rewritten, strings.Join(tokens, " "))
+			continue
+		}
 		scrubbed := []string{name}
 
 		for _, token := range tokens[1:] {
-			if cspKeywords[strings.ToLower(token)] || cspSchemeRe.MatchString(token) || cspNonceHashRe.MatchString(token) || token == "*" {
+			if cspNonceHashRe.MatchString(token) && strings.HasPrefix(strings.ToLower(token), "'nonce-") {
+				scrubbed = append(scrubbed, token[:7]+RewriteCSPNonce(token[7:len(token)-1], gate)+"'")
+			} else if cspKeywords[strings.ToLower(token)] || cspSchemeRe.MatchString(token) || cspNonceHashRe.MatchString(token) || token == "*" {
 				scrubbed = append(scrubbed, token)
 			} else {
 				// Exact registered origins follow the resource URL mapping. The
@@ -299,6 +384,22 @@ func rewriteCSP(csp string, gate *scrub.Gate, aliasDomain string, origins ...*Or
 	}
 
 	return strings.Join(rewritten, "; ")
+}
+
+func cspControlKeyword(directive, token string) bool {
+	if directive == "sandbox" {
+		switch token {
+		case "allow-downloads", "allow-forms", "allow-modals", "allow-orientation-lock", "allow-pointer-lock", "allow-popups", "allow-popups-to-escape-sandbox", "allow-presentation", "allow-same-origin", "allow-scripts", "allow-storage-access-by-user-activation", "allow-top-navigation", "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols":
+			return true
+		}
+	}
+	if directive == "require-trusted-types-for" {
+		return token == "'script'"
+	}
+	if directive == "trusted-types" {
+		return token == "*" || token == "'none'" || token == "'allow-duplicates'"
+	}
+	return false
 }
 
 func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targetHost string) string {
