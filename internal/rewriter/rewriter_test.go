@@ -32,8 +32,8 @@ func TestRewriteBody_HTMLScrubsTitle(t *testing.T) {
 	if strings.Contains(string(result.Body), "AcmeCorp") {
 		t.Error("identity token should be scrubbed from title")
 	}
-	if !strings.Contains(string(result.Body), "<title>Transformed view</title>") {
-		t.Error("title should be replaced")
+	if len(result.Body) != len(body) || !strings.Contains(string(result.Body), "<title>") || strings.Contains(string(result.Body), "AcmeCorp Admin") {
+		t.Error("title should be masked within its original byte budget")
 	}
 }
 
@@ -307,7 +307,7 @@ func TestRewriteBody_HTMLBodyURLsUseOriginMapper(t *testing.T) {
 	gate := scrub.NewGate([]string{"app.example.com", "api.example.com"}, nil, "target-001.local")
 	primary, _ := url.Parse("https://app.example.com")
 	api, _ := url.Parse("https://api.example.com")
-	origins := mustMapper(t,primary, "127.0.0.1:8099", "target-001.local",
+	origins := mustMapper(t, primary, "127.0.0.1:8099", "target-001.local",
 		OriginRoute{Upstream: api, Alias: "host-api.target-001.local"},
 	)
 

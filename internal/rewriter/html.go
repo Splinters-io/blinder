@@ -116,8 +116,15 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 				// An error response may carry its only diagnostic in the title.
 				// Apply identity masking there just as in the rest of its body.
 				if !preserveTitle {
-					// Ordinary page titles are replaced at their end tag.
-					break
+					// Keep the title's own source byte budget. A constant label
+					// expands short pages and erases every title-only difference.
+					// Do not borrow these bytes for unrelated body adjustments.
+					if strings.TrimSpace(string(z.Text())) == "" {
+						out.Write(raw)
+					} else {
+						out.WriteString(proseForHTMLText(string(raw), gate.ContentTag(raw)))
+					}
+					continue
 				}
 				fallthrough
 			default:
@@ -225,6 +232,10 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 				out.Write(raw)
 				continue
 			}
+			if edited, ok := rewriteHTMLQuotedAttrs(raw, tagName, attrs, transformedAttrs, gate); ok {
+				out.Write(edited)
+				continue
+			}
 			out.WriteByte('<')
 			out.WriteString(tagName)
 			writeTagAttrs(&out, transformedAttrs)
@@ -245,9 +256,6 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			}
 
 			if tagName == rawTextTag {
-				if tagName == "title" && !suppressElement && !preserveTitle {
-					out.WriteString("Transformed view")
-				}
 				rawTextTag = ""
 			}
 

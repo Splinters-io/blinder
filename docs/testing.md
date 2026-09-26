@@ -80,7 +80,7 @@ Run `go test -race -count=1 ./internal/proxy -run '^TestWebSocket(Refusal|Transp
 
 Run `go test -race -count=1 ./internal/rewriter -run '^TestProse'` for prose byte budgets, entity/Unicode handling, literal boundary whitespace, short text, and reversible textarea/option values, including slash-ended form elements.
 
-Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^TestBodySize'` for whole-HTML size matching. These tests compare differently sized responses, including gzip input, and require each final decoded length and the signed difference between them to match upstream. They also verify that fitting occurs after provider URL expansion, that SQL-style diagnostics, script text and form values survive, and that insufficient adjustment space is reported rather than taken from functional content. These are synthetic fidelity fixtures, not proof of SQL injection detection on arbitrary sites.
+Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^TestBodySize|^TestTitle|^TestHTMLQuotedAttrEdits'` for whole-HTML size matching. These tests compare differently sized responses, including gzip input, and require each final decoded length and the signed difference between them to match upstream. They also verify that fitting occurs after provider URL expansion, that SQL-style diagnostics, script text and form values survive, and that insufficient adjustment space is reported rather than taken from functional content. These are synthetic fidelity fixtures, not proof of SQL injection detection on arbitrary sites.
 
 For a local browser form/diagnostic check:
 

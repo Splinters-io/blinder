@@ -38,7 +38,7 @@ func TestHTMLFidelityChangedTokenLeavesNeighborsRaw(t *testing.T) {
 	gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 	source := "<DiV\tdata-note='AcmeCorp' keep='one&#38;two'>before &amp; after</DiV >\r\n<SPAN disabled data-x=plain>tail&#33;</SPAN >"
 	got := string(RewriteBody([]byte(source), "text/html", "/", gate, false).Body)
-	if !strings.HasPrefix(got, `<div data-note="`+scrub.ValueAliasPrefix) || !strings.Contains(got, ` keep="one&amp;two">`) {
+	if !strings.HasPrefix(got, "<DiV\tdata-note='"+scrub.ValueAliasPrefix) || !strings.Contains(got, ` keep='one&#38;two'>`) {
 		t.Fatalf("changed start tag did not retain the configured transformation: %s", got)
 	}
 	wantSuffix := "before &amp; after</DiV >\r\n<SPAN disabled data-x=plain>tail&#33;</SPAN >"
@@ -168,7 +168,7 @@ func TestHTMLFidelityRetainsParanoidImageAndTitleRules(t *testing.T) {
 	const submitted = "<TEXTAREA name=q>unchanged &#00038;\r\nvalue</TEXTAREA >"
 	source := `<TiTlE>Original title</TiTlE >` + `<IMG src='icon' alt='original'>` + diagnostic + submitted + `<p>` + strings.Repeat("Ordinary prose goes here. ", 20) + `</p>`
 	got := string(RewriteBody([]byte(source), "text/html", "/", scrub.NewGate(nil, nil, "alias.local"), true).Body)
-	if !strings.Contains(got, `<TiTlE>Transformed view</TiTlE >`) || !strings.Contains(got, transparentGifDataURI) || !strings.Contains(got, `alt="[image]"`) {
+	if (!strings.HasPrefix(got, `<TiTlE>`) || !strings.Contains(got, `</TiTlE >`) || strings.Contains(got, "Original title")) || !strings.Contains(got, transparentGifDataURI) || !strings.Contains(got, `alt='[image]'`) {
 		t.Fatalf("required image/title transforms were bypassed: %s", got)
 	}
 	if !strings.Contains(got, diagnostic) || !strings.Contains(got, submitted) {

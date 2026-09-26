@@ -54,25 +54,34 @@ func TestContentChangeEqualSizeEvidence(t *testing.T) {
 	}
 }
 
-func TestContentChangeTagSurvivesInformationLoss(t *testing.T) {
-	// Ordinary titles currently become a constant view. The independent tag
-	// must still reveal a change without disclosing the original title.
-	current := "<title>Alpha</title>"
+func TestContentChangeShortBodyTag(t *testing.T) {
+	// Short visible filler has finite capacity. Search synthetic Unicode
+	// originals with the same UTF-8 length for an actual output collision,
+	// then require the independent original tag to distinguish them.
+	current := ""
 	s := mappingReviewServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) {
 		response := audit267SRIResponse("text/html", current)
 		response.Header.Set("Cache-Control", "no-store")
 		return response, nil
 	})
 	s.cfg.Paranoid = true
-	a := audit267CacheRequest(s, "GET", "/", nil)
-	current = "<title>Bravo</title>"
-	b := audit267CacheRequest(s, "GET", "/", nil)
-	if a.Body.String() != b.Body.String() {
-		t.Fatal("fixture no longer exercises collapsed output")
+	seen := map[string]string{}
+	for ch := rune(0x100); ch < 0x800; ch++ {
+		current = "<title>" + string(ch) + "</title>"
+		got := audit267CacheRequest(s, "GET", "/", nil)
+		view, tag := got.Body.String(), got.Header().Get(originalTagHeader)
+		if tag == "" {
+			t.Fatal("missing original tag")
+		}
+		if prior, ok := seen[view]; ok {
+			if prior == tag {
+				t.Fatal("filler collision also erased original change signal")
+			}
+			return
+		}
+		seen[view] = tag
 	}
-	if a.Header().Get(originalTagHeader) == "" || a.Header().Get(originalTagHeader) == b.Header().Get(originalTagHeader) {
-		t.Fatal("body collapse also erased the original change signal")
-	}
+	t.Fatal("fixture did not find a short-output collision")
 }
 
 func TestContentChangeTagCacheHeadAndRevalidation(t *testing.T) {

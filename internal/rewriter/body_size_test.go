@@ -94,10 +94,16 @@ func TestBodySizeFitsAfterProviderResourceURLExpansion(t *testing.T) {
 }
 
 func TestBodySizeUsesAllAvailableProseWithoutErasingNodes(t *testing.T) {
-	// Normalising the title adds 15 bytes. Two 12-byte prose nodes provide 22
-	// removable bytes, so matching requires shrinking both while keeping them visible.
-	const body = `<title>X</title><p>abcdefghijkl</p><p>mnopqrstuvwx</p>`
-	got := string(RewriteBody([]byte(body), "text/html", "/", newTestGate(), true).Body)
+	gate := newTestGate()
+	// Identity expansion requires more bytes than either prose node alone
+	// can supply. Title text no longer creates its own artificial expansion.
+	delta := len(gate.Scrub("AcmeCorp", "fixture")) - len("AcmeCorp")
+	if delta < 2 {
+		t.Fatal("fixture needs an expanding identity alias")
+	}
+	budget := (delta+1)/2 + 1
+	body := `<div title="AcmeCorp"><p>` + strings.Repeat("a", budget) + `</p><p>` + strings.Repeat("b", budget) + `</p></div>`
+	got := string(RewriteBody([]byte(body), "text/html", "/", gate, true).Body)
 	if len(got) != len(body) || strings.Count(got, "<p>") != 2 || strings.Contains(got, "<p></p>") {
 		t.Fatalf("prose capacity not shared: %s", got)
 	}
