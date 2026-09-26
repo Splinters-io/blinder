@@ -215,6 +215,7 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		Transport:    transport,
 		ScrubFn:      scrubFn,
 		Cache:        sriCache,
+		ContentTag:   gate.ContentTag,
 		FetchTimeout: upstreamTimeout,
 		IsAllowedOrigin: func(u *url.URL) bool {
 			return origins.IsKnownFullOrigin(u)
@@ -626,7 +627,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 						if cached.OriginalBodyKnown {
 							original = cached.OriginalBodyBytes
 						}
-						observed.representation("cache", original, int64(len(cached.Body)))
+						observed.representation("cache", original, int64(len(cached.Body)), cached.OriginalBodyTag)
 						inm := r.Header.Get("If-None-Match")
 						if cache.MatchesETag(inm, cached.ETag) {
 							for name, values := range cached.Headers {
@@ -714,7 +715,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if staleEntry.OriginalBodyKnown {
 			original = staleEntry.OriginalBodyBytes
 		}
-		observed.representation("cache", original, int64(len(staleEntry.Body)))
+		observed.representation("cache", original, int64(len(staleEntry.Body)), staleEntry.OriginalBodyTag)
 		if s.harWriter != nil {
 			s.harWriter.Record(upstreamReq, reqBodyBuf, resp, nil, elapsed)
 		}
@@ -1012,6 +1013,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Host:   upstream.Host,
 		Path:   r.URL.Path,
 	}
+	originalBodyTag := gate.ContentTag(body)
 	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
 		CSPPolicies:     resp.Header.Values("Content-Security-Policy"),
 		StatusCode:      resp.StatusCode,
@@ -1038,7 +1040,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.stats.Scrubbed.Add(1)
 
 	leakCount = gate.ResidualLeakCount(string(result.Body))
-	observed.representation("upstream", int64(len(body)), int64(len(result.Body)))
+	observed.representation("upstream", int64(len(body)), int64(len(result.Body)), originalBodyTag)
 
 	outHeaders := rewriter.RewriteResponseHeaders(
 		resp.Header,
@@ -1090,6 +1092,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				ContentType:          contentType,
 				OriginalBodyBytes:    int64(len(body)),
 				OriginalBodyKnown:    true,
+				OriginalBodyTag:      originalBodyTag,
 				ETag:                 etag,
 				UpstreamETag:         resp.Header.Get("ETag"),
 				UpstreamLastModified: resp.Header.Get("Last-Modified"),
@@ -1193,7 +1196,7 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 	if entry.OriginalBodyKnown {
 		original = entry.OriginalBodyBytes
 	}
-	observeRepresentation(w, "sri-cache", original, int64(len(entry.ScrubbedBody)))
+	observeRepresentation(w, "sri-cache", original, int64(len(entry.ScrubbedBody)), entry.OriginalBodyTag)
 
 	etag := cache.ComputeETag(entry.ScrubbedBody)
 
@@ -1252,7 +1255,7 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, 
 	if entry.OriginalBodyKnown {
 		original = entry.OriginalBodyBytes
 	}
-	observeRepresentation(w, "cache", original, int64(len(entry.Body)))
+	observeRepresentation(w, "cache", original, int64(len(entry.Body)), entry.OriginalBodyTag)
 	for name, values := range entry.Headers {
 		for _, v := range values {
 			w.Header().Add(name, v)

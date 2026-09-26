@@ -17,7 +17,8 @@ func TestProsePreservesHTMLTextByteBudget(t *testing.T) {
 	} {
 		t.Run(text, func(t *testing.T) {
 			body := "<p>" + text + "</p>"
-			got := string(RewriteBody([]byte(body), "text/html", "/", newTestGate(), true).Body)
+			gate := newTestGate()
+			got := string(RewriteBody([]byte(body), "text/html", "/", gate, true).Body)
 			if len(got) != len(body) || !utf8.ValidString(got) {
 				t.Fatalf("source budget not preserved: %d -> %d: %q", len(body), len(got), got)
 			}
@@ -32,7 +33,7 @@ func TestProsePreservesHTMLTextByteBudget(t *testing.T) {
 			} else if strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(got, "<p>"), "</p>")) == "" {
 				t.Fatal("short ordinary text became invisible")
 			}
-			again := string(RewriteBody([]byte(body), "text/html", "/", newTestGate(), true).Body)
+			again := string(RewriteBody([]byte(body), "text/html", "/", gate, true).Body)
 			if got != again {
 				t.Fatal("filler is not deterministic")
 			}
@@ -88,6 +89,71 @@ func TestProsePreservesFormValuesAndDiagnostics(t *testing.T) {
 	for _, tag := range []string{"textarea", "option"} {
 		if restored := gate.RestoreBody(values[tag]); restored != "AcmeCorp & café" {
 			t.Fatalf("%s no longer round-trips its submitted value: %q", tag, restored)
+		}
+	}
+}
+
+func TestProseDistinguishesEqualLengthSourcesWithinSession(t *testing.T) {
+	gate := newTestGate()
+	first := []byte("<p>\n\t" + strings.Repeat("AcmeCorp bright morning. ", 12) + "\t\n</p>")
+	second := []byte("<p>\n\t" + strings.Repeat("AcmeCorp silent evening. ", 12) + "\t\n</p>")
+	if len(first) != len(second) {
+		t.Fatal("fixture source lengths differ")
+	}
+	a := RewriteBody(first, "text/html", "/", gate, true).Body
+	b := RewriteBody(second, "text/html", "/", gate, true).Body
+	if len(a) != len(first) || len(b) != len(second) || string(a) == string(b) {
+		t.Fatalf("equal-length differences collapsed: %q / %q", a, b)
+	}
+	if strings.Contains(string(a), "AcmeCorp") || strings.Contains(string(b), "AcmeCorp") {
+		t.Fatal("filler leaked configured identity")
+	}
+	again := RewriteBody(first, "text/html", "/", gate.ForRequest(), true).Body
+	if string(again) != string(a) {
+		t.Fatal("request-local view lost session-stable prose")
+	}
+	other := RewriteBody(first, "text/html", "/", newTestGate(), true).Body
+	if string(other) == string(a) {
+		t.Fatal("independent session emitted identical long prose")
+	}
+}
+
+func TestProseResizingRetainsSourceDependentGeneration(t *testing.T) {
+	gate := newTestGate()
+	firstTag := gate.ContentTag([]byte(strings.Repeat("a", 240)))
+	secondTag := gate.ContentTag([]byte(strings.Repeat("b", 240)))
+	for _, target := range []int{180, 300} {
+		makeBody := func(tag string) string {
+			original := "<p>" + proseForLength(240, tag) + "</p>"
+			spans := []proseSpan{{start: 3, end: 243, contentTag: tag}}
+			resized := fitProseToBodyLength([]byte(original), spans, target+7)
+			if len(resized) != target+7 || !strings.HasPrefix(string(resized), "<p>") || !strings.HasSuffix(string(resized), "</p>") {
+				t.Fatalf("invalid resized prose: %q", resized)
+			}
+			return string(resized)
+		}
+		first, second := makeBody(firstTag), makeBody(secondTag)
+		if first == second {
+			t.Fatalf("resize to %d erased source-dependent content", target)
+		}
+		if first != makeBody(firstTag) {
+			t.Fatalf("resize to %d is not stable", target)
+		}
+	}
+}
+
+func TestWholeDocumentFitDoesNotCollapseEqualLengthChanges(t *testing.T) {
+	gate := newTestGate()
+	for _, prefix := range []string{"<title>X</title>", "<title>" + strings.Repeat("Long original title ", 20) + "</title>"} {
+		first := prefix + "<p>" + strings.Repeat("The bright morning returns. ", 16) + "</p>"
+		second := prefix + "<p>" + strings.Repeat("The silent evening returns. ", 16) + "</p>"
+		if len(first) != len(second) {
+			t.Fatal("fixture source lengths differ")
+		}
+		a := RewriteBody([]byte(first), "text/html", "/", gate, true).Body
+		b := RewriteBody([]byte(second), "text/html", "/", gate, true).Body
+		if len(a) != len(first) || len(b) != len(second) || string(a) == string(b) {
+			t.Fatalf("whole-body fitting collapsed content: %q / %q", a, b)
 		}
 	}
 }

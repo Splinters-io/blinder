@@ -78,6 +78,9 @@ type PipelineConfig struct {
 	// resource. It must return a copy when changing the document request.
 	ResourceRequest func(resourceURL string, baseReq *http.Request) *http.Request
 	RequestScrubFn  func(body []byte, contentType, path string, req *http.Request) []byte
+	// ContentTag identifies the full decoded original body within the caller's
+	// session. Nil leaves the tag absent; no public digest is substituted.
+	ContentTag func([]byte) string
 }
 
 type Pipeline struct {
@@ -90,6 +93,7 @@ type Pipeline struct {
 	fetchTimeout    time.Duration
 	resourceRequest func(string, *http.Request) *http.Request
 	requestScrubFn  func([]byte, string, string, *http.Request) []byte
+	contentTag      func([]byte) string
 
 	mu       sync.Mutex
 	findings []Finding
@@ -109,6 +113,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		fetchTimeout:    cfg.FetchTimeout,
 		resourceRequest: cfg.ResourceRequest,
 		requestScrubFn:  cfg.RequestScrubFn,
+		contentTag:      cfg.ContentTag,
 	}
 }
 
@@ -187,6 +192,10 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 	bodyVersion := "bl" + hex.EncodeToString(h[:8])
 
 	digests := computeAllDigests(body)
+	originalBodyTag := ""
+	if p.contentTag != nil {
+		originalBodyTag = p.contentTag(body)
+	}
 
 	if respCT == "" {
 		respCT = contentType
@@ -209,6 +218,7 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		BodyVersion:       bodyVersion,
 		OriginalBodyBytes: int64(len(body)),
 		OriginalBodyKnown: true,
+		OriginalBodyTag:   originalBodyTag,
 	}
 	p.cache.PutResource(cacheKey, cached, reserved...)
 	p.cache.IndexDigest(cacheKey+"\x01"+cached.BodyVersion, body)

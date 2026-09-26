@@ -16,10 +16,11 @@ func TestBodySizeFitsWholeHTMLUsingOnlyProse(t *testing.T) {
 		{"expand", `<title>` + strings.Repeat("Long page title ", 30) + `</title><!--` + strings.Repeat("comment ", 30) + `--><div>`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			gate := newTestGate()
 			const first = "\n\tA paragraph of ordinary prose that can absorb size differences.\t\n"
 			const second = "\u2003Another paragraph with café, 日本語, and &amp; entities.\u2003"
 			body := tc.prefix + "<p>" + first + "</p><p>" + second + "</p>" + protected + "</div>"
-			got := string(RewriteBody([]byte(body), "text/html", "/", newTestGate(), true).Body)
+			got := string(RewriteBody([]byte(body), "text/html", "/", gate, true).Body)
 			if len(got) != len(body) || !utf8.ValidString(got) {
 				t.Fatalf("body size/UTF-8 changed: %d -> %d: %s", len(body), len(got), got)
 			}
@@ -34,7 +35,7 @@ func TestBodySizeFitsWholeHTMLUsingOnlyProse(t *testing.T) {
 			if strings.Contains(got, "ordinary prose") || strings.Contains(got, "AcmeCorp") {
 				t.Fatal("existing transformations were undone")
 			}
-			if again := string(RewriteBody([]byte(body), "text/html", "/", newTestGate(), true).Body); again != got {
+			if again := string(RewriteBody([]byte(body), "text/html", "/", gate, true).Body); again != got {
 				t.Fatal("whole-body matching is not deterministic")
 			}
 		})
@@ -56,8 +57,11 @@ func TestBodySizeDoesNotSacrificeDiagnosticsForExactLength(t *testing.T) {
 			if !strings.Contains(got, "SQLSTATE[42000] invalid input") || len(got) <= len(tc.body) {
 				t.Fatalf("missing diagnostic or impossible size silently forced: %s", got)
 			}
-			if tc.name == "too-small" && !strings.Contains(got, "<p>I</p>") {
-				t.Fatal("visible minimum prose removed to meet length")
+			if tc.name == "too-small" {
+				first, _, _ := strings.Cut(strings.TrimPrefix(got, "<p>"), "</p>")
+				if len(first) != 1 || strings.TrimSpace(first) == "" {
+					t.Fatal("visible minimum prose removed to meet length")
+				}
 			}
 			if tc.name == "json" && !strings.Contains(got, "900719925474099312345") {
 				t.Fatal("JSON precision changed")

@@ -24,6 +24,9 @@ type CacheEntry struct {
 	BodyVersion       string
 	OriginalBodyBytes int64
 	OriginalBodyKnown bool
+	// OriginalBodyTag is an optional session-scoped tag of the decoded source.
+	// It remains unchanged when a document selects another rewritten version.
+	OriginalBodyTag string
 }
 
 func CacheKey(resourceURL string, req *http.Request) string {

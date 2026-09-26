@@ -17,6 +17,7 @@ type Entry struct {
 	ContentType       string
 	OriginalBodyBytes int64
 	OriginalBodyKnown bool
+	OriginalBodyTag   string
 
 	ETag string
 

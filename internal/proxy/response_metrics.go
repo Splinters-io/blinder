@@ -43,6 +43,12 @@ func (w *responseObserver) WriteHeader(status int) {
 		w.beforeFinalHeader(w.Header())
 	}
 	w.Header().Set("X-Blinder-View", "transformed")
+	// This is a session-keyed equality signal for a complete original body,
+	// not a public content hash or an assertion of exploit success.
+	w.Header().Del("X-Blinder-Original-Body-Tag")
+	if w.metrics.OriginalBodyTag != "" {
+		w.Header().Set("X-Blinder-Original-Body-Tag", w.metrics.OriginalBodyTag)
+	}
 	// Always overwrite upstream-provided measurements. Unknown is explicit.
 	w.Header().Set("X-Blinder-Original-Body-Bytes", strconv.FormatInt(w.metrics.OriginalBodyBytes, 10))
 	w.Header().Set("X-Blinder-Rewritten-Body-Bytes", strconv.FormatInt(w.metrics.RewrittenBodyBytes, 10))
@@ -69,7 +75,11 @@ func (w *responseObserver) Write(body []byte) (int, error) {
 	return n, err
 }
 
-func (w *responseObserver) representation(source string, original, rewritten int64) {
+func (w *responseObserver) representation(source string, original, rewritten int64, tag ...string) {
+	w.metrics.OriginalBodyTag = ""
+	if len(tag) > 0 {
+		w.metrics.OriginalBodyTag = tag[0]
+	}
 	w.metrics.Source = source
 	w.metrics.OriginalBodyBytes = original
 	w.metrics.RewrittenBodyBytes = rewritten
@@ -80,9 +90,9 @@ func (w *responseObserver) representation(source string, original, rewritten int
 	}
 }
 
-func observeRepresentation(w http.ResponseWriter, source string, original, rewritten int64) {
+func observeRepresentation(w http.ResponseWriter, source string, original, rewritten int64, tag ...string) {
 	if observed, ok := w.(*responseObserver); ok {
-		observed.representation(source, original, rewritten)
+		observed.representation(source, original, rewritten, tag...)
 	}
 }
 

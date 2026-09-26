@@ -2,6 +2,8 @@ package scrub
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -42,7 +44,8 @@ type cookieValueMapping struct {
 }
 
 type Gate struct {
-	parent           *Gate // Per-request counters; aliases and aggregate findings stay shared.
+	parent           *Gate    // Per-request counters; aliases and aggregate findings stay shared.
+	contentKey       [32]byte // Private session key; never derived from or exposed by Seed.
 	targetDomains    []string
 	identityTokens   []string
 	domainPatterns   []*regexp.Regexp
@@ -114,6 +117,9 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		ipv4Aliases:    make(map[string]string),
 		ipv6Aliases:    make(map[string]string),
 		opaqueAliases:  make(map[string]string),
+	}
+	if _, err := rand.Read(g.contentKey[:]); err != nil {
+		panic("cannot initialize private content key: " + err.Error())
 	}
 	for _, domain := range domains {
 		g.domainPatterns = append(g.domainPatterns, literalPattern(domain))
@@ -775,6 +781,19 @@ func (g *Gate) Seed() []byte {
 		data = append(data, []byte(t)...)
 	}
 	return data
+}
+
+// ContentTag identifies exact bytes within this gate's session without exposing
+// a public content hash that could be matched against guessed upstream pages.
+// Request-local views share the session key, while new gates are independent.
+func (g *Gate) ContentTag(content []byte) string {
+	if g.parent != nil {
+		return g.parent.ContentTag(content)
+	}
+	mac := hmac.New(sha256.New, g.contentKey[:])
+	mac.Write([]byte("blinder/content/v1\x00"))
+	mac.Write(content)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (g *Gate) RestoreJSON(input []byte) []byte {

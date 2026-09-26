@@ -125,8 +125,9 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 				if paranoid && !inDiagnosticElement(diagnosticElements) {
 					if strings.TrimSpace(text) != "" {
 						left, right := proseContentBounds(string(raw))
-						proseSpans = append(proseSpans, proseSpan{out.Len() + left, out.Len() + right})
-						out.WriteString(proseForHTMLText(string(raw)))
+						contentTag := gate.ContentTag(raw)
+						proseSpans = append(proseSpans, proseSpan{start: out.Len() + left, end: out.Len() + right, contentTag: contentTag})
+						out.WriteString(proseForHTMLText(string(raw), contentTag))
 					} else {
 						out.Write(raw)
 					}
@@ -421,7 +422,9 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 			continue
 		}
 		seen[a.key] = true
-		if a.key == "nomodule" { noModule = true }
+		if a.key == "nomodule" {
+			noModule = true
+		}
 		if a.key == "nonce" {
 			nonceVal = a.val
 		}
