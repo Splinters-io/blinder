@@ -41,10 +41,10 @@ This is content-blind scanning: the operator controls who the target is; the AI 
 | | |
 | :--- | :--- |
 | **Content scrubbing** | Identity tokens, domain references and cookie values rewritten across HTTP bodies, headers and WebSocket text. HTML tokenizer handles entity-encoded and attribute-embedded identities. Technical content -- vulnerabilities, error messages, injection reflections, security headers -- passes through unchanged. |
-| **Resource integrity** | SRI attributes stripped on proxied resources (where content will be scrubbed), preserved on external CDN references. Version-tagged body references survive cache revalidation. |
+| **Resource integrity** | Original SRI verified per reference and recomputed for rewritten resources, with corresponding CSP hashes translated. Versioned references bind the served bytes; external resource integrity is preserved. |
 | **Response cache** | Separate upstream/downstream cache validators. 304 revalidation merges security-policy headers. Vary-aware eviction. |
 | **Session handling** | Reversible cookie names with per-value scrubbing. Multi-origin routing via `--extra-origin` with deterministic alias hostnames, Host-header routing and CORS origin translation. |
-| **CAPTCHA relay** | Operator-facing challenge queue with browser isolation. Provider resources routed through the configured transport. Challenge pages sandboxed without same-origin access. |
+| **CAPTCHA relay** | Operator-facing challenge queue and separate provider origins. Tor-routed resources keep provider cookies, CSP and CORS separate from the target and operator. |
 | **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
 | **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
 | **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. |
@@ -114,7 +114,7 @@ Preflight generates or reuses the local certificate and prints its public path, 
 
 Use `--cert-dir DIR` for a chosen private store. Certificates persist across restarts; `--ephemeral-cert` selects a temporary identity. Preflight exit **2** means platform trust needs setup; a client using its own certificate file can still connect successfully.
 
-Preflight reports trust separately for the listen host, primary alias, configured extra-origin aliases and, when CAPTCHA is configured, the operator hostname. Its exit status and macOS `--trust-cert` action apply to the listen host only. Check name resolution and certificate trust for every hostname your browser will use; a trusted loopback URL does not establish trust for its aliases.
+Preflight reports trust separately for the listen host, primary alias, configured extra-origin aliases and, when CAPTCHA is configured, the operator hostname. With `--tor`, it also includes the configured provider aliases. Use the same CAPTCHA and Tor options for preflight and startup. Its exit status and macOS `--trust-cert` action apply to the listen host only. Check name resolution and certificate trust for every hostname your browser will use; a trusted loopback URL does not establish trust for its aliases.
 
 The endpoint store also holds a private `version-signing.key` for resource-reference ownership, independent of certificate renewal. Keep it across restarts so expired references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
 
@@ -147,9 +147,9 @@ captcha:
 
 Open the browser login URL printed at startup: `https://blinder-operator.localhost:<port>/__blinder/captcha/login?token=…`. This separate, local-only origin holds the operator session; target pages cannot read its queue or challenge details. Raw challenge content runs inside an opaque sandbox, including in a separate solve window. Bearer authentication remains available for API clients. Verify certificate trust for the operator hostname as well as the target-facing endpoint; see the [operator and certificate guide](docs/testing.md#local-certificate-trust).
 
-Synthetic browser checks cover provider resource routing and completion with the original session preserved. Provider-specific origin restrictions and real human completion still require acceptance with the selected provider; rewriting a script URL alone does not establish compatibility.
+With `--tor`, each configured `route-with-target` provider origin gets its own `https://captcha-<hash>.localhost:<port>` address and uses the target's SOCKS transport. The provider's CSP, CORS responses, errors and HTTP methods pass through with origin translation; its cookies stay on its browser alias. Static HTML references, base URLs and refresh navigation use these routes. Provider documents receive no injected runtime. The old `/__blinder/captcha/res` endpoint returns 404 on target and operator origins.
 
-Provider resources with `tor_policy: route-with-target` (the default) are relayed through the configured SOCKS transport via `/__blinder/captcha/res?u=`. Providers with `tor_policy: direct` bypass Tor. Custom providers are supported with explicit `resource_origins`, `resource_url_regex`, `opaque_fields` and `submissions`.
+Built-in profiles cover hCaptcha, reCAPTCHA and Turnstile. Custom providers use explicit `resource_origins`, optional `resource_url_regex`, `opaque_fields` and `submissions`; every relayed request is checked against that scope. Direct mode leaves provider references intact, and `tor_policy: direct` remains an explicit Tor exception. [Paired browser checks and acceptance gates](docs/testing.md#captcha-browser-acceptance) cover the new routing separately from the historical operator-completion fixture. Dynamic provider URLs and the selected provider's human-completion flow remain acceptance work.
 
 ### Local testing
 

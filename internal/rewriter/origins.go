@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -25,7 +26,97 @@ type OriginMapper struct {
 	routes           map[string]*url.URL
 	localAddr        string
 	listenPort       string
+	localScheme      string
 	aliases          []string
+	policyToLocal    map[string]string // Policy-only routes never authorize target/SRI requests.
+}
+
+// WithPolicyOrigins adds source-expression translations without giving those
+// origins target routing, cookie restoration, cache, or SRI privileges.
+func (m *OriginMapper) WithPolicyOrigins(origins map[string]string) *OriginMapper {
+	view := *m
+	view.policyToLocal = make(map[string]string, len(origins))
+	for upstream, local := range origins {
+		u, err := url.Parse(upstream)
+		if err == nil && originKey(u) != "" {
+			view.policyToLocal[originKey(u)] = local
+		}
+	}
+	return &view
+}
+
+// WithLocalScheme selects the actual downstream scheme for an embedded HTTP
+// listener. CLI listeners use HTTPS. Upstream origins and routing stay fixed.
+func (m *OriginMapper) WithLocalScheme(scheme string) *OriginMapper {
+	if m == nil || (scheme != "http" && scheme != "https") {
+		return m
+	}
+	view := *m
+	view.localScheme = scheme
+	view.clientToUpstream = make(map[string]url.URL, len(m.clientToUpstream))
+	for key, upstream := range m.clientToUpstream {
+		parts := strings.Split(key, "\x00")
+		parts[0] = scheme
+		view.clientToUpstream[strings.Join(parts, "\x00")] = upstream
+	}
+	view.upstreamToLocal = make(map[string]string, len(m.upstreamToLocal))
+	for key, local := range m.upstreamToLocal {
+		u, err := url.Parse(local)
+		if err == nil {
+			u.Scheme = scheme
+			local = u.String()
+		}
+		view.upstreamToLocal[key] = local
+	}
+	return &view
+}
+
+func (m *OriginMapper) rewritePolicySource(value string) string {
+	if m == nil {
+		return value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.User != nil {
+		return value
+	}
+	if local, ok := m.policyToLocal[originKey(u)]; ok {
+		mapped, err := url.Parse(local)
+		if err == nil {
+			u.Scheme, u.Host = mapped.Scheme, mapped.Host
+			return u.String()
+		}
+	}
+	return value
+}
+
+// PolicySourceAliases returns the local inverse of an exact upstream URL
+// source. A primary target may be entered through loopback or its named alias;
+// each of those origins represents the same original policy permission.
+// Separate target/provider origins are never included in that permission.
+func (m *OriginMapper) PolicySourceAliases(value string) string {
+	if m == nil {
+		return value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.User != nil || originKey(u) == "" {
+		return value
+	}
+	want := originKey(u)
+	var sources []string
+	for key, upstream := range m.clientToUpstream {
+		if originKey(&upstream) != want {
+			continue
+		}
+		parts := strings.Split(key, "\x00")
+		mapped := *u
+		mapped.Scheme, mapped.Host = parts[0], net.JoinHostPort(parts[1], parts[2])
+		sources = append(sources, mapped.String())
+	}
+	if len(sources) == 0 {
+		return value
+	}
+	sort.Strings(sources)
+	return strings.Join(sources, " ")
 }
 
 // NewOriginMapper builds an origin mapper for the primary target and any extra
@@ -38,6 +129,7 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 		upstreamToLocal:  make(map[string]string),
 		routes:           make(map[string]*url.URL),
 		localAddr:        listen,
+		localScheme:      "https",
 	}
 
 	host, port, err := net.SplitHostPort(listen)
@@ -194,7 +286,11 @@ func (m *OriginMapper) Resolve(host string) *url.URL {
 		} else if strings.ContainsAny(h, ":[]") {
 			return nil
 		}
-		if m.listenPort != "443" && m.listenPort != "0" {
+		defaultPort := "443"
+		if m.localScheme == "http" {
+			defaultPort = "80"
+		}
+		if m.listenPort != defaultPort && m.listenPort != "0" {
 			return nil
 		}
 	} else {
@@ -223,7 +319,7 @@ func (m *OriginMapper) ForRequestHost(host string) *OriginMapper {
 	for key, value := range m.upstreamToLocal {
 		view.upstreamToLocal[key] = value
 	}
-	view.upstreamToLocal[originKey(upstream)] = (&url.URL{Scheme: "https", Host: host}).String()
+	view.upstreamToLocal[originKey(upstream)] = (&url.URL{Scheme: m.localScheme, Host: host}).String()
 	return &view
 }
 

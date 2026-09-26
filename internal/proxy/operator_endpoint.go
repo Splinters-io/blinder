@@ -56,6 +56,16 @@ func (s *Server) CaptchaOperatorURL() string {
 }
 
 func (s *Server) routeRequest(w http.ResponseWriter, r *http.Request) {
+	if s.providerRoutes != nil && s.providerRoutes.IsAliasHost(r.Host) {
+		peer, _, err := net.SplitHostPort(r.RemoteAddr)
+		ip := net.ParseIP(peer)
+		if err != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "provider access is local only", http.StatusForbidden)
+			return
+		}
+		s.providerHandler.ServeHTTP(w, r)
+		return
+	}
 	u, err := url.Parse("https://" + r.Host)
 	operatorHost := err == nil && strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), endpoint.OperatorHost)
 	if operatorHost {
@@ -73,17 +83,17 @@ func (s *Server) routeRequest(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if r.URL.Path == "/__blinder/captcha/res" {
+			http.NotFound(w, r)
+			return
+		}
 		s.captchaOperator.ServeHTTP(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/__blinder/captcha/") {
-		// Target/provider scripts need the scoped resource relay, but must
-		// never receive authenticated operator documents on their own origin.
-		if r.URL.Path == "/__blinder/captcha/res" && s.origins.Resolve(r.Host) != nil {
-			s.captchaOperator.ServeHTTP(w, r)
-		} else {
-			http.NotFound(w, r)
-		}
+		// Neither operator controls nor provider content may be served from a
+		// target origin. Provider aliases have already been dispatched above.
+		http.NotFound(w, r)
 		return
 	}
 	// Browser host-only cookies already isolate the new operator origin. Also

@@ -2,7 +2,7 @@
 
 Use these as three separate gates. Package regressions check specific defect classes; functional tests exercise the actual CLI and network boundary; UAT verifies the selected browser/scanner workflow with an operator. Green CI alone is not UAT approval or a general anonymization guarantee.
 
-The [current acceptance report](testing-results-2026-09-26-acceptance.md) records operator browser isolation and independent HAR consumer checks. The [post-commit review](testing-results-2026-09-26-postcommit.md), [fidelity report](testing-results-2026-09-26.md) and [2026-09-23 report](testing-results-2026-09-23.md) preserve earlier verification. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
+The [provider-origin report](testing-results-2026-09-26-provider-origins.md) records the latest isolated provider routing and CSP/CORS comparison. The [earlier acceptance report](testing-results-2026-09-26-acceptance.md) records operator browser isolation and independent HAR consumer checks. The [post-commit review](testing-results-2026-09-26-postcommit.md), [fidelity report](testing-results-2026-09-26.md) and [2026-09-23 report](testing-results-2026-09-23.md) preserve earlier verification. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
 
 ## Automated checks
 
@@ -90,7 +90,7 @@ BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 130s ./internal/proxy -
 
 Open the URL in `/private/tmp/blinder-response-browser-url.txt`, check the ordinary paragraph has become verse, click **Validate**, and confirm that the page displays `E_EMAIL`, the validation message and the Unicode input `café`, while its configured identity uses its reversible alias. The fixture verifies that textarea and option values reach upstream as `AcmeCorp & café`, not filler. The upstream response must remain 422. Then navigate to `/review-cleanup` on the fixture origin to finish. The local browser run matched the complete form page at **432 original → 432 rewritten → 432 emitted bytes**. The error response retained its diagnostic text with **277 → 285 → 285 bytes**; error content was not shortened to force a match. This does not establish wider site compatibility or universal content anonymisation.
 
-The synthetic provider browser flow (`BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 190s ./internal/proxy -run '^TestCaptchaFlowBrowser$' -v`) also passed in the in-app browser on 2026-09-26. Its nested frames, dynamic scripts and 13 provider requests—including extension methods—used the configured local SOCKS relay. Native operator submission displayed **Solution submitted**, and the original POST resumed with its session cookie and fresh CSRF field. The receipt confirms delivery to the waiting request; upstream acceptance is checked separately by the fixture. This is synthetic provider acceptance, not a solved live CAPTCHA or a live Tor circuit.
+The synthetic provider flow `TestCaptchaFlowBrowser` passed in the in-app browser on 2026-09-26 before provider origins were isolated. Its nested frames, dynamic scripts and 13 provider requests—including extension methods—used the previous local SOCKS relay. Native operator submission displayed **Solution submitted**, and the original POST resumed with its session cookie and fresh CSRF field. That historical evidence remains valid for its recorded revision; it is not current human-completion acceptance. The fixture needs adaptation and rerunning against the isolated provider routes described below.
 
 Tor mode also has eight deterministic SOCKS5 scenarios: HTTP and HTTPS onion targets on their default ports, a custom target port, a clearnet hostname passed to SOCKS for resolution, certificate rejection through the tunnel, and proxy rejection/disconnection/unavailability. Every scenario exercises both HTTP and WebSocket paths. The failure cases use a directly reachable target and assert that it receives zero requests.
 
@@ -119,7 +119,7 @@ For machine-readable evidence:
 go test -tags functional -race -count=1 -timeout 120s -json ./tests/functional > /tmp/blinder-functional.json
 ```
 
-Preserve the command's exit code when using CI wrappers. The updated GitHub workflow runs the default package race suite, vet with functional tests included, the full `make test-functional` suite and a static build. This configuration is local until published; a new remote CI result has not been claimed. Keep acceptance tests active.
+Preserve the command's exit code when using CI wrappers. The updated GitHub workflow runs the default package race suite, vet with functional tests included, the full `make test-functional` suite and a static build. The provider-origin changes in the latest local acceptance report have not yet been pushed or run in remote CI. Keep acceptance tests active.
 
 ## Independent HAR compatibility checks
 
@@ -147,9 +147,29 @@ The export directory must be new. The source capture remains unchanged; keep exp
 
 ## CAPTCHA browser acceptance
 
-Configured operator controls are served at `https://blinder-operator.localhost:<listen-port>/__blinder/captcha/`. Use the **Browser login** URL printed at startup to establish the temporary operator cookie. The hostname resolves locally and uses the same listener as the target proxy, but a separate browser origin. Only loopback peers can access controls. Target-origin control URLs return 404; the scoped provider `/res` relay remains available. Treat the printed login token as an operator credential.
+Configured operator controls are served at `https://blinder-operator.localhost:<listen-port>/__blinder/captcha/`. Use the **Browser login** URL printed at startup to establish the temporary operator cookie. The hostname resolves locally and uses the same listener as the target proxy, but a separate browser origin. Only loopback peers can access controls. Target-origin control URLs return 404. The old `/__blinder/captcha/res` endpoint returns 404 on both target and operator origins; Tor-routed resources now use separate `captcha-<hash>.localhost` origins. Treat the printed login token as an operator credential.
 
 Run the browser fixtures **one at a time**: their host-only operator cookie shares a hostname across ports. They use synthetic data and HTTP localhost secure contexts, so they do not verify production HTTPS certificate trust or solve live CAPTCHAs. Opt-in skips are not acceptance passes.
+
+For built-in/custom configuration, complete-origin routing and certificate-name coverage:
+
+```sh
+go test -race -count=1 ./internal/captcha ./cmd/blinder -run '^(TestParseConfig|TestProviderRoutes|TestProviderResourceOrigins|TestProviderCertificate)'
+go test -race -count=1 ./internal/captcha -run '^(TestProviderAliasRelay|TestProviderRelayRestoresMethod|TestProviderRelayRejectsInvalidRestoredMethods|TestProviderRelayRejectsMultiplePreflightMethods|TestProviderRuntimeOriginRecovery)'
+go test -race -count=1 ./internal/proxy -run '^(TestProviderOrigin(Routes|Rejects|Forwards|Document|BrowserCookie)|TestProviderRestrictedBase|TestProviderStaticReturn|TestProviderHTMLNegotiates|TestProviderLegacy)'
+```
+
+These checks cover full-origin distinctions and default-port equivalence, strict config validation, URL-regex enforcement, direct-provider exceptions, opaque URL/body bytes, reserved credentials, browser cookie scoping, provider errors, arbitrary HTTP methods and preflight method restoration. They also cover static base/refresh routing and rejection of the old relay endpoints. They do not exhaust every combination of main config files, provider files and CLI overrides.
+
+For the current direct-versus-proxy browser comparison:
+
+```sh
+BLINDER_PROVIDER_BROWSER=1 go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestProviderOriginBrowserControlPairs$' -v
+```
+
+Open the URL in `/private/tmp/blinder-provider-browser-url.txt` in Chrome within 180 seconds. The fixture runs seven direct cases, then their proxied counterparts: script allow/deny, a readable HTTP 500 response through CORS, denied preflight, denied ACAO, isolated provider frame and denied provider script. It records `/private/tmp/blinder-provider-browser-report.json`, comparing browser outcomes and actual provider requests through the recording SOCKS transport. A connection count alone is insufficient: the denied cases must retain their missing resource requests. Chrome passed all seven pairs (14 case observations), including the original HTTP 500 diagnostic body. The initial extension-method restoration failure is retained separately from the passing rerun.
+
+Provider HTML uses original inline script/style bytes and CSP/SRI metadata, without an injected runtime. The operator's raw challenge `srcdoc` remains opaque and has a completion bridge. The current comparison covers static URLs and these control decisions over HTTP; host-only cookie scoping is tested separately with an HTTP cookie jar. Dynamic absolute URLs, upstream SameSite/sibling-domain cookie relationships and complete human completion need separate acceptance. No certificate trust is installed by these fixtures, and this comparison does not establish provider-alias HTTPS trust or live Tor acceptance.
 
 For authenticated popup and service-worker isolation:
 
@@ -159,17 +179,15 @@ BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 150s ./internal/proxy -
 
 Open the URL in `/private/tmp/blinder-captcha-browser-url.txt`. The fixture first verifies a cookie-authenticated operator document, then opens the target page and activates its service worker. When enabled, click **Run popup isolation check**. A real popup must reach the authenticated operator endpoint; blocking the popup does not count as isolation. The test requires denied target access to operator DOM/fetch/frame content, denied operator worker registration, no operator cookie on target requests, and no operator navigation interception by the active target worker. It automatically unregisters the worker, clears the cookie on the operator origin and finishes. Results are written to `/private/tmp/blinder-captcha-browser-result.json`.
 
-For the complete synthetic operator flow:
+The earlier complete synthetic operator-flow fixture remains available for adaptation and rerunning; its prior pass predates isolated provider routes:
 
 ```sh
 BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 190s ./internal/proxy -run '^TestCaptchaFlowBrowser$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-flow-browser-url.txt`. Wait for “Provider APIs and nested frame passed” and the populated synthetic response field, then click **Submit Solution**. After the receipt, navigate to `/review-cleanup` on the operator fixture origin within 25 seconds to clear its cookie. The test asserts provider redirects, scripts, frames, POST/fetch and XHR, PUT/PATCH/DELETE/OPTIONS, PROPFIND and `vendor.sync`, including session cookies and bodies. It also verifies the original username, refreshed CSRF field and target cookies reach the resumed request. `/private/tmp/blinder-flow-browser-result.json` records the observed requests and recording-SOCKS destinations. This is a local SOCKS fixture, not a live Tor circuit.
+The historical flow uses `/private/tmp/blinder-flow-browser-url.txt` and records `/private/tmp/blinder-flow-browser-result.json`. Its acceptance requires provider redirects, scripts, frames, POST/fetch and XHR, PUT/PATCH/DELETE/OPTIONS, PROPFIND and `vendor.sync`, then operator submission and resumption with the original username, refreshed CSRF and target cookies. Update its provider assumptions and rerun the full flow before recording current completion acceptance. This is a local SOCKS fixture, not a live Tor circuit.
 
-For a standalone challenge-provider route, run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 100s ./internal/proxy -run '^TestCaptchaProviderOperatorChallengeBrowserRoute$' -v`. Open `/private/tmp/blinder-captcha-provider-browser-url.txt`, verify the synthetic widget, then navigate to `/review-cleanup` on its operator origin. The recording SOCKS fixture must observe both target and provider. `TestCaptchaBrowserRoutingIframeAndProviderRoute` uses the same environment flag, the URL file `/private/tmp/blinder-captcha-routing-browser-url.txt` and automatic cookie cleanup to check target resource routing and authenticated iframe separation.
-
-The package regressions `TestProviderRelayArbitraryMethodsOnWire`, `TestProviderRelayArbitraryPreflightMethods`, `TestProviderRelayCustomMethodRequiresSession`, and `TestProxyCustomMutationInvalidatesCachedGET` cover method fidelity and cache effects without a browser. Malformed method tokens, expired sessions, out-of-scope redirects, excessive request bodies and provider read timeouts are tested separately. Only genuine CORS preflights are handled locally; ordinary OPTIONS reaches the provider.
+`TestCaptchaProviderOperatorChallengeBrowserRoute` and `TestCaptchaBrowserRoutingIframeAndProviderRoute` also exercise the earlier operator relay fixtures. Keep their historical evidence separate from the new provider-origin comparison. Current provider requests do not require an active challenge session: browser-managed provider cookies support ordinary widgets as well as pending challenges. All OPTIONS, including CORS preflights, go upstream; Blinder translates real policy responses rather than granting preflight locally.
 
 ## Manual UAT setup
 
@@ -212,7 +230,16 @@ Blinder terminates HTTPS from the browser/scanner and presents its own certifica
 ./blinder --preflight --listen 127.0.0.1:18099
 ```
 
-Preflight exits after setup. It detects the running OS and prints the fingerprint, expiry, public certificate path, action taken, platform trust status and OS-specific advice. It also checks the primary alias, configured extra-origin aliases and, when a CAPTCHA config path is supplied, `blinder-operator.localhost` separately. Use the same alias, extra-origin, CAPTCHA and certificate-store options as the intended proxy run so these checks cover its browser hostnames. Linux detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, falling back to `/usr/lib/os-release` only if the first file is missing. It never executes the file; absent or malformed identity information produces generic Linux advice. [OS release format](https://www.freedesktop.org/software/systemd/man/latest/os-release.html).
+Preflight exits after setup. It detects the running OS and prints the fingerprint, expiry, public certificate path, action taken, platform trust status and OS-specific advice. It also checks the primary alias, configured extra-origin aliases and, when a CAPTCHA config path is supplied, `blinder-operator.localhost` separately. With `--tor`, configured provider aliases are included in certificate SANs and the endpoint checks. Provider config loads before certificate preparation. Use the same alias, extra-origin, CAPTCHA, Tor and certificate-store options as the intended proxy run so these checks cover its browser hostnames. Linux detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, falling back to `/usr/lib/os-release` only if the first file is missing. It never executes the file; absent or malformed identity information produces generic Linux advice. [OS release format](https://www.freedesktop.org/software/systemd/man/latest/os-release.html).
+
+For a Tor CAPTCHA configuration, the certificate-only check is:
+
+```sh
+./blinder --preflight --listen 127.0.0.1:18099 --tor \
+  --captcha-config captcha.yaml --cert-dir /path/to/session-certs
+```
+
+This prepares/checks the configured endpoint names without connecting to Tor or installing trust. Test browser trust for each displayed provider alias separately; generating the SANs does not establish browser acceptance.
 
 Exit 0 means platform verification passed for the displayed **listen host**; exit 2 means that host still needs platform trust setup; exit 1 means preparation failed. Alias/operator results are reported independently and do not change this exit status. Client-specific trust can succeed while preflight continues to return 2. These platform checks do not test DNS resolution or the selected browser's trust store. No upstream/Tor or listen-port test is performed by certificate-only commands. Normal proxy startup reports missing trust but continues so clients with their own certificate-file settings can connect.
 
@@ -226,7 +253,7 @@ Exit 0 means platform verification passed for the displayed **listen host**; exi
 
 Review the fingerprint, type `yes` and complete any OS approval. This installs the displayed server certificate for SSL to that host in the current user's login Keychain; it does not install a signing CA or change administrator trust. Declining leaves trust unchanged. If platform trust is already verified, installation is skipped. Run preflight in a new process after changing trust, then verify the browser/scanner separately.
 
-The macOS `--trust-cert` action installs trust for the **listen host only**, even when preflight lists several hostnames on the certificate. CAPTCHA UAT requires a verified browser connection to `blinder-operator.localhost` on the same port; multi-origin UAT requires each extra alias as well. Compare the same fingerprint and complete the selected client's trust setup for those hostnames separately. A ready result for `127.0.0.1` does not imply the operator or alias result is ready.
+The macOS `--trust-cert` action installs trust for the **listen host only**, even when preflight lists several hostnames on the certificate. CAPTCHA UAT requires verified browser connections to `blinder-operator.localhost` and, in Tor mode, each provider alias on that port; multi-origin UAT requires each extra alias as well. Compare the same fingerprint and complete the selected client's trust setup for those hostnames separately. A ready result for `127.0.0.1` does not imply the operator or alias result is ready.
 
 **Ubuntu / Debian:** use the printed `curl --cacert` command for a verified CLI request after starting Blinder. For example, replacing the path with the exported public certificate:
 
@@ -246,7 +273,7 @@ Ubuntu documents installation of root CA certificates using `/usr/local/share/ca
 
 #### Certificate reuse and renewal
 
-The default certificate directory is under the platform's user configuration directory, keyed by alias and listen host (changing only the port reuses it). To choose an explicit store, add `--cert-dir "$uat_dir/certs"` to **both** setup commands and the proxy command. A new store is created with mode 0700. `identity.pem` contains the private key plus certificate and must have mode 0600; only `certificate.pem` is intended for client import. Missing or damaged public exports are regenerated from the identity. Existing directories with broad permissions, unsafe file paths and damaged private identities are reported for operator repair; they are not silently overwritten. Restore a known valid identity or select a new private directory if recovery is needed.
+The default certificate directory is under the platform's user configuration directory, keyed by alias, listen host and additional alias names (changing only the port reuses it). Adding Tor-routed providers can select a different default store. To choose an explicit store, add `--cert-dir "$uat_dir/certs"` to **both** setup commands and the proxy command. A new store is created with mode 0700. `identity.pem` contains the private key plus certificate and must have mode 0600; only `certificate.pem` is intended for client import. Missing or damaged public exports are regenerated from the identity. Existing directories with broad permissions, unsafe file paths and damaged private identities are reported for operator repair; they are not silently overwritten. Restore a known valid identity or select a new private directory if recovery is needed.
 
 Normal proxy startup also creates `version-signing.key` (32 random bytes, mode 0600) in this private store. It survives certificate renewal and authenticates expired SRI references after restart. Back it up with the private state; corruption or unsafe permissions stop startup instead of silently rotating ownership. Removing/changing the store loses the ability to recognise previously issued references, so discard old client pages when deliberately replacing it. Ephemeral TLS still uses the default endpoint directory for this separate key.
 
@@ -254,7 +281,7 @@ Normal proxy startup also creates `version-signing.key` (32 random bytes, mode 0
 
 Persistent certificates last 90 days. Startup renews them when seven days or less remain, and reissues them if required endpoint names change. A replacement changes the fingerprint and needs new trust approval. Previous public certificates are retained as `previous-<fingerprint>.pem`; use them to identify and remove obsolete trust. On macOS, the operator can remove the old user trust setting with `security remove-trusted-cert` and the chosen previous public certificate path, then manage any remaining certificate entry in Keychain Access. Other clients use their own certificate removal interface.
 
-The operator hostname is now a required certificate SAN. Upgrading a store whose certificate lacks it reissues the certificate and changes its fingerprint. The store location and separate version-signing key remain unchanged; recheck trust for both the target-facing endpoint and operator hostname.
+The operator hostname and configured Tor-provider aliases are required certificate SANs. An explicit store whose certificate lacks required names is reissued with a new fingerprint; its separate version-signing key remains unchanged. Recheck browser trust for target, operator and provider endpoints after reissue. This provider-routing implementation does not install additional trust automatically.
 
 For UAT, record the fingerprint, expiry, endpoint, selected client and trust scope. After trusting/importing the public certificate, verify a connection with certificate verification enabled. Restart with the same store and names and confirm the fingerprint and successful connection are unchanged. Repeat the trust step after renewal/reissue. `--ephemeral-cert` opts out of persistence and generates a new 24-hour certificate per run; it cannot be combined with `--cert-dir` or `--trust-cert`. `curl --insecure` is only a per-request bypass, not evidence that trust setup succeeded.
 

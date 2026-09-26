@@ -36,6 +36,22 @@ type OperatorHandler struct {
 	sessionMu        sync.Mutex
 	resourceSessions map[string]*cookiejar.Jar
 	operatorOrigin   string
+	providerRoutes   *ProviderRoutes
+	providerHTML     func([]byte, *url.URL) []byte
+}
+
+// SetProviderRoutes configures the operator's resource references before use.
+// Control authentication remains exclusively on the operator origin.
+func (h *OperatorHandler) SetProviderRoutes(routes *ProviderRoutes, rewriteHTML func([]byte, *url.URL) []byte) {
+	h.providerRoutes, h.providerHTML = routes, rewriteHTML
+}
+
+func (h *OperatorHandler) operatorCSP() string {
+	var origins []string
+	for _, route := range h.providerRoutes.Routes() {
+		origins = append(origins, route.Local.String())
+	}
+	return h.matcher.OperatorCSP(origins...)
 }
 
 func generateOperatorToken() string {
@@ -174,7 +190,7 @@ func (h *OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'; form-action 'self'")
 	if h.routeResources {
-		w.Header().Set("Content-Security-Policy", h.matcher.OperatorCSP()+"; worker-src 'none'")
+		w.Header().Set("Content-Security-Policy", h.operatorCSP()+"; worker-src 'none'")
 	}
 	if path == "/login" {
 		// The bootstrap token is in this URL; never make it a Referer, including
@@ -296,7 +312,11 @@ func (h *OperatorHandler) showChallengeWrapper(w http.ResponseWriter, r *http.Re
 		pageBody = rewriteCaptchaScriptHost(pageBody, "host="+url.QueryEscape(base.Host))
 	}
 	if h.routeResources {
-		pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
+		if h.providerHTML != nil {
+			pageBody = h.providerHTML(pageBody, base)
+		} else {
+			pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
+		}
 	}
 	// The completion bridge is needed in both direct and Tor modes. Its network
 	// interception is disabled outside Tor mode; credentials never enter srcdoc.

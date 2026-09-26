@@ -367,7 +367,9 @@ func rewriteCSPPolicy(policy string, gate *scrub.Gate, originMapper *OriginMappe
 		scrubbed := []string{name}
 
 		for _, token := range tokens[1:] {
-			if cspNonceHashRe.MatchString(token) && strings.HasPrefix(strings.ToLower(token), "'nonce-") {
+			if mapped := originMapper.rewritePolicySource(token); mapped != token {
+				scrubbed = append(scrubbed, mapped)
+			} else if cspNonceHashRe.MatchString(token) && strings.HasPrefix(strings.ToLower(token), "'nonce-") {
 				scrubbed = append(scrubbed, token[:7]+RewriteCSPNonce(token[7:len(token)-1], gate)+"'")
 			} else if cspKeywords[strings.ToLower(token)] || cspSchemeRe.MatchString(token) || cspNonceHashRe.MatchString(token) || token == "*" {
 				scrubbed = append(scrubbed, token)

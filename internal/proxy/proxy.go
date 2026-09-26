@@ -68,6 +68,8 @@ type Server struct {
 	captchaQueue         *captcha.ChallengeQueue
 	captchaOperator      *captcha.OperatorHandler
 	captchaOperatorToken string
+	providerRoutes       *captcha.ProviderRoutes
+	providerHandler      http.Handler
 	stats                Stats
 	done                 chan struct{}
 }
@@ -76,6 +78,17 @@ func New(cfg *config.Config) (*Server, error) {
 	var extraAliases []string
 	for _, u := range cfg.ExtraOrigins {
 		extraAliases = append(extraAliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
+	}
+	if cfg.UseTor() && cfg.Captcha != nil {
+		listen := cfg.ListenAddr
+		if host, port, err := net.SplitHostPort(listen); err == nil && port == "0" {
+			listen = net.JoinHostPort(host, "443")
+		}
+		routes, err := captcha.NewProviderRoutes(captcha.NewMatcher(cfg.Captcha), "https", listen)
+		if err != nil {
+			return nil, err
+		}
+		extraAliases = append(extraAliases, routes.AliasHosts()...)
 	}
 	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
 	if err != nil {
@@ -268,6 +281,9 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		captchaOperatorToken: operatorToken,
 		done:                 make(chan struct{}),
 	}
+	if err := s.configureProviderRoutes("https"); err != nil {
+		return nil, err
+	}
 
 	if harWriter != nil && cfg.HAR != nil {
 		go s.periodicHARFlush()
@@ -308,6 +324,9 @@ func (s *Server) ListenAndServeOnListener(ln net.Listener) error {
 		s.cfg.ListenAddr = ln.Addr().String()
 		s.server.Addr = s.cfg.ListenAddr
 		if err := s.captchaOperator.SetOperatorOrigin(operatorOrigin(s.cfg.ListenAddr)); err != nil {
+			return err
+		}
+		if err := s.configureProviderRoutes("https"); err != nil {
 			return err
 		}
 	}
@@ -1002,6 +1021,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		BaseRequest:     r,
 		RegisterVersion: s.versionRefs.Register,
 		ResourceURL: func(raw string, base *url.URL) (string, bool) {
+			if s.providerRoutes != nil {
+				if mapped, ok := s.providerRoutes.RewriteURL(raw, base); ok {
+					return mapped, true
+				}
+			}
 			return s.captchaMatcher.RewriteResourceURL(raw, base, s.cfg.UseTor())
 		},
 	})

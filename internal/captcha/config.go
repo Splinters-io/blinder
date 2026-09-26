@@ -119,19 +119,24 @@ func compileProvider(p Provider) (Provider, error) {
 
 	result := Provider{
 		Name:            p.Name,
-		ResourceOrigins: make([]string, len(p.ResourceOrigins)),
+		ResourceOrigins: make([]string, 0, len(p.ResourceOrigins)),
 		OpaqueFields:    make([]string, len(p.OpaqueFields)),
 		CSP:             make([]CSPRule, len(p.CSP)),
 		TorPolicy:       torPolicy,
 	}
-	copy(result.ResourceOrigins, p.ResourceOrigins)
 	copy(result.OpaqueFields, p.OpaqueFields)
 	copy(result.CSP, p.CSP)
 
-	for _, origin := range result.ResourceOrigins {
-		u, err := url.Parse(origin)
-		if err != nil || u.Host == "" {
-			return Provider{}, fmt.Errorf("invalid resource origin %q", origin)
+	seenOrigins := make(map[string]bool)
+	for _, origin := range p.ResourceOrigins {
+		u, err := parseResourceOrigin(origin)
+		if err != nil {
+			return Provider{}, err
+		}
+		canonical := u.String()
+		if !seenOrigins[canonical] {
+			result.ResourceOrigins = append(result.ResourceOrigins, canonical)
+			seenOrigins[canonical] = true
 		}
 	}
 
@@ -260,13 +265,9 @@ func (m *Matcher) IsProviderResource(u *url.URL) bool {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	if !strings.EqualFold(a.Scheme, b.Scheme) {
-		return false
-	}
-	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
-		return false
-	}
-	return effectivePort(a) == effectivePort(b)
+	aa, aOK := resourceURLOrigin(a)
+	bb, bOK := resourceURLOrigin(b)
+	return aOK && bOK && aa == bb
 }
 
 func effectivePort(u *url.URL) string {

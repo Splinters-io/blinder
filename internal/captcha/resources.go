@@ -101,8 +101,11 @@ func (m *Matcher) RewriteProviderHTML(body []byte, base *url.URL, sessions ...st
 // dynamic network references must be blocked rather than silently sent directly.
 // Explicit direct providers remain permitted. This is containment, not a claim
 // that every provider's dynamically assembled URLs are already compatible.
-func (m *Matcher) OperatorCSP() string {
+func (m *Matcher) OperatorCSP(providerOrigins ...string) string {
 	sources := "'self'"
+	for _, origin := range providerOrigins {
+		sources += " " + origin
+	}
 	for _, p := range m.providers {
 		if p.TorPolicy != TorPolicyDirect {
 			continue

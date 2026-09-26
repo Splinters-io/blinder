@@ -3,15 +3,23 @@
 const endpoint = new URL(cfg.endpoint);
 const base = new URL(cfg.base);
 const origins = new Set((cfg.origins || []).map(value => new URL(value).origin));
+const aliases = new Map(Object.entries(cfg.aliases || {}));
+const originals = new Map([...aliases].map(([upstream,local])=>[local,upstream]));
 function route(value) {
   if (typeof value !== 'string' || !value || value[0] === '#') return value;
   let target;
   try { target = new URL(value, base); } catch { return value; }
+  if (originals.has(target.origin)) return value;
   if (target.origin === endpoint.origin && target.pathname === endpoint.pathname) return value;
   // Request objects and DOM URL properties may already have resolved against
   // the local document. Recover the original provider base for those references.
   if (target.origin === endpoint.origin && origins.has(base.origin)) {
     target = new URL(target.pathname + target.search + target.hash, base);
+  }
+  if (aliases.has(target.origin)) {
+    const local = new URL(aliases.get(target.origin));
+    target.protocol = local.protocol; target.host = local.host; target.port = local.port;
+    return target.href;
   }
   if (!origins.has(target.origin)) return value;
   const fragment = target.hash;
@@ -25,6 +33,11 @@ function route(value) {
 function original(value) {
   try {
     const u = new URL(value, endpoint);
+    if (originals.has(u.origin)) {
+      const upstream = new URL(originals.get(u.origin));
+      u.protocol = upstream.protocol; u.host = upstream.host; u.port = upstream.port;
+      return u.href;
+    }
     if (u.origin === endpoint.origin && u.pathname === endpoint.pathname && u.searchParams.has('u')) {
       return u.searchParams.get('u') + u.hash;
     }
@@ -38,7 +51,8 @@ window.fetch = function(input, init) {
   if (mapped === raw) return nativeFetch(input, init);
   const request = new Request(input instanceof Request ? input : new URL(raw, base), init);
   const options = {method:request.method, headers:request.headers, signal:request.signal,
-    credentials:'omit', mode:'cors', redirect:request.redirect, cache:'no-store', referrerPolicy:'no-referrer'};
+    credentials:request.credentials, mode:request.mode, redirect:request.redirect,
+    cache:request.cache, referrerPolicy:request.referrerPolicy, integrity:request.integrity};
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return request.arrayBuffer().then(body => {
       if (body.byteLength > 2 * 1024 * 1024) throw new TypeError('Provider request exceeds 2 MiB');

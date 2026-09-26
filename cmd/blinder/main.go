@@ -198,6 +198,13 @@ func run() int {
 		cfg.HAR.MaxEntries = fileConfig.HAR.MaxEntries
 		cfg.HAR.CaptureBudget = fileConfig.HAR.CaptureBudget
 	}
+	// Provider aliases belong in the same certificate/preflight plan as target
+	// aliases. Load the provider file before any certificate is prepared or trusted.
+	cfg.CaptchaConfigPath = captchaConf
+	if err := cfg.LoadCaptchaConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
 
 	// Report an unusable endpoint before certificate generation or platform trust
 	// checks. Certificate-only commands do not reserve a listening socket.
@@ -214,9 +221,10 @@ func run() int {
 		}
 	}
 
-	var extraAliases []string
-	for _, u := range cfg.ExtraOrigins {
-		extraAliases = append(extraAliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
+	extraAliases, err := certificateExtraAliases(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
 	}
 
 	if !ephemeral && cfg.CertDir == "" {
@@ -258,12 +266,6 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "version key setup failed: %v\n", err)
 			return 1
 		}
-	}
-
-	cfg.CaptchaConfigPath = captchaConf
-	if err := cfg.LoadCaptchaConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
 	}
 
 	printBanner(cfg)
@@ -348,6 +350,30 @@ running:
 	fmt.Printf("  Aliases:   %d\n", len(aliases))
 	fmt.Println()
 	return exitCode
+}
+
+// certificateExtraAliases is used once for default-store selection, certificate
+// preparation, endpoint advice and version-key storage. Provider aliases are
+// separate from target ExtraOrigins and are needed only when Tor routes them.
+func certificateExtraAliases(cfg *config.Config) ([]string, error) {
+	var aliases []string
+	for _, u := range cfg.ExtraOrigins {
+		aliases = append(aliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
+	}
+	if cfg.UseTor() && cfg.Captcha != nil && cfg.Captcha.Matcher != nil {
+		listen := cfg.ListenAddr
+		if host, port, err := net.SplitHostPort(listen); err == nil && port == "0" {
+			// Certificate-only commands do not reserve a port. Alias hostnames
+			// depend on upstream origins, so their SANs remain the same after bind.
+			listen = net.JoinHostPort(host, "443")
+		}
+		routes, err := captcha.NewProviderRoutes(cfg.Captcha.Matcher, "https", listen)
+		if err != nil {
+			return nil, err
+		}
+		aliases = append(aliases, routes.AliasHosts()...)
+	}
+	return aliases, nil
 }
 
 func printBanner(cfg *config.Config) {

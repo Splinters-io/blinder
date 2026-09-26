@@ -41,6 +41,9 @@ captcha:
 				return audit267SRIResponse("text/html", `<script src="`+tc.attribute+`"></script>`), nil
 			})
 			s.cfg.Tor = &config.TorConfig{SOCKSAddr: "127.0.0.1:1"}
+			if err := s.configureProviderRoutes("https"); err != nil {
+				t.Fatal(err)
+			}
 			got := audit267CacheRequest(s, "GET", "/page", nil)
 			z := html.NewTokenizer(strings.NewReader(got.Body.String()))
 			var source string
@@ -55,12 +58,13 @@ captcha:
 				}
 			}
 			u, err := url.Parse(source)
-			if err != nil || u.Path != "/__blinder/captcha/res" {
+			if err != nil || !s.providerRoutes.IsAliasHost(u.Host) || u.Path == "/__blinder/captcha/res" {
 				t.Fatalf("expected rewritten fixture: src=%q err=%v", source, err)
 			}
-			handler, _ := captcha.NewOperatorHandler(s.captchaQueue, s.captchaMatcher, s.transport)
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest("GET", source, nil))
+			request := httptest.NewRequest("GET", source, nil)
+			request.RemoteAddr = "127.0.0.1:23456"
+			s.ServeHTTP(response, request)
 			if response.Code != 200 || forwarded != tc.want {
 				t.Fatalf("provider relay altered URL semantics: got=%q want=%q status=%d", forwarded, tc.want, response.Code)
 			}
