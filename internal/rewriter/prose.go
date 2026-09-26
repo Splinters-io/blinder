@@ -43,7 +43,62 @@ func proseForBudget(n int, contentTag string, gate *scrub.Gate) string {
 		text, _ := gate.ShortTextAlias(contentTag, n)
 		return text
 	}
-	return proseForLength(n, contentTag)
+	text := proseForLength(n, contentTag)
+	if gate.ResidualLeakCount(text) == 0 {
+		return text
+	}
+	// Filler is newly generated content, so a configured identity must not be
+	// introduced merely because it happens to be part of the vocabulary. Keep
+	// unaffected output stable and check whole candidates: individually safe
+	// words can still form an identity across their separating space.
+	words := make([]string, 0, len(proseWords))
+	for _, word := range proseWords {
+		if gate.ResidualLeakCount(word) == 0 {
+			words = append(words, word)
+		}
+	}
+	if len(words) > 0 {
+		for attempt := byte(0); attempt < 4; attempt++ {
+			candidate := proseForVocabulary(n, contentTag+"\x00filtered/"+string([]byte{attempt}), words)
+			if gate.ResidualLeakCount(candidate) == 0 {
+				return candidate
+			}
+		}
+	}
+	// A source-dependent fallback retains change signals when the vocabulary
+	// is unavailable. Filter forbidden single characters first, then check the
+	// complete candidate for longer identities. The finite search cannot give
+	// a universal uniqueness or availability guarantee; exhausting it retains
+	// the byte budget as spaces, as for exhausted short text.
+	var alphabet, digits []byte
+	for _, letter := range []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") {
+		if gate.ResidualLeakCount(string(letter)) == 0 {
+			alphabet = append(alphabet, letter)
+			if letter >= '0' && letter <= '9' {
+				digits = append(digits, letter)
+			}
+		}
+	}
+	if len(alphabet) > 0 {
+		for attempt := byte(0); attempt < 8; attempt++ {
+			letters := alphabet
+			// Long random letter streams can repeatedly reproduce excluded
+			// corpus words. Digits provide a second bounded alphabet while
+			// still retaining source-dependent output and complete checking.
+			if attempt >= 4 && len(digits) > 0 {
+				letters = digits
+			}
+			stream := proseStream{seed: sha256.Sum256([]byte("blinder/prose/fallback/v1\x00" + contentTag + string([]byte{attempt})))}
+			candidate := make([]byte, n)
+			for i := range candidate {
+				candidate[i] = letters[int(stream.next())%len(letters)]
+			}
+			if gate.ResidualLeakCount(string(candidate)) == 0 {
+				return string(candidate)
+			}
+		}
+	}
+	return strings.Repeat(" ", n)
 }
 
 func proseContentBounds(raw string) (int, int) {
@@ -53,12 +108,16 @@ func proseContentBounds(raw string) (int, int) {
 }
 
 func proseForLength(n int, contentTag string) string {
+	return proseForVocabulary(n, contentTag, proseWords)
+}
+
+func proseForVocabulary(n int, contentTag string, words []string) string {
 	var out strings.Builder
 	out.Grow(n)
 	stream := proseStream{seed: sha256.Sum256([]byte("blinder/prose/v1\x00" + contentTag))}
 	remaining := n
 	for remaining > 0 {
-		word := proseWords[int(stream.next())%len(proseWords)]
+		word := words[int(stream.next())%len(words)]
 		if len(word) > remaining {
 			if out.Len() == 0 {
 				// A short label must remain visible. Its fixed-size alphabet

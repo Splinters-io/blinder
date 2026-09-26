@@ -6,8 +6,118 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/Splinters-io/blinder/internal/scrub"
 	"golang.org/x/net/html"
 )
+
+func TestProseFillerDoesNotReintroduceConfiguredIdentities(t *testing.T) {
+	const size = 256
+	const tag = "configured-filler-identity"
+	before := proseForLength(size, tag)
+	words := strings.Fields(before)
+	for _, tc := range []struct {
+		name    string
+		domains []string
+		tokens  []string
+	}{
+		{name: "corpus word", tokens: []string{words[0]}},
+		{name: "case folded word", tokens: []string{strings.ToUpper(words[0])}},
+		{name: "multiword identity", tokens: []string{words[0] + " " + words[1]}},
+		{name: "domain match", domains: []string{words[0]}},
+		{name: "entire corpus excluded", tokens: append([]string(nil), proseWords...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := scrub.NewGate(tc.domains, tc.tokens, "alias.local")
+			if gate.ResidualLeakCount(before) == 0 {
+				t.Fatal("fixture does not reproduce a filler collision")
+			}
+			got := proseForBudget(size, tag, gate)
+			if len(got) != size || !utf8.ValidString(got) || strings.TrimSpace(got) == "" {
+				t.Fatalf("filler lost its visible byte budget: %q", got)
+			}
+			if got == before || gate.ResidualLeakCount(got) != 0 {
+				t.Fatalf("generated filler reintroduced a configured identity: %q", got)
+			}
+			if again := proseForBudget(size, tag, gate.ForRequest()); again != got {
+				t.Fatalf("request-local gate remapped filler: %q -> %q", got, again)
+			}
+		})
+	}
+}
+
+func TestProseFillerChecksWordBoundariesAndBoundsFallback(t *testing.T) {
+	// Every pair is excluded while every individual word remains available.
+	// Filtering the vocabulary alone cannot satisfy this configuration.
+	var tokens []string
+	for _, first := range proseWords {
+		for _, second := range proseWords {
+			tokens = append(tokens, first+" "+second)
+		}
+	}
+	gate := scrub.NewGate(nil, tokens, "alias.local")
+	const size = 128
+	got := proseForBudget(size, "all-word-pairs", gate)
+	if len(got) != size || gate.ResidualLeakCount(got) != 0 || strings.TrimSpace(got) == "" {
+		t.Fatalf("word-boundary collision was emitted: %q", got)
+	}
+	if again := proseForBudget(size, "all-word-pairs", gate); again != got {
+		t.Fatal("bounded fallback changed on repetition")
+	}
+
+	// Exhausting the finite visible fallbacks keeps the source size as spaces,
+	// without looping, inserting labels, or introducing an excluded character.
+	tokens = append([]string(nil), proseWords...)
+	for _, fill := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" {
+		tokens = append(tokens, string(fill))
+	}
+	gate = scrub.NewGate(nil, tokens, "alias.local")
+	got = proseForBudget(size, "exhausted-fillers", gate)
+	if got != strings.Repeat(" ", size) || gate.ResidualLeakCount(got) != 0 {
+		t.Fatalf("exhausted filler did not retain safe whitespace: %q", got)
+	}
+}
+
+func TestProseFillerFallbackRetainsSourceDifferences(t *testing.T) {
+	gate := scrub.NewGate(nil, append([]string(nil), proseWords...), "alias.local")
+	seen := make(map[string]string)
+	const size = 128
+	for i := range 32 {
+		tag := gate.ContentTag([]byte(fmt.Sprintf("different ordinary source %d", i)))
+		got := proseForBudget(size, tag, gate)
+		if len(got) != size || !utf8.ValidString(got) || strings.TrimSpace(got) == "" || gate.ResidualLeakCount(got) != 0 {
+			t.Fatalf("fallback lost its safe visible byte budget: %q", got)
+		}
+		if previous, exists := seen[got]; exists {
+			t.Fatalf("fallback collapsed distinct source tags %q and %q", previous, tag)
+		}
+		seen[got] = tag
+		if again := proseForBudget(size, tag, gate.ForRequest()); again != got {
+			t.Fatal("fallback changed across request gates")
+		}
+	}
+}
+
+func TestProseFillerCollisionGuardPreservesUnchangedOutputAndFitting(t *testing.T) {
+	const tag = "unchanged-filler"
+	const size = 256
+	gate := newTestGate()
+	if got := proseForBudget(size, tag, gate); got != proseForLength(size, tag) {
+		t.Fatal("identity-free filler changed")
+	}
+	gate = scrub.NewGate(nil, append([]string(nil), proseWords...), "alias.local")
+	text := proseForBudget(size, tag, gate)
+	body := []byte("<p>\t" + text + "\n</p>")
+	spans := []proseSpan{{start: 4, end: 4 + size, contentTag: tag}}
+	for _, target := range []int{128, 384} {
+		got := fitProseToBodyLength(body, spans, target, gate)
+		if len(got) != target || !strings.HasPrefix(string(got), "<p>\t") || !strings.HasSuffix(string(got), "\n</p>") {
+			t.Fatalf("fitted filler lost source boundaries or size: %q", got)
+		}
+		if gate.ResidualLeakCount(string(got)) != 0 {
+			t.Fatalf("fitting reintroduced excluded filler: %q", got)
+		}
+	}
+}
 
 func TestProsePreservesHTMLTextByteBudget(t *testing.T) {
 	for _, text := range []string{

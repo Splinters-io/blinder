@@ -26,6 +26,8 @@ Blinder removes that decision. To the downstream AI, the target looks like a loc
 
 This is content-blind scanning: the operator controls who the target is; the AI focuses on what it does.
 
+Replacement content is part of correctness: neutral filler for display, reversible values for application data, and preserved diagnostics and control behavior. Generated removal notices do not belong in pages. The [content contract](docs/content-contract.md) records the implementation and acceptance requirements.
+
 ```text
  AI scanner / browser ── HTTPS ── Blinder ── direct or Tor ── Target
                                     │
