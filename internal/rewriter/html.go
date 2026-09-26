@@ -41,7 +41,7 @@ type sriDecision struct {
 	resolvedURL     string
 }
 
-func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMapper, sr *sriRewriter) []byte {
+func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, origins *OriginMapper, sr *sriRewriter) []byte {
 	z := html.NewTokenizer(bytes.NewReader(body))
 	var out bytes.Buffer
 	out.Grow(len(body))
@@ -92,7 +92,13 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 			case "style":
 				out.Write(rewriteCSS(raw, gate, "html:style"))
 			case "title":
-				// Discarded; replacement emitted in the EndTagToken handler.
+				// An error response may carry its only diagnostic in the title.
+				// Apply identity masking there just as in the rest of its body.
+				if !preserveTitle {
+					// Ordinary page titles are replaced at their end tag.
+					break
+				}
+				fallthrough
 			default:
 				text := string(z.Text())
 				if paranoid && !inDiagnosticElement(diagnosticElements) {
@@ -171,7 +177,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 			}
 
 			if tagName == rawTextTag {
-				if tagName == "title" && !suppressElement {
+				if tagName == "title" && !suppressElement && !preserveTitle {
 					out.WriteString("Transformed view")
 				}
 				rawTextTag = ""

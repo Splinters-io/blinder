@@ -40,6 +40,7 @@ func Handler() http.Handler {
 <input name="password" type="password" value="fixture-only"><button>Log in</button></form>
 <p><a href="/form">Origin-checked form</a> · <a href="/api">JSON</a> ·
 <a href="/gzip">Gzip JSON</a> · <a href="/unsupported" title="Negative test: malformed encoding; expect HTTP 502">Unsupported encoding</a> ·
+<a href="/error" title="Upstream error test: expect HTTP 500 with a preserved SQLSTATE diagnostic">Upstream error</a> ·
 <a href="/document.pdf" title="Binary replacement test: expect a transparent GIF">Document placeholder</a> · <a href="/absolute-redirect">Absolute redirect</a></p>
 <p id="live">WebSocket connecting…</p><p id="socket-state" role="status"></p><script>`)
 		fmt.Fprint(w, websocketClient)
@@ -103,6 +104,12 @@ func Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Encoding", "br")
 		fmt.Fprint(w, "AcmeCorp opaque bytes")
+	})
+	mux.HandleFunc("/error", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Application-Error", "AcmeCorp: E_QUERY")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `<!doctype html><title>AcmeCorp: SQLSTATE[42000] syntax error</title><h1>Synthetic query failure</h1><pre>AcmeCorp: SQLSTATE[42000]: syntax error near &#39; at line 1</pre><a href="/">Return to fixture</a>`)
 	})
 	mux.HandleFunc("/absolute-redirect", func(w http.ResponseWriter, r *http.Request) {
 		scheme := "http"

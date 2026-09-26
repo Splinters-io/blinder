@@ -48,7 +48,7 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 				resourceURL:     opt.ResourceURL,
 			}
 		}
-		return BodyResult{Body: rewriteHTML(body, gate, paranoid && opt.StatusCode < 400, opt.Origins, sr), Metadata: meta}
+		return BodyResult{Body: rewriteHTML(body, gate, paranoid && opt.StatusCode < 400, opt.StatusCode >= 400, opt.Origins, sr), Metadata: meta}
 	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
 		return BodyResult{Body: scrubJSON(body, gate, "body:json:"+path)}
 	case strings.HasPrefix(ct, "text/javascript") || ct == "application/javascript":
