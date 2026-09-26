@@ -9,9 +9,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"testing"
 	"time"
 )
+
+func TestWebSocketFixtureNavigationLifecycle(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for fixture browser-lifecycle checks")
+	}
+	if output, err := exec.Command(node, "websocket_test.js").CombinedOutput(); err != nil {
+		t.Fatalf("browser lifecycle: %v\n%s", err, output)
+	}
+}
 
 func TestWebSocketFixtureKeepsManualSessionActive(t *testing.T) {
 	done := make(chan struct{})

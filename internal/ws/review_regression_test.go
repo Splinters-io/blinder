@@ -21,7 +21,7 @@ func reviewRelay(t *testing.T, input []byte, serverToClient bool) []byte {
 	go func() {
 		defer close(done)
 		defer dst.Close()
-		p.relayFrames(bufio.NewReader(bytes.NewReader(input)), dst, serverToClient)
+		p.relayFrames(bufio.NewReader(bytes.NewReader(input)), dst, serverToClient, nil)
 	}()
 	got, err := io.ReadAll(reader)
 	if err != nil {
@@ -60,5 +60,5 @@ func TestReviewHugeFrameIsRejectedBeforeAllocation(t *testing.T) {
 		}
 	}()
 	frame := []byte{0x81, 0x7f, 0x80, 0, 0, 0, 0, 0, 0, 0}
-	p.relayFrames(bufio.NewReader(strings.NewReader(string(frame))), dst, true)
+	p.relayFrames(bufio.NewReader(strings.NewReader(string(frame))), dst, true, nil)
 }

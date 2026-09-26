@@ -33,7 +33,8 @@ const (
 	finBit  = 0x80
 	maskBit = 0x80
 
-	maxFrameSize = 16 * 1024 * 1024
+	maxFrameSize          = 16 * 1024 * 1024
+	closeHandshakeTimeout = 5 * time.Second
 )
 
 var (
@@ -289,16 +290,66 @@ func (p *Proxy) relay(clientConn net.Conn, clientBuf *bufio.ReadWriter, upstream
 	activity.touch()
 	var wg sync.WaitGroup
 	wg.Add(2)
+	closing := &relayClose{begun: make(chan struct{})}
+	results := make(chan bool, 2)
 	run := func(src io.Reader, dst net.Conn, serverToClient bool) {
 		defer wg.Done()
-		defer clientConn.Close()
-		defer upstreamConn.Close()
 		reader := bufio.NewReader(&idleReader{src, activity})
-		p.relayFrames(reader, dst, serverToClient)
+		results <- p.relayFrames(reader, dst, serverToClient, closing)
 	}
 	go run(upstreamBuf, clientConn, true)
 	go run(clientBuf.Reader, upstreamConn, false)
-	wg.Wait()
+	defer func() {
+		clientConn.Close()
+		upstreamConn.Close()
+		wg.Wait()
+	}()
+	started := closing.begun
+	var deadline <-chan time.Time
+	for completed := 0; completed < 2; {
+		select {
+		case <-started:
+			// Activity cannot extend the Close handshake. Bound even a blocked
+			// Close write, and never wait longer than the configured idle limit.
+			timeout := closeHandshakeTimeout
+			if p.idleTimeout < timeout {
+				timeout = p.idleTimeout
+			}
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			deadline = timer.C
+			started = nil
+		case clean := <-results:
+			if !clean {
+				return
+			}
+			completed++
+		case <-deadline:
+			return
+		}
+	}
+}
+
+type relayClose struct {
+	once  sync.Once
+	begun chan struct{}
+}
+
+func (c *relayClose) begin() {
+	if c != nil {
+		c.once.Do(func() { close(c.begun) })
+	}
+}
+
+func (c *relayClose) started() bool {
+	if c != nil {
+		select {
+		case <-c.begun:
+			return true
+		default:
+		}
+	}
+	return false
 }
 
 type idleReader struct {

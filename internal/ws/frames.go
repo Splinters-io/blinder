@@ -88,17 +88,22 @@ func validClosePayload(payload []byte) bool {
 	return code >= 3000 && code <= 4999 || code >= 1000 && code <= 1014 && code != 1004 && code != 1005 && code != 1006
 }
 
-func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool) {
+// relayFrames reports true only after forwarding a valid Close frame. EOF,
+// invalid framing and write errors require immediate transport teardown.
+func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool, closing *relayClose) bool {
 	var text []byte
 	var fragmentedOpcode byte
 	for {
 		first, payload, ok := readFrame(src, serverToClient)
 		if !ok {
-			return
+			return false
 		}
 		fin := first&finBit != 0
 		opcode := first & 0xf
 		if opcode >= 8 {
+			if opcode == opcodeClose {
+				closing.begin()
+			}
 			if serverToClient && len(payload) > 0 {
 				switch opcode {
 				case opcodeClose:
@@ -119,23 +124,23 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool
 				}
 			}
 			if err := p.sendFrame(dst, first, payload, !serverToClient); err != nil {
-				return
+				return false
 			}
 			if opcode == opcodeClose {
-				return
+				return true
 			}
 			continue
 		}
 		messageOpcode := opcode
 		if opcode == 0 {
 			if fragmentedOpcode == 0 {
-				return
+				return false
 			}
 			messageOpcode = fragmentedOpcode
 		} else {
 			// A fragmented message cannot be interrupted by another data message.
 			if fragmentedOpcode != 0 {
-				return
+				return false
 			}
 			if !fin {
 				fragmentedOpcode = opcode
@@ -143,28 +148,36 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool
 		}
 		if messageOpcode == opcodeText {
 			if len(text)+len(payload) > maxFrameSize {
-				return
+				return false
 			}
 			text = append(text, payload...)
 			if fin {
 				if !utf8.Valid(text) {
-					return
+					return false
 				}
-				if serverToClient {
-					text = p.gate.ScrubBytes(text, "ws:text")
-				} else {
-					text = []byte(p.dealiasText(string(text)))
-				}
-				if len(text) > maxFrameSize {
-					return
-				}
-				if err := p.sendFrame(dst, finBit|opcodeText, text, !serverToClient); err != nil {
-					return
+				// Validate in-flight data while closing, but do not deliver any
+				// new application messages while awaiting the Close response.
+				if !closing.started() {
+					if serverToClient {
+						text = p.gate.ScrubBytes(text, "ws:text")
+					} else {
+						text = []byte(p.dealiasText(string(text)))
+					}
+					if len(text) > maxFrameSize {
+						return false
+					}
+					if !closing.started() {
+						if err := p.sendFrame(dst, finBit|opcodeText, text, !serverToClient); err != nil {
+							return false
+						}
+					}
 				}
 				text = nil
 			}
-		} else if err := p.sendFrame(dst, first, payload, !serverToClient); err != nil {
-			return
+		} else if !closing.started() {
+			if err := p.sendFrame(dst, first, payload, !serverToClient); err != nil {
+				return false
+			}
 		}
 		if fin {
 			fragmentedOpcode = 0

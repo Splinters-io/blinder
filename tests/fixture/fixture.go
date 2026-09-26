@@ -5,16 +5,22 @@ package fixture
 import (
 	"compress/gzip"
 	"crypto/sha1"
+	_ "embed"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 const SessionName = "AcmeCorp_session"
+
+//go:embed websocket.js
+var websocketClient string
 
 func Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -35,12 +41,9 @@ func Handler() http.Handler {
 <p><a href="/form">Origin-checked form</a> · <a href="/api">JSON</a> ·
 <a href="/gzip">Gzip JSON</a> · <a href="/unsupported" title="Negative test: malformed encoding; expect HTTP 502">Unsupported encoding</a> ·
 <a href="/document.pdf" title="Binary replacement test: expect a transparent GIF">Document placeholder</a> · <a href="/absolute-redirect">Absolute redirect</a></p>
-<p id="live">WebSocket connecting…</p><script>
-const socket = new WebSocket('wss://' + location.host + '/ws');
-socket.onmessage = event => { document.getElementById('live').textContent = event.data; };
-socket.onerror = () => { document.getElementById('live').textContent = 'WebSocket failed'; };
-socket.onclose = event => { document.getElementById('live').textContent = 'WebSocket closed (code ' + event.code + ')'; };
-</script>`)
+<p id="live">WebSocket connecting…</p><p id="socket-state" role="status"></p><script>`)
+		fmt.Fprint(w, websocketClient)
+		fmt.Fprint(w, `</script>`)
 	})
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.ParseForm() != nil || r.Form.Get("username") != "tester" || r.Form.Get("password") != "fixture-only" {
@@ -147,23 +150,112 @@ func websocketWithHeartbeat(w http.ResponseWriter, r *http.Request, interval tim
 	if rw.Flush() != nil {
 		return
 	}
-	done := make(chan struct{})
+	// Heartbeats and control replies share a writer so a Close acknowledgement
+	// is the final frame even when a heartbeat becomes ready at the same time.
+	var writeMu sync.Mutex
+	closing := false
+	writeControl := func(opcode byte, payload []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if closing {
+			return io.ErrClosedPipe
+		}
+		closing = opcode == 8
+		if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			return err
+		}
+		frame := append([]byte{0x80 | opcode, byte(len(payload))}, payload...)
+		_, err := conn.Write(frame)
+		return err
+	}
+	stop, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
-		io.Copy(io.Discard, rw)
-		close(done)
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if writeControl(9, nil) != nil {
+					conn.Close() // Unblock the reader after a failed heartbeat.
+					return
+				}
+			}
+		}
 	}()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	defer func() {
+		close(stop)
+		conn.Close()
+		<-stopped
+	}()
 	for {
-		select {
-		case <-done:
+		// A stalled or truncated client frame cannot keep this fixture alive
+		// indefinitely. Browsers answer the heartbeat before this deadline.
+		conn.SetReadDeadline(time.Now().Add(2*interval + 5*time.Second))
+		opcode, payload, err := readFixtureFrame(rw.Reader)
+		if err != nil {
 			return
-		case <-ticker.C:
-			// Empty, unmasked server ping. Browsers reply with a masked pong;
-			// this fixture does not interpret application messages from clients.
-			if _, err := conn.Write([]byte{0x89, 0x00}); err != nil {
+		}
+		switch opcode {
+		case 8:
+			if len(payload) != 1 {
+				writeControl(8, payload)
+			}
+			return
+		case 9:
+			if writeControl(10, payload) != nil {
 				return
 			}
 		}
 	}
+}
+
+// readFixtureFrame only handles the small client frames needed by this fixture.
+// Application messages are discarded with bounded reads; this is not a general
+// WebSocket implementation and deliberately has no dependency on proxy code.
+func readFixtureFrame(r io.Reader) (byte, []byte, error) {
+	var header [2]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return 0, nil, err
+	}
+	opcode := header[0] & 15
+	control := opcode >= 8
+	if header[0]&0x70 != 0 || header[1]&0x80 == 0 ||
+		(opcode != 0 && opcode != 1 && opcode != 2 && opcode != 8 && opcode != 9 && opcode != 10) ||
+		(control && (header[0]&0x80 == 0 || header[1]&0x7f > 125)) {
+		return 0, nil, fmt.Errorf("invalid fixture WebSocket frame")
+	}
+	length := uint64(header[1] & 0x7f)
+	switch length {
+	case 126:
+		var extended [2]byte
+		if _, err := io.ReadFull(r, extended[:]); err != nil {
+			return 0, nil, err
+		}
+		length = uint64(binary.BigEndian.Uint16(extended[:]))
+		if length < 126 {
+			return 0, nil, fmt.Errorf("nonminimal fixture WebSocket length")
+		}
+	case 127:
+		// The fixture accepts at most 65535 bytes per application frame.
+		return 0, nil, fmt.Errorf("fixture WebSocket frame too large")
+	}
+	var mask [4]byte
+	if _, err := io.ReadFull(r, mask[:]); err != nil {
+		return 0, nil, err
+	}
+	if !control {
+		_, err := io.CopyN(io.Discard, r, int64(length))
+		return opcode, nil, err
+	}
+	payload := make([]byte, int(length))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return 0, nil, err
+	}
+	for i := range payload {
+		payload[i] ^= mask[i%4]
+	}
+	return opcode, payload, nil
 }
