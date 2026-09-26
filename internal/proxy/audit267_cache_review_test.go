@@ -216,14 +216,17 @@ func TestAudit267CachePreservesSRIReferenceAcrossEviction(t *testing.T) {
 	})
 	first := audit267CacheRequest(s, "GET", "/page", nil)
 	hash := audit267SRIAttribute(first.Body.String(), "integrity")
-	base := httptest.NewRequest("GET", "https://main.example/page", nil)
+	base := httptest.NewRequest("GET", "https://127.0.0.1:18099/page", nil)
+	if _, ok := s.sriCache.Get(sri.CacheKeyForAuthority("https://main.example/asset.js", base, base.Host)); !ok {
+		t.Fatal("fixture never cached original SRI resource")
+	}
 	for i := 0; i < 256; i++ {
 		result := s.sriPipeline.Process(fmt.Sprintf("https://main.example/filler-%d.js", i), sri.ComputeIntegrity([]byte(assetFor(1)), "sha384"), "application/javascript", "", s.cfg.TargetURL, base)
 		if result == nil || !result.UpstreamValid {
 			t.Fatalf("filler prefetch failed: %+v", result)
 		}
 	}
-	if _, ok := s.sriCache.Get(sri.CacheKey("https://main.example/asset.js", base)); ok {
+	if _, ok := s.sriCache.Get(sri.CacheKeyForAuthority("https://main.example/asset.js", base, base.Host)); ok {
 		t.Fatal("fixture failed to evict original SRI resource")
 	}
 	version = 2

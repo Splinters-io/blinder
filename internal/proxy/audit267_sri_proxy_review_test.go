@@ -148,7 +148,7 @@ func audit267SRIServer(t *testing.T, fn audit267SRITransport, keyDir ...string) 
 		t.Fatal(err)
 	}
 	s.transport = fn
-	s.sriPipeline = sri.NewPipeline(sri.PipelineConfig{
+	s.sriPipeline = sri.NewPipeline(scopeSRIRepresentation(sri.PipelineConfig{
 		Transport: fn,
 		Cache:     s.sriCache,
 		ScrubFn: func(body []byte, contentType, path string) []byte {
@@ -165,7 +165,7 @@ func audit267SRIServer(t *testing.T, fn audit267SRITransport, keyDir ...string) 
 				s.harWriter.Record(rec.Request, nil, &http.Response{StatusCode: rec.Status, Status: fmt.Sprintf("%d %s", rec.Status, http.StatusText(rec.Status)), Header: rec.Headers, Proto: "HTTP/1.1"}, rec.Body, rec.Elapsed)
 			}
 		},
-	})
+	}, s.origins, s.gate, s.cfg.Paranoid))
 	return s
 }
 

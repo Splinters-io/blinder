@@ -230,7 +230,7 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		}
 	}
 
-	sriPipeline := sri.NewPipeline(sriCfg)
+	sriPipeline := sri.NewPipeline(scopeSRIRepresentation(sriCfg, origins, gate, cfg.Paranoid))
 
 	var captchaCfg *captcha.Config
 	if cfg.Captcha != nil {
@@ -434,6 +434,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown proxy origin", status)
 		return
 	}
+	requestOrigins := s.origins.ForRequestHost(r.Host)
+	restoreSubmittedValue := func(value string) string {
+		return rewriter.RestoreResourceValue(value, gate, requestOrigins)
+	}
 	observed.beforeFinalHeader = func(headers http.Header) {
 		s.localizeResponseLocations(headers, r.Host, upstream)
 	}
@@ -470,7 +474,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			normCT = strings.TrimSpace(normCT[:i])
 		}
 		if strings.HasPrefix(normCT, "application/x-www-form-urlencoded") {
-			restored, err := formedit.Rewrite(string(reqBodyBuf), gate.RestoreBody, func(key string) bool {
+			restored, err := formedit.Rewrite(string(reqBodyBuf), restoreSubmittedValue, func(key string) bool {
 				return s.captchaMatcher.SubmissionHasOpaqueFields(r, key, upstream.Hostname())
 			})
 			if err == nil {
@@ -478,32 +482,24 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			} // Preserve malformed encoding for the upstream's own error handling.
 		} else if normCT == "application/json" || strings.HasSuffix(normCT, "+json") {
 			opaqueKeys := s.opaqueJSONKeys(r, upstream.Hostname())
-			if len(opaqueKeys) > 0 {
-				restored, restoreErr := s.restoreJSONWithOpaqueKeys(gate, reqBodyBuf, opaqueKeys)
-				if restoreErr != nil {
-					status = http.StatusBadRequest
-					http.Error(w, "ambiguous request body", http.StatusBadRequest)
-					return
-				}
-				reqBodyBuf = restored
-			} else {
-				restored := gate.RestoreJSON(reqBodyBuf)
-				if restored == nil {
-					status = http.StatusBadRequest
-					http.Error(w, "ambiguous request body", http.StatusBadRequest)
-					return
-				}
-				reqBodyBuf = restored
+			restored, restoreErr := s.restoreJSONWithOpaqueKeys(gate, reqBodyBuf, opaqueKeys, restoreSubmittedValue)
+			if restoreErr != nil {
+				status = http.StatusBadRequest
+				http.Error(w, "ambiguous request body", http.StatusBadRequest)
+				return
 			}
+			reqBodyBuf = restored
 		} else {
-			reqBodyBuf = []byte(gate.RestoreBody(string(reqBodyBuf)))
+			reqBodyBuf = []byte(restoreSubmittedValue(string(reqBodyBuf)))
 		}
 		r.Body = io.NopCloser(bytes.NewReader(reqBodyBuf))
 		r.ContentLength = int64(len(reqBodyBuf))
 	}
 
 	if rawQuery := r.URL.RawQuery; rawQuery != "" {
-		if restored, err := formedit.Rewrite(rawQuery, gate.RestoreBody, nil); err == nil {
+		if restored, err := formedit.Rewrite(rawQuery, restoreSubmittedValue, func(key string) bool {
+			return s.captchaMatcher.SubmissionHasOpaqueFields(r, key, upstream.Hostname())
+		}); err == nil {
 			r.URL.RawQuery = restored
 		}
 	}
@@ -595,7 +591,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if cacheable && sriBodyVersion == "" {
 		reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
 		if !reqCC.NoCache {
-			credHash := cache.CredentialHash(r)
+			credHash := responseCacheCredentialHash(r)
 			cacheKey := cache.Key(upstreamURL, credHash, r, nil)
 			if cached, ok := s.responseCache.Lookup(cacheKey); ok {
 				if cached.VarySentinel {
@@ -707,7 +703,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		scrubbedRespHeaders := rewriter.RewriteResponseHeaders(
 			resp.Header, gate, s.cfg.AliasDomain, upstream.Host,
 			rewriter.ResponseHeaderOpts{
-				OriginMapper:  s.origins,
+				OriginMapper:  requestOrigins,
 				RequestOrigin: r.Header.Get("Origin"),
 			},
 		)
@@ -744,7 +740,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 		newVary := cache.ParseVary(resp.Header.Get("Vary"))
 		if len(newVary) > 0 && (newVary[0] == "*" || !varyEqual(newVary, staleEntry.VaryFields)) {
-			credHash := cache.CredentialHash(r)
+			credHash := responseCacheCredentialHash(r)
 			baseKey := cache.Key(upstreamURL, credHash, r, nil)
 			if staleEntry.VaryFields != nil {
 				oldVariantKey := cache.Key(upstreamURL, credHash, r, staleEntry.VaryFields)
@@ -811,7 +807,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodHead {
 		observed.representation("upstream", -1, -1)
-		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstream.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstream.Host, rewriter.ResponseHeaderOpts{OriginMapper: requestOrigins, RequestOrigin: r.Header.Get("Origin")})
 		for name, values := range out {
 			w.Header()[name] = values
 		}
@@ -933,7 +929,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet && s.sriPipeline != nil {
 		if sriBodyVersion != "" {
-			sriKey := sri.CacheKey(upstreamURL, r) + "\x01" + sriBodyVersion
+			sriKey := sri.CacheKeyForAuthority(upstreamURL, r, r.Host) + "\x01" + sriBodyVersion
 			if !s.sriCache.HasDigest(sriKey) {
 				status = http.StatusBadGateway
 				http.Error(w, "resource version expired", http.StatusBadGateway)
@@ -947,11 +943,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			sriKey := sri.CacheKey(upstreamURL, r)
+			sriKey := sri.CacheKeyForAuthority(upstreamURL, r, r.Host)
 			integrityOK := s.sriCache.CheckBodyIntegrity(sriKey, body)
 			if integrityOK {
 				if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
-					integrityOK = s.sriCache.CheckBodyIntegrity(sri.CacheKey(orig, r), body)
+					integrityOK = s.sriCache.CheckBodyIntegrity(sri.CacheKeyForAuthority(orig, r, r.Host), body)
 				}
 			}
 			if !integrityOK {
@@ -978,7 +974,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			original, rewritten = -1, -1
 		}
 		observed.representation("upstream", original, rewritten)
-		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstream.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstream.Host, rewriter.ResponseHeaderOpts{OriginMapper: requestOrigins, RequestOrigin: r.Header.Get("Origin")})
 		for name, values := range out {
 			w.Header()[name] = values
 		}
@@ -999,7 +995,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
 		StatusCode:      resp.StatusCode,
-		Origins:         s.origins,
+		Origins:         requestOrigins,
 		SRIPipeline:     s.sriPipeline,
 		UpstreamBase:    docURL,
 		BaseRequest:     r,
@@ -1019,7 +1015,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		s.cfg.AliasDomain,
 		upstream.Host,
 		rewriter.ResponseHeaderOpts{
-			OriginMapper:  s.origins,
+			OriginMapper:  requestOrigins,
 			RequestOrigin: r.Header.Get("Origin"),
 		},
 	)
@@ -1042,7 +1038,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		sriActive := s.sriPipeline != nil && isHTML
 		varyFields := cache.ParseVary(resp.Header.Get("Vary"))
 		if !sriActive && (len(varyFields) == 0 || varyFields[0] != "*") && !dirs.NoStore && !dirs.Private {
-			credHash := cache.CredentialHash(r)
+			credHash := responseCacheCredentialHash(r)
 
 			storedHeaders := outHeaders.Clone()
 			storedHeaders.Del("Access-Control-Allow-Origin")
@@ -1125,17 +1121,23 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Bodies can contain the validated browser entry authority. Cache those bytes
+// and their validators separately even when upstream URL and credentials match.
+func responseCacheCredentialHash(r *http.Request) string {
+	return cache.CredentialHash(r) + "\x00view=" + r.Host
+}
+
 func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstream *url.URL, upstreamURL, sriBodyVersion string, gate *scrub.Gate) bool {
 	reqCC := cache.ParseDirectives(r.Header.Get("Cache-Control"))
 	if reqCC.NoCache {
 		return false
 	}
 
-	cacheKey := sri.CacheKey(upstreamURL, r)
+	cacheKey := sri.CacheKeyForAuthority(upstreamURL, r, r.Host)
 	entry, ok := s.sriCache.Get(cacheKey)
 	if !ok {
 		if orig := s.unaliasURL(upstreamURL); orig != upstreamURL {
-			cacheKey = sri.CacheKey(orig, r)
+			cacheKey = sri.CacheKeyForAuthority(orig, r, r.Host)
 			entry, ok = s.sriCache.Get(cacheKey)
 		}
 		if !ok {
@@ -1175,7 +1177,7 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 			s.cfg.AliasDomain,
 			upstream.Host,
 			rewriter.ResponseHeaderOpts{
-				OriginMapper:  s.origins,
+				OriginMapper:  s.origins.ForRequestHost(r.Host),
 				RequestOrigin: r.Header.Get("Origin"),
 			},
 		)
@@ -1431,8 +1433,8 @@ func (s *Server) buildCaptchaRetryBody(originalBody []byte, contentType string, 
 	return []byte(form.Encode())
 }
 
-func (s *Server) restoreJSONWithOpaqueKeys(gate *scrub.Gate, input []byte, opaqueKeys map[string]bool) ([]byte, error) {
-	return gate.RestoreJSONWithOpaqueKeys(input, opaqueKeys)
+func (s *Server) restoreJSONWithOpaqueKeys(gate *scrub.Gate, input []byte, opaqueKeys map[string]bool, restorers ...func(string) string) ([]byte, error) {
+	return gate.RestoreJSONWithOpaqueKeys(input, opaqueKeys, restorers...)
 }
 
 func injectCaptchaCSP(headers http.Header, captchaEntries []string) http.Header {

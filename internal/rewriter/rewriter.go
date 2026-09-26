@@ -54,7 +54,7 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 	case strings.HasPrefix(ct, "text/javascript") || ct == "application/javascript":
 		return BodyResult{Body: rewriteJS(body, gate, path, opt.Origins)}
 	case strings.HasPrefix(ct, "text/css"):
-		return BodyResult{Body: rewriteCSS(body, gate, path)}
+		return BodyResult{Body: rewriteCSS(body, gate, path, opt.Origins)}
 	case strings.HasPrefix(ct, "text/xml") || ct == "application/xml" || strings.HasSuffix(ct, "+xml"):
 		return BodyResult{Body: gate.ScrubBytes(body, "body:xml:"+path)}
 	case isBinaryContent(ct):

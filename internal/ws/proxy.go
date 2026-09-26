@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -157,7 +158,7 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request, options ...Handle
 	}
 	upgradeReq = buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, upstream.Host, gate, p.origins), upstream.Host, p.aliasDomain)
 	upgradeReq.URL.Scheme = upstream.Scheme
-	restoreRequestURI(upgradeReq, gate)
+	restoreRequestURI(upgradeReq, gate, p.origins)
 	upgradeReq.Header.Set("Accept-Encoding", "gzip, identity")
 	dialCtx, cancel := context.WithTimeout(r.Context(), timeout)
 	stop := context.AfterFunc(p.ctx, cancel)
@@ -407,8 +408,13 @@ func (p *Proxy) Close() {
 	}
 	p.mu.Unlock()
 }
-func (p *Proxy) dealiasText(text string) string {
-	return p.gate.RestoreBody(text)
+func (p *Proxy) dealiasText(text string) ([]byte, error) {
+	if !json.Valid([]byte(text)) {
+		return []byte(rewriter.RestoreResourceValue(text, p.gate, p.origins)), nil
+	}
+	return p.gate.RestoreJSONWithOpaqueKeys([]byte(text), nil, func(value string) string {
+		return rewriter.RestoreResourceValue(value, p.gate, p.origins)
+	})
 }
 
 func (p *Proxy) dialUpstream() (net.Conn, error) {
@@ -517,10 +523,14 @@ func buildUpgradeRequest(r *http.Request, targetHost, aliasDomain string) *http.
 // Restore issued mappings in URL components without changing the route chosen
 // from the incoming Host. Work on escaped path segments so an encoded slash
 // remains segment data rather than becoming a new path separator.
-func restoreRequestURI(req *http.Request, gate *scrub.Gate) {
+func restoreRequestURI(req *http.Request, gate *scrub.Gate, origins ...*rewriter.OriginMapper) {
 	rewriter.RestoreURLPath(req.URL, gate)
 	if rawQuery := req.URL.RawQuery; rawQuery != "" {
-		if restored, err := formedit.Rewrite(rawQuery, gate.RestoreBody, nil); err == nil {
+		restore := gate.RestoreBody
+		if len(origins) > 0 {
+			restore = func(value string) string { return rewriter.RestoreResourceValue(value, gate, origins[0]) }
+		}
+		if restored, err := formedit.Rewrite(rawQuery, restore, nil); err == nil {
 			req.URL.RawQuery = restored
 		} // Leave malformed parameters for the upstream's own error handling.
 	}

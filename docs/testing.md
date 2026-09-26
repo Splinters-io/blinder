@@ -25,6 +25,8 @@ Run `go test -race -count=1 ./internal/jsonedit` and `go test -race -count=1 ./i
 
 Run `go test -race -count=1 ./internal/proxy -run '^TestPathFidelity'` for real upstream path restoration, encoded slashes/reserved characters, untouched escape spelling, restored cache identities and SRI version constraints.
 
+Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^(TestRequestOrigin|TestResource|TestCompleteResource|TestBodyOrigin|TestTargetContainmentPrimaryURLRoutes)'` for validated entry-origin URL mapping and cache/SRI isolation. Registered primary resource URLs in HTML, CSS and complete unescaped JavaScript literals must keep the hostname and port used to enter the proxy; extra origins must retain their separate aliases. Browser checks must also verify every extra alias resolves locally and passes certificate verification. A failed extra-origin fetch remains a failed acceptance case even when the primary script, CSS, fetch and WebSocket paths work.
+
 Run `go test -race -count=1 ./internal/formedit` and `go test -race -count=1 ./internal/proxy -run '^TestFormFidelity'` for form/query source fidelity. Exact upstream bytes, duplicates, pair ordering, percent-escape spelling, bare keys and opaque CAPTCHA values are compared with direct requests, including malformed percent escapes. Only ampersands are treated as separators; unchanged literal semicolons are retained.
 
 Run `go test -race -count=1 ./internal/rewriter -run '^TestResponseHeaderFidelity'` for custom diagnostic headers, configured identity redaction and exclusion of hop-by-hop/Connection-nominated fields and invalid representation metadata. These do not establish byte-range translation or safe reversible mapping of identity-bearing custom field names.
@@ -169,9 +171,9 @@ Blinder terminates HTTPS from the browser/scanner and presents its own certifica
 ./blinder --preflight --listen 127.0.0.1:18099
 ```
 
-Preflight exits after setup. It detects the running OS and prints the fingerprint, expiry, public certificate path, action taken, platform trust status and OS-specific advice. Linux detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, falling back to `/usr/lib/os-release` only if the first file is missing. It never executes the file; absent or malformed identity information produces generic Linux advice. [OS release format](https://www.freedesktop.org/software/systemd/man/latest/os-release.html).
+Preflight exits after setup. It detects the running OS and prints the fingerprint, expiry, public certificate path, action taken, platform trust status and OS-specific advice. It also checks the primary alias, configured extra-origin aliases and, when a CAPTCHA config path is supplied, `blinder-operator.localhost` separately. Use the same alias, extra-origin, CAPTCHA and certificate-store options as the intended proxy run so these checks cover its browser hostnames. Linux detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, falling back to `/usr/lib/os-release` only if the first file is missing. It never executes the file; absent or malformed identity information produces generic Linux advice. [OS release format](https://www.freedesktop.org/software/systemd/man/latest/os-release.html).
 
-Exit 0 means platform verification passed for the displayed host; exit 2 means platform trust still needs setup; exit 1 means preparation failed. Client-specific trust can succeed while preflight continues to return 2. No upstream/Tor or listen-port test is performed by certificate-only commands. Normal proxy startup reports missing trust but continues so clients with their own certificate-file settings can connect.
+Exit 0 means platform verification passed for the displayed **listen host**; exit 2 means that host still needs platform trust setup; exit 1 means preparation failed. Alias/operator results are reported independently and do not change this exit status. Client-specific trust can succeed while preflight continues to return 2. These platform checks do not test DNS resolution or the selected browser's trust store. No upstream/Tor or listen-port test is performed by certificate-only commands. Normal proxy startup reports missing trust but continues so clients with their own certificate-file settings can connect.
 
 #### Certificate advice by OS
 
@@ -183,7 +185,7 @@ Exit 0 means platform verification passed for the displayed host; exit 2 means p
 
 Review the fingerprint, type `yes` and complete any OS approval. This installs the displayed server certificate for SSL to that host in the current user's login Keychain; it does not install a signing CA or change administrator trust. Declining leaves trust unchanged. If platform trust is already verified, installation is skipped. Run preflight in a new process after changing trust, then verify the browser/scanner separately.
 
-Preflight and `--trust-cert` currently check/trust the **listen host only**. CAPTCHA UAT also requires a verified browser connection to `blinder-operator.localhost` on the same port. Its name is in the certificate, but listen-host trust does not establish operator-host trust. Compare the same fingerprint and complete the selected client's trust setup for that hostname separately.
+The macOS `--trust-cert` action installs trust for the **listen host only**, even when preflight lists several hostnames on the certificate. CAPTCHA UAT requires a verified browser connection to `blinder-operator.localhost` on the same port; multi-origin UAT requires each extra alias as well. Compare the same fingerprint and complete the selected client's trust setup for those hostnames separately. A ready result for `127.0.0.1` does not imply the operator or alias result is ready.
 
 **Ubuntu / Debian:** use the printed `curl --cacert` command for a verified CLI request after starting Blinder. For example, replacing the path with the exported public certificate:
 
@@ -274,7 +276,7 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 
 ## Explicit scope checks before wider use
 
-- **Absolute links and redirects:** inspect `/absolute-redirect` without following external aliases automatically. Rewritten aliases do not currently provide complete origin/DNS routing. Record whether the intended target depends on this, and block that workflow if it does.
+- **Absolute links and redirects:** registered same-upstream links and resource URLs should retain the validated browser entry hostname and port; registered extra origins should use distinct aliases. Verify resolution and certificate trust for those aliases before accepting the workflow. Dynamically assembled or escaped URLs require separate observation; static rewriting does not establish complete browser network containment.
 - **Documents and fonts:** inspect `/document.pdf`. Binary content is replaced with a GIF placeholder and served as `image/gif`; document/font rendering fidelity is not established. The fixture PDF is a metadata sample, not a complete rendered document.
 - **Privacy boundaries:** encoded HTML/JS, arbitrary unknown binary content, cookie values and binary/control WebSocket payloads need separate policy and tests. A passing fixture is not evidence that every response is anonymized.
 - **Evidence:** verify imports into the intended HAR tool. Independent schema, synthetic semantic and Playwright importer/matcher checks pass; binary requests need the optional Playwright export adapter. Selected viewer UI, browser replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.

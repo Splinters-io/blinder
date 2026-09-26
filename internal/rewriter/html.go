@@ -90,7 +90,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			case "script":
 				out.Write(rewriteJS(raw, gate, "html:script", origins))
 			case "style":
-				out.Write(rewriteCSS(raw, gate, "html:style"))
+				out.Write(rewriteCSS(raw, gate, "html:style", origins))
 			case "title":
 				// An error response may carry its only diagnostic in the title.
 				// Apply identity masking there just as in the rest of its body.
@@ -446,11 +446,11 @@ func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate,
 		return "[image]"
 	}
 
+	if attrName == "style" {
+		return string(rewriteCSS([]byte(attrVal), gate, "html:style-attr", origins))
+	}
 	if origins != nil && isURLAttr(tagName, attrName) {
-		rewritten := origins.RewriteUpstreamURL(attrVal)
-		if rewritten != attrVal {
-			return gate.Scrub(rewritten, "html:"+attrName)
-		}
+		return scrubResourceURL(attrVal, gate, "html:"+attrName, origins)
 	}
 
 	ctx := "html:body"

@@ -82,7 +82,7 @@ func run() int {
 	flag.StringVar(&outputDir, "output", "", "Output directory for manifest and reports")
 	flag.StringVar(&outputDir, "o", "", "Output directory (shorthand)")
 	flag.StringVar(&certDir, "cert-dir", "", "Private certificate directory (default: per-endpoint user configuration directory)")
-	flag.BoolVar(&preflight, "preflight", false, "Prepare/check local certificate and platform trust, then exit (2 if trust is needed)")
+	flag.BoolVar(&preflight, "preflight", false, "Check certificate trust for listener and browser hostnames, then exit (2 if listener trust is needed)")
 	flag.BoolVar(&trustCert, "trust-cert", false, "Prepare certificate, request approval for macOS user trust, then exit")
 	flag.BoolVar(&ephemeral, "ephemeral-cert", false, "Use an in-memory certificate for this run; do not save or install trust")
 	flag.StringVar(&captchaConf, "captcha-config", "", "Path to CAPTCHA provider YAML config")
@@ -232,10 +232,12 @@ func run() int {
 		return 1
 	}
 	guidance := certificateGuidance{
-		platform:   detectCertificatePlatform(runtime.GOOS, os.ReadFile),
-		executable: os.Args[0],
-		alias:      cfg.AliasDomain,
-		listen:     cfg.ListenAddr,
+		platform:     detectCertificatePlatform(runtime.GOOS, os.ReadFile),
+		executable:   os.Args[0],
+		alias:        cfg.AliasDomain,
+		listen:       cfg.ListenAddr,
+		extraAliases: extraAliases,
+		operator:     captchaConf != "",
 	}
 	trustErr := printCertificateStatus(os.Stdout, localTLS, guidance)
 	if trustCert {

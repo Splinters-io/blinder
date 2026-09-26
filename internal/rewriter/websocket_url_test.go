@@ -113,7 +113,6 @@ func TestJavaScriptWebSocketMappingDoesNotGuessAssembledOrEscapedURLs(t *testing
 		`const socket = prefix + "wss://main.example/socket";`,
 		`const socket = "wss://" + host + "/socket";`,
 		"const socket = `wss://main.example/${name}`;",
-		"const socket = `wss://main.example/socket`;",
 		`// "wss://main.example/socket"` + "\nconst untouched = true;",
 		`/* "wss://main.example/socket" */ const untouched = true;`,
 		`const text = "prefix wss://main.example/socket";`,

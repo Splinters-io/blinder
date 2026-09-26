@@ -34,6 +34,12 @@ func CacheKey(resourceURL string, req *http.Request) string {
 	return key
 }
 
+// CacheKeyForAuthority separates transformed bytes by browser entry authority.
+// The URL prefix remains intact so a write invalidates all representations.
+func CacheKeyForAuthority(resourceURL string, req *http.Request, authority string) string {
+	return CacheKey(resourceURL, req) + "\x00view=" + authority
+}
+
 type Cache struct {
 	mu      sync.RWMutex
 	entries map[string]*CacheEntry

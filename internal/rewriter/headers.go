@@ -108,25 +108,25 @@ var scrubHeaders = map[string]bool{
 }
 
 var cspKeywords = map[string]bool{
-	"'self'":             true,
-	"'unsafe-inline'":    true,
-	"'unsafe-eval'":      true,
-	"'strict-dynamic'":   true,
-	"'none'":             true,
-	"'wasm-unsafe-eval'": true,
-	"'unsafe-hashes'":    true,
+	"'self'":                       true,
+	"'unsafe-inline'":              true,
+	"'unsafe-eval'":                true,
+	"'strict-dynamic'":             true,
+	"'none'":                       true,
+	"'wasm-unsafe-eval'":           true,
+	"'unsafe-hashes'":              true,
+	"'report-sample'":              true,
+	"'unsafe-allow-redirects'":     true,
+	"'trusted-types-eval'":         true,
+	"'inline-speculation-rules'":   true,
+	"'report-sha256'":              true,
+	"'report-sha384'":              true,
+	"'report-sha512'":              true,
+	"'unsafe-webtransport-hashes'": true,
 }
 
-var cspSchemes = map[string]bool{
-	"data:":  true,
-	"blob:":  true,
-	"https:": true,
-	"http:":  true,
-	"ws:":    true,
-	"wss:":   true,
-}
-
-var cspNonceHashRe = regexp.MustCompile(`^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/=]+'$`)
+var cspSchemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:$`)
+var cspNonceHashRe = regexp.MustCompile(`(?i)^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/_-]+={0,2}'$`)
 
 type ResponseHeaderOpts struct {
 	OriginMapper  *OriginMapper
@@ -163,7 +163,7 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 			if lower == "content-security-policy" || lower == "content-security-policy-report-only" {
 				scrubbed := make([]string, len(values))
 				for i, v := range values {
-					scrubbed[i] = rewriteCSP(v, gate, aliasDomain)
+					scrubbed[i] = rewriteCSP(v, gate, aliasDomain, originMapper)
 				}
 				out[name] = scrubbed
 				continue
@@ -199,9 +199,8 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 		if scrubHeaders[lower] {
 			scrubbed := make([]string, len(values))
 			for i, v := range values {
-				if (lower == "location" || lower == "content-location") && originMapper != nil {
-					rewritten := originMapper.RewriteUpstreamURL(v)
-					scrubbed[i] = gate.Scrub(rewritten, "header:"+lower)
+				if lower == "location" || lower == "content-location" {
+					scrubbed[i] = scrubResourceURL(v, gate, "header:"+lower, originMapper)
 				} else {
 					scrubbed[i] = gate.Scrub(v, "header:"+lower)
 				}
@@ -262,7 +261,11 @@ func RewriteRequestHeaders(req *http.Request, targetHost string, gate *scrub.Gat
 	return clone
 }
 
-func rewriteCSP(csp string, gate *scrub.Gate, aliasDomain string) string {
+func rewriteCSP(csp string, gate *scrub.Gate, aliasDomain string, origins ...*OriginMapper) string {
+	var originMapper *OriginMapper
+	if len(origins) > 0 {
+		originMapper = origins[0]
+	}
 	directives := strings.Split(csp, ";")
 	rewritten := make([]string, 0, len(directives))
 
@@ -281,10 +284,14 @@ func rewriteCSP(csp string, gate *scrub.Gate, aliasDomain string) string {
 		scrubbed := []string{name}
 
 		for _, token := range tokens[1:] {
-			if cspKeywords[token] || cspSchemes[token] || cspNonceHashRe.MatchString(token) || token == "*" {
+			if cspKeywords[strings.ToLower(token)] || cspSchemeRe.MatchString(token) || cspNonceHashRe.MatchString(token) || token == "*" {
 				scrubbed = append(scrubbed, token)
 			} else {
-				scrubbed = append(scrubbed, gate.Scrub(token, "csp"))
+				// Exact registered origins follow the resource URL mapping. The
+				// helper protects generated local authorities and keeps path
+				// restrictions. Wildcard and scheme-less sources do not name an
+				// exact origin, so retain their existing generic scrubbing.
+				scrubbed = append(scrubbed, scrubResourceURL(token, gate, "csp", originMapper))
 			}
 		}
 

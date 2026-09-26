@@ -161,7 +161,11 @@ func (p *Proxy) relayFrames(src *bufio.Reader, dst net.Conn, serverToClient bool
 					if serverToClient {
 						text = p.gate.ScrubBytes(text, "ws:text")
 					} else {
-						text = []byte(p.dealiasText(string(text)))
+						var restoreErr error
+						text, restoreErr = p.dealiasText(string(text))
+						if restoreErr != nil {
+							return false
+						}
 					}
 					if len(text) > maxFrameSize {
 						return false

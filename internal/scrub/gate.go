@@ -776,14 +776,21 @@ func (g *Gate) RestoreJSON(input []byte) []byte {
 	return out
 }
 
-// RestoreJSONWithOpaqueKeys edits only string tokens that contain reversible
-// aliases. Opaque fields retain their complete source value at any nesting depth.
+// RestoreJSONWithOpaqueKeys edits only changed string tokens, restoring aliases
+// and optionally resource origins. Opaque fields retain their complete source
+// value at any nesting depth.
 // Pre-existing duplicate keys are preserved; newly colliding keys are rejected.
-func (g *Gate) RestoreJSONWithOpaqueKeys(input []byte, opaqueKeys map[string]bool) ([]byte, error) {
+// An optional decoded-string restorer composes route restoration with aliases
+// without parsing or serializing the enclosing JSON document a second time.
+func (g *Gate) RestoreJSONWithOpaqueKeys(input []byte, opaqueKeys map[string]bool, restorers ...func(string) string) ([]byte, error) {
 	if g.parent != nil {
-		return g.parent.RestoreJSONWithOpaqueKeys(input, opaqueKeys)
+		return g.parent.RestoreJSONWithOpaqueKeys(input, opaqueKeys, restorers...)
 	}
-	out, err := jsonedit.Rewrite(input, g.RestoreBody, func(key string) bool {
+	restore := g.RestoreBody
+	if len(restorers) > 0 && restorers[0] != nil {
+		restore = restorers[0]
+	}
+	out, err := jsonedit.Rewrite(input, restore, func(key string) bool {
 		return opaqueKeys[key]
 	})
 	if errors.Is(err, jsonedit.ErrInvalidJSON) {
@@ -794,7 +801,7 @@ func (g *Gate) RestoreJSONWithOpaqueKeys(input []byte, opaqueKeys map[string]boo
 		if decodeErr := dec.Decode(&first); decodeErr == nil {
 			return input, nil
 		}
-		return []byte(g.RestoreBody(string(input))), nil
+		return []byte(restore(string(input))), nil
 	}
 	return out, err
 }

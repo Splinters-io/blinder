@@ -2,13 +2,93 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/Splinters-io/blinder/internal/endpoint"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
 )
+
+func TestCertificateStatusDoesNotInferOperatorTrustFromListener(t *testing.T) {
+	cert, err := blindertls.Prepare("", "target.local", "127.0.0.1:18099", "extra.alias.local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := certificateGuidance{
+		platform: certificatePlatform{goos: "darwin"}, alias: "target.local",
+		listen: "127.0.0.1:18099", extraAliases: []string{"extra.alias.local"}, operator: true,
+	}
+	var checked []string
+	var out bytes.Buffer
+	err = printCertificateStatusWithVerifier(&out, cert, g, func(host string) error {
+		checked = append(checked, host)
+		if host == endpoint.OperatorHost {
+			return errors.New("host-scoped platform trust excludes operator")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("primary certificate setup changed exit semantics: %v", err)
+	}
+	wantHosts := []string{"127.0.0.1", "target.local", "extra.alias.local", endpoint.OperatorHost}
+	if !reflect.DeepEqual(checked, wantHosts) {
+		t.Fatalf("checked %v; want %v", checked, wantHosts)
+	}
+	for _, want := range []string{
+		"Platform trust: ready for this endpoint.",
+		"Platform trust [primary alias]: ready (target.local)",
+		"Platform trust [extra origin]: ready (extra.alias.local)",
+		"Platform trust [CAPTCHA operator]: setup needed (blinder-operator.localhost)",
+		"Preflight exit status and --trust-cert apply to 127.0.0.1 only",
+		"verify name resolution and trust in the actual browser/scanner separately",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in status:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestCertificateStatusPreservesListenerFailure(t *testing.T) {
+	cert, err := blindertls.Prepare("", "target.local", "127.0.0.1:18099")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerErr := errors.New("listener trust missing")
+	var out bytes.Buffer
+	err = printCertificateStatusWithVerifier(&out, cert, certificateGuidance{alias: "target.local", operator: true}, func(host string) error {
+		if host == cert.Host {
+			return listenerErr
+		}
+		return nil
+	})
+	if !errors.Is(err, listenerErr) {
+		t.Fatalf("other trusted endpoints hid listening endpoint failure: %v", err)
+	}
+	if !strings.Contains(out.String(), "Platform trust [CAPTCHA operator]: ready") || !strings.Contains(out.String(), "Platform trust: setup needed for this endpoint.") {
+		t.Fatalf("endpoint states conflated:\n%s", out.String())
+	}
+}
+
+func TestCertificateEndpointChecksAreDistinctAndOperatorIsOptIn(t *testing.T) {
+	var checked []string
+	var out bytes.Buffer
+	printAdditionalCertificateEndpoints(&out, &blindertls.Material{Host: "127.0.0.1"}, certificateGuidance{
+		alias: "127.0.0.1", extraAliases: []string{"extra.local", "EXTRA.local", "", "127.0.0.1"},
+	}, func(host string) error {
+		checked = append(checked, host)
+		return nil
+	})
+	if !reflect.DeepEqual(checked, []string{"extra.local"}) {
+		t.Fatalf("unexpected endpoint checks: %v", checked)
+	}
+	if strings.Contains(out.String(), endpoint.OperatorHost) {
+		t.Fatalf("offered unused operator endpoint:\n%s", out.String())
+	}
+}
 
 func TestTrustRequiresExplicitYes(t *testing.T) {
 	for _, text := range []string{"", "\n", "y\n", "no\n", "YES\n"} {

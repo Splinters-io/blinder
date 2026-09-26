@@ -82,7 +82,7 @@ func TestResponseLocationsRemainRequestScopedAcrossCaches(t *testing.T) {
 			s := mappingReviewServer(t, "https://upstream.example", nil, func(r *http.Request) (*http.Response, error) {
 				calls++
 				resp := audit267CacheResponse("cache fixture")
-				if mode == "revalidated" && calls > 1 {
+				if mode == "revalidated" && r.Header.Get("If-None-Match") != "" {
 					if r.Header.Get("If-None-Match") != `"original"` {
 						t.Error("stale response was not revalidated with upstream ETag")
 					}
@@ -98,17 +98,19 @@ func TestResponseLocationsRemainRequestScopedAcrossCaches(t *testing.T) {
 				return resp, nil
 			})
 			if mode == "sri" {
-				s.sriCache.Put("https://upstream.example/resource", &sri.CacheEntry{
-					ScrubbedBody: []byte("cache fixture"), ContentType: "text/plain",
-					ResponseHeaders: http.Header{
-						"Location":         {"https://upstream.example/account?next=%2Fhome#part"},
-						"Content-Location": {"https://upstream.example/representation"},
-						"Cache-Control":    {"max-age=3600"},
-					},
-				})
+				for _, host := range []string{"127.0.0.1:18099", "localhost:18099", "alias.local:18099"} {
+					s.sriCache.Put(sri.CacheKeyForAuthority("https://upstream.example/resource", nil, host), &sri.CacheEntry{
+						ScrubbedBody: []byte("cache fixture"), ContentType: "text/plain",
+						ResponseHeaders: http.Header{
+							"Location":         {"https://upstream.example/account?next=%2Fhome#part"},
+							"Content-Location": {"https://upstream.example/representation"},
+							"Cache-Control":    {"max-age=3600"},
+						},
+					})
+				}
 			}
 			etag := ""
-			for i, host := range []string{"127.0.0.1:18099", "localhost:18099", "alias.local:18099"} {
+			for i, host := range []string{"127.0.0.1:18099", "localhost:18099", "alias.local:18099", "alias.local:18099"} {
 				r := httptest.NewRequest("GET", "https://"+host+"/resource", nil)
 				r.Header.Set("Origin", "https://unrelated.invalid")
 				if i == 1 {
@@ -131,7 +133,7 @@ func TestResponseLocationsRemainRequestScopedAcrossCaches(t *testing.T) {
 				}
 				etag = w.Header().Get("ETag")
 			}
-			wantCalls := map[string]int{"fresh": 1, "revalidated": 2, "sri": 0}[mode]
+			wantCalls := map[string]int{"fresh": 3, "revalidated": 4, "sri": 0}[mode]
 			if calls != wantCalls {
 				t.Fatalf("upstream calls = %d, want %d", calls, wantCalls)
 			}

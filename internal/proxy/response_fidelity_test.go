@@ -244,7 +244,7 @@ func TestResponseFidelityFailureEvidence(t *testing.T) {
 
 func TestResponseFidelitySRIAndUnknownTransportSizes(t *testing.T) {
 	s := mappingReviewServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) { t.Fatal("cached SRI fetched upstream"); return nil, nil })
-	s.sriCache.Put("https://main.example/script", &sri.CacheEntry{ScrubbedBody: []byte("modified"), ContentType: "text/javascript", OriginalBodyBytes: 12, OriginalBodyKnown: true})
+	s.sriCache.Put(sri.CacheKeyForAuthority("https://main.example/script", nil, "127.0.0.1:18099"), &sri.CacheEntry{ScrubbedBody: []byte("modified"), ContentType: "text/javascript", OriginalBodyBytes: 12, OriginalBodyKnown: true})
 	got := audit267CacheRequest(s, "GET", "/script", nil)
 	m := lastResponseMetrics(t, s)
 	if got.Code != 200 || m.Source != "sri-cache" || len(m.Upstream) != 0 || m.OriginalBodyBytes != 12 || m.DownstreamBytes != 8 {

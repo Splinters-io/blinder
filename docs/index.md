@@ -114,6 +114,8 @@ Preflight generates or reuses the local certificate and prints its public path, 
 
 Use `--cert-dir DIR` for a chosen private store. Certificates persist across restarts; `--ephemeral-cert` selects a temporary identity. Preflight exit **2** means platform trust needs setup; a client using its own certificate file can still connect successfully.
 
+Preflight reports trust separately for the listen host, primary alias, configured extra-origin aliases and, when CAPTCHA is configured, the operator hostname. Its exit status and macOS `--trust-cert` action apply to the listen host only. Check name resolution and certificate trust for every hostname your browser will use; a trusted loopback URL does not establish trust for its aliases.
+
 The endpoint store also holds a private `version-signing.key` for resource-reference ownership, independent of certificate renewal. Keep it across restarts so expired references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
 
 [Certificate setup, OS guidance and renewal](testing.md#local-certificate-trust)

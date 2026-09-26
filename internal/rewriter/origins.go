@@ -209,6 +209,68 @@ func (m *OriginMapper) Resolve(host string) *url.URL {
 	return m.routes[strings.ToLower(h)]
 }
 
+// ForRequestHost returns an immutable mapping view for a validated browser
+// entry authority. Only that route's upstream-to-local mapping changes; extra
+// origins retain their separate aliases. Unknown authorities cannot create a
+// route, and the shared mapper is never modified.
+func (m *OriginMapper) ForRequestHost(host string) *OriginMapper {
+	upstream := m.Resolve(host)
+	if upstream == nil {
+		return nil
+	}
+	view := *m
+	view.upstreamToLocal = make(map[string]string, len(m.upstreamToLocal))
+	for key, value := range m.upstreamToLocal {
+		view.upstreamToLocal[key] = value
+	}
+	view.upstreamToLocal[originKey(upstream)] = (&url.URL{Scheme: "https", Host: host}).String()
+	return &view
+}
+
+// RestoreResourceURL reverses a complete local resource URL submitted as an
+// application value. Only the registered TLS local origins are recognized;
+// unknown schemes, authorities, ports, userinfo and opaque URLs are unchanged.
+// Preserve the suffix verbatim so encoded segments and empty query/fragment
+// markers are not normalized while restoring the origin.
+func (m *OriginMapper) RestoreResourceURL(value string) string {
+	if m == nil {
+		return value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.User != nil || u.Opaque != "" {
+		return value
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "wss" {
+		return value
+	}
+	upstream := m.Resolve(u.Host)
+	if upstream == nil {
+		return value
+	}
+	upstreamScheme := upstream.Scheme
+	if scheme == "wss" {
+		switch strings.ToLower(upstreamScheme) {
+		case "http":
+			upstreamScheme = "ws"
+		case "https":
+			upstreamScheme = "wss"
+		default:
+			return value
+		}
+	}
+	start := strings.Index(value, "://")
+	if start < 0 {
+		return value
+	}
+	start += 3
+	suffix := ""
+	if end := strings.IndexAny(value[start:], "/?#"); end >= 0 {
+		suffix = value[start+end:]
+	}
+	return upstreamScheme + "://" + upstream.Host + suffix
+}
+
 // RouteAliases returns the alias hostnames registered in this mapper, suitable
 // for TLS SAN generation. The primary alias is first, followed by any extra
 // origin aliases.

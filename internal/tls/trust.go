@@ -14,7 +14,13 @@ import (
 // CheckTrust checks the platform verifier for this endpoint. Individual clients
 // may use other stores and must still be checked separately during UAT.
 func (m *Material) CheckTrust() error {
-	_, err := m.Certificate.Leaf.Verify(x509.VerifyOptions{DNSName: m.Host})
+	return m.CheckTrustForHost(m.Host)
+}
+
+// CheckTrustForHost checks a specific browser hostname. A certificate can cover
+// several SANs while the platform's trust policy accepts only one of them.
+func (m *Material) CheckTrustForHost(host string) error {
+	_, err := m.Certificate.Leaf.Verify(x509.VerifyOptions{DNSName: host})
 	return err
 }
 

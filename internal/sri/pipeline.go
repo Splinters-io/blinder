@@ -62,6 +62,10 @@ type PipelineConfig struct {
 	OnFetch         func(FetchRecord)
 	CookieRestoreFn func(cookieHeader, origin string) string
 	FetchTimeout    time.Duration
+	// ResourceRequest selects the browser authority that will fetch this
+	// resource. It must return a copy when changing the document request.
+	ResourceRequest func(resourceURL string, baseReq *http.Request) *http.Request
+	RequestScrubFn  func(body []byte, contentType, path string, req *http.Request) []byte
 }
 
 type Pipeline struct {
@@ -72,6 +76,8 @@ type Pipeline struct {
 	onFetch         func(FetchRecord)
 	cookieRestoreFn func(cookieHeader, origin string) string
 	fetchTimeout    time.Duration
+	resourceRequest func(string, *http.Request) *http.Request
+	requestScrubFn  func([]byte, string, string, *http.Request) []byte
 
 	mu       sync.Mutex
 	findings []Finding
@@ -89,6 +95,8 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		onFetch:         cfg.OnFetch,
 		cookieRestoreFn: cfg.CookieRestoreFn,
 		fetchTimeout:    cfg.FetchTimeout,
+		resourceRequest: cfg.ResourceRequest,
+		requestScrubFn:  cfg.RequestScrubFn,
 	}
 }
 
@@ -126,6 +134,11 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		cacheKeyReq = nil
 	}
 	cacheKey := CacheKey(canonicalURL, cacheKeyReq)
+	resourceReq := baseReq
+	if p.resourceRequest != nil {
+		resourceReq = p.resourceRequest(canonicalURL, baseReq)
+		cacheKey = CacheKeyForAuthority(canonicalURL, cacheKeyReq, resourceReq.Host)
+	}
 
 	if cached, ok := p.cache.Get(cacheKey); ok {
 		if cached.FetchError != "" {
@@ -163,7 +176,12 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		respCT = contentType
 	}
 
-	scrubbed := p.scrubFn(body, respCT, resourceURL)
+	var scrubbed []byte
+	if p.requestScrubFn != nil {
+		scrubbed = p.requestScrubFn(body, respCT, resourceURL, resourceReq)
+	} else {
+		scrubbed = p.scrubFn(body, respCT, resourceURL)
+	}
 	modified := !bytes.Equal(body, scrubbed)
 
 	strongest := StrongestAlgorithm(entries)

@@ -59,7 +59,7 @@ func TestWebSocketLiteralOrdinaryAndSRIPrefetchBytesMatch(t *testing.T) {
 		t.Fatalf("ordinary fixture response failed: status=%d body=%q", ordinary.Code, ordinary.Body.String())
 	}
 	extraAlias := scrub.AliasOrigin("https", "socket.example", "8443", "alias.local")
-	for _, want := range []string{"wss://alias.local:18099/socket?channel=one", "wss://" + extraAlias + ":18099/socket?channel=two"} {
+	for _, want := range []string{"wss://127.0.0.1:18099/socket?channel=one", "wss://" + extraAlias + ":18099/socket?channel=two"} {
 		if !strings.Contains(ordinary.Body.String(), want) {
 			t.Fatalf("ordinary JS omitted registered WebSocket route including local port %q: %s", want, ordinary.Body.String())
 		}

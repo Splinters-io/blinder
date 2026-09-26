@@ -65,9 +65,10 @@ func writeScrubbedJSString(s string, pos int, gate *scrub.Gate, path string, out
 	}
 	value := s[start:pos]
 	if pos < len(s) && !strings.ContainsRune(value, '\\') && !jsStringIsConcatenated(s, quoteStart, pos) {
-		value = origins.RewriteWebSocketURL(value)
+		out.WriteString(scrubResourceURL(value, gate, "body:js:string:"+path, origins))
+	} else {
+		out.WriteString(gate.Scrub(value, "body:js:string:"+path))
 	}
-	out.WriteString(gate.Scrub(value, "body:js:string:"+path))
 	if pos < len(s) {
 		out.WriteByte(quote)
 		pos++
@@ -84,6 +85,8 @@ func jsStringIsConcatenated(s string, start, end int) bool {
 }
 
 func writeScrubbedJSTemplate(s string, pos int, gate *scrub.Gate, path string, out *strings.Builder, origins *OriginMapper) int {
+	quoteStart := pos
+	interpolated := false
 	out.WriteByte('`')
 	pos++
 	textStart := pos
@@ -93,12 +96,18 @@ func writeScrubbedJSTemplate(s string, pos int, gate *scrub.Gate, path string, o
 			continue
 		}
 		if s[pos] == '`' {
-			out.WriteString(gate.Scrub(s[textStart:pos], "body:js:string:"+path))
+			value := s[textStart:pos]
+			if !interpolated && !strings.ContainsRune(value, '\\') && !jsStringIsConcatenated(s, quoteStart, pos) {
+				out.WriteString(scrubResourceURL(value, gate, "body:js:string:"+path, origins))
+			} else {
+				out.WriteString(gate.Scrub(value, "body:js:string:"+path))
+			}
 			out.WriteByte('`')
 			pos++
 			return pos
 		}
 		if s[pos] == '$' && pos+1 < len(s) && s[pos+1] == '{' {
+			interpolated = true
 			out.WriteString(gate.Scrub(s[textStart:pos], "body:js:string:"+path))
 			out.WriteString("${")
 			pos += 2

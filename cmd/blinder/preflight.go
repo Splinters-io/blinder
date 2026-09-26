@@ -11,31 +11,72 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/endpoint"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
 )
 
 type certificateGuidance struct {
-	platform   certificatePlatform
-	executable string
-	alias      string
-	listen     string
+	platform     certificatePlatform
+	executable   string
+	alias        string
+	listen       string
+	extraAliases []string
+	operator     bool
 }
 
 func printCertificateStatus(out io.Writer, cert *blindertls.Material, guidance certificateGuidance) error {
+	return printCertificateStatusWithVerifier(out, cert, guidance, cert.CheckTrustForHost)
+}
+
+func printCertificateStatusWithVerifier(out io.Writer, cert *blindertls.Material, guidance certificateGuidance, verify func(string) error) error {
 	fmt.Fprintf(out, "Detected OS: %s\n", guidance.platform.name())
 	fmt.Fprintf(out, "Local certificate: %s\nEndpoint host: %s\nSHA-256: %s\nExpires: %s\n",
 		cert.Action, cert.Host, cert.Fingerprint, cert.Certificate.Leaf.NotAfter.Format(time.RFC3339))
 	if cert.PublicPath != "" {
 		fmt.Fprintf(out, "Public certificate: %s\n", cert.PublicPath)
 	}
-	err := cert.CheckTrust()
+	err := verify(cert.Host)
 	if err == nil {
 		fmt.Fprintln(out, "Platform trust: ready for this endpoint. Verify your browser/scanner if it uses a separate trust store.")
 	} else {
 		fmt.Fprintln(out, "Platform trust: setup needed for this endpoint.")
 	}
+	printAdditionalCertificateEndpoints(out, cert, guidance, verify)
 	printCertificateAdvice(out, cert, guidance, err != nil)
 	return err
+}
+
+// The existing setup command and exit status remain scoped to the listening
+// host. Other browser origins must be checked separately: macOS trust can be
+// hostname-scoped even when all names are present on the same certificate.
+func printAdditionalCertificateEndpoints(out io.Writer, cert *blindertls.Material, guidance certificateGuidance, verify func(string) error) {
+	type browserEndpoint struct{ role, host string }
+	endpoints := []browserEndpoint{{"primary alias", guidance.alias}}
+	for _, alias := range guidance.extraAliases {
+		endpoints = append(endpoints, browserEndpoint{"extra origin", alias})
+	}
+	if guidance.operator {
+		endpoints = append(endpoints, browserEndpoint{"CAPTCHA operator", endpoint.OperatorHost})
+	}
+	seen := map[string]bool{strings.ToLower(cert.Host): true}
+	checked := 0
+	for _, candidate := range endpoints {
+		key := strings.ToLower(candidate.host)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		checked++
+		status := "ready"
+		if verify(candidate.host) != nil {
+			status = "setup needed"
+		}
+		fmt.Fprintf(out, "Platform trust [%s]: %s (%s)\n", candidate.role, status, candidate.host)
+	}
+	if checked > 0 {
+		fmt.Fprintf(out, "Preflight exit status and --trust-cert apply to %s only. Other browser hostnames above have independent trust results.\n", cert.Host)
+		fmt.Fprintln(out, "These are platform certificate checks; verify name resolution and trust in the actual browser/scanner separately.")
+	}
 }
 
 func printCertificateAdvice(out io.Writer, cert *blindertls.Material, guidance certificateGuidance, needsTrust bool) {
@@ -110,7 +151,7 @@ func requestCertificateTrust(cert *blindertls.Material, trustErr error, input io
 		fmt.Fprintln(output, "Installation completed, but platform verification still fails. Rerun --preflight in a new process and check the selected client's trust store.")
 		return 2
 	}
-	fmt.Fprintln(output, "Platform trust: ready. Certificate retained for the next start; verify the selected browser/scanner separately.")
+	fmt.Fprintf(output, "Platform trust: ready for %s. Certificate retained for the next start; verify the selected browser/scanner and other hostnames separately.\n", cert.Host)
 	return 0
 }
 
