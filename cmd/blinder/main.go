@@ -58,19 +58,22 @@ func run() int {
 		trustCert   bool
 		ephemeral   bool
 		captchaConf string
+		configFile  string
 	)
 
+	flag.StringVar(&configFile, "config", "", "Path to YAML config file (CLI flags override)")
+	flag.StringVar(&configFile, "c", "", "Path to YAML config file (shorthand)")
 	flag.StringVar(&target, "target", "", "Real target URL (required unless running certificate setup)")
 	flag.StringVar(&target, "t", "", "Real target URL (shorthand)")
-	flag.StringVar(&listen, "listen", "127.0.0.1:8099", "Listen address")
-	flag.StringVar(&listen, "l", "127.0.0.1:8099", "Listen address (shorthand)")
-	flag.StringVar(&alias, "alias", "target-001.local", "Alias domain the client sees")
+	flag.StringVar(&listen, "listen", "", "Listen address (default 127.0.0.1:8099)")
+	flag.StringVar(&listen, "l", "", "Listen address (shorthand)")
+	flag.StringVar(&alias, "alias", "", "Alias domain the client sees")
 	flag.Var(&identity, "identity", "Identity tokens to scrub (repeatable)")
 	flag.Var(&identity, "i", "Identity tokens to scrub (shorthand, repeatable)")
 	flag.Var(&extraOrigin, "extra-origin", "Additional upstream origin (repeatable)")
 	flag.Var(&extraOrigin, "X", "Additional upstream origin (shorthand, repeatable)")
 	flag.BoolVar(&tor, "tor", false, "Route upstream through Tor SOCKS5 proxy")
-	flag.StringVar(&torAddr, "tor-addr", "127.0.0.1:9050", "Tor SOCKS5 address")
+	flag.StringVar(&torAddr, "tor-addr", "", "Tor SOCKS5 address")
 	flag.BoolVar(&noVerifyTLS, "no-verify-tls", false, "Skip TLS verification on target")
 	flag.BoolVar(&paranoid, "paranoid", false, "Maximum scrubbing mode")
 	flag.BoolVar(&bindAll, "bind-all", false, "Allow binding to non-loopback addresses")
@@ -86,6 +89,69 @@ func run() int {
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
 
 	flag.Parse()
+
+	if configFile != "" {
+		fc, err := config.LoadFile(configFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
+		if target == "" && fc.Target != "" {
+			target = fc.Target
+		}
+		if listen == "" && fc.Listen != "" {
+			listen = fc.Listen
+		}
+		if alias == "" && fc.Alias != "" {
+			alias = fc.Alias
+		}
+		if len(identity) == 0 && len(fc.Identity) > 0 {
+			identity = fc.Identity
+		}
+		if len(extraOrigin) == 0 && len(fc.ExtraOrigins) > 0 {
+			extraOrigin = fc.ExtraOrigins
+		}
+		if outputDir == "" && fc.Output != "" {
+			outputDir = fc.Output
+		}
+		if certDir == "" && fc.CertDir != "" {
+			certDir = fc.CertDir
+		}
+		if captchaConf == "" && fc.CaptchaConfig != "" {
+			captchaConf = fc.CaptchaConfig
+		}
+		if !tor && fc.Tor.Enabled {
+			tor = true
+		}
+		if torAddr == "" && fc.Tor.Addr != "" {
+			torAddr = fc.Tor.Addr
+		}
+		if harPath == "" && fc.HAR.Path != "" {
+			harPath = fc.HAR.Path
+		}
+		if harMaxBody == 10*1024*1024 && fc.HAR.MaxBody > 0 {
+			harMaxBody = fc.HAR.MaxBody
+		}
+		if !noVerifyTLS && fc.NoVerifyTLS {
+			noVerifyTLS = true
+		}
+		if !paranoid && fc.Paranoid {
+			paranoid = true
+		}
+		if !bindAll && fc.BindAll {
+			bindAll = true
+		}
+	}
+
+	if listen == "" {
+		listen = "127.0.0.1:8099"
+	}
+	if alias == "" {
+		alias = "target-001.local"
+	}
+	if torAddr == "" {
+		torAddr = "127.0.0.1:9050"
+	}
 
 	if showVersion {
 		fmt.Printf("blinder %s (%s)\n", version, commit)

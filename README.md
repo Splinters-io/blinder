@@ -74,6 +74,35 @@ capture_dir=$(mktemp -d)
 
 Point your browser or scanner at **`https://127.0.0.1:8099`**. Add multiple identity tokens with repeated `--identity` flags. Stop with **Ctrl-C** to save the session evidence.
 
+### Config file
+
+Use `--config` (`-c`) to load defaults from a YAML file. CLI flags override the file.
+
+```yaml
+# blinder.yaml
+listen: "127.0.0.1:9443"
+target: "https://example.com"
+alias: "target-001.local"
+identity:
+  - "ExampleCorp"
+  - "example.com"
+output: "/tmp/blinder-output"
+captcha_config: "captcha.yaml"
+no_verify_tls: true
+tor:
+  enabled: false
+  addr: "127.0.0.1:9050"
+har:
+  path: "/tmp/session.har"
+  max_body: 10485760
+```
+
+```sh
+./blinder -c blinder.yaml
+# override the listen port from the file:
+./blinder -c blinder.yaml --listen 127.0.0.1:7777
+```
+
 ## Certificates
 
 Preflight generates or reuses the local certificate and prints its public path, fingerprint, expiry and next steps.

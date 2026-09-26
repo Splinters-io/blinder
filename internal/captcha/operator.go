@@ -352,7 +352,7 @@ func (h *OperatorHandler) serveSolvePage(w http.ResponseWriter, r *http.Request,
 
 	targetHost := ""
 	if parsed, err := url.Parse(ch.PageURL); err == nil {
-		targetHost = parsed.Hostname()
+		targetHost = parsed.Host
 	}
 
 	if targetHost != "" {
