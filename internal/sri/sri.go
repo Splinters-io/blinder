@@ -13,6 +13,10 @@ type HashEntry struct {
 	Algorithm string
 	Digest    []byte
 	Options   string
+	// DigestValue retains the source spelling for policy coordination. Byte
+	// equality determines SRI verification, but callers must not reconstruct
+	// the original integrity metadata from a different base64 spelling.
+	DigestValue string
 }
 
 var algorithmStrength = map[string]int{
@@ -23,32 +27,66 @@ var algorithmStrength = map[string]int{
 
 func ParseIntegrity(attr string) []HashEntry {
 	var entries []HashEntry
-	for _, token := range strings.Fields(attr) {
-		dashIdx := strings.IndexByte(token, '-')
-		if dashIdx < 0 {
-			continue
+	for _, token := range strings.FieldsFunc(attr, integrityWhitespace) {
+		if entry, ok := parseIntegrityToken(token); ok {
+			entries = append(entries, entry)
 		}
-		algo := strings.ToLower(token[:dashIdx])
-		if algorithmStrength[algo] == 0 {
-			continue
-		}
-		rest := token[dashIdx+1:]
-		var opts string
-		if qIdx := strings.IndexByte(rest, '?'); qIdx >= 0 {
-			opts = rest[qIdx+1:]
-			rest = rest[:qIdx]
-		}
-		digest, err := base64.StdEncoding.DecodeString(rest)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, HashEntry{
-			Algorithm: algo,
-			Digest:    digest,
-			Options:   opts,
-		})
 	}
 	return entries
+}
+
+func integrityWhitespace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f'
+}
+
+func parseIntegrityToken(token string) (HashEntry, bool) {
+	// Chromium's integrity-attribute parser recognises these literal,
+	// case-sensitive prefixes, including the historical hyphenated aliases.
+	// CSP hash-source parsing is separate and must not inherit this rule.
+	// https://raw.githubusercontent.com/chromium/chromium/main/third_party/blink/renderer/platform/loader/subresource_integrity.cc
+	algo, prefix := "", ""
+	for _, candidate := range []struct{ spelling, algorithm string }{
+		{"sha256-", "sha256"}, {"sha-256-", "sha256"},
+		{"sha384-", "sha384"}, {"sha-384-", "sha384"},
+		{"sha512-", "sha512"}, {"sha-512-", "sha512"},
+	} {
+		if strings.HasPrefix(token, candidate.spelling) {
+			algo, prefix = candidate.algorithm, candidate.spelling
+			break
+		}
+	}
+	if algo == "" {
+		return HashEntry{}, false
+	}
+	rest := token[len(prefix):]
+	var opts string
+	if qIdx := strings.IndexByte(rest, '?'); qIdx >= 0 {
+		opts = rest[qIdx+1:]
+		rest = rest[:qIdx]
+	}
+	if rest == "" {
+		return HashEntry{}, false
+	}
+	for _, c := range rest {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '-' || c == '_' || c == '=') {
+			return HashEntry{}, false
+		}
+	}
+	// Browsers accept the URL-safe alphabet and omitted padding. Do not
+	// repair malformed padding: an invalid input must not become valid.
+	encoded := strings.NewReplacer("-", "+", "_", "/").Replace(rest)
+	encoding := base64.StdEncoding
+	if !strings.Contains(encoded, "=") {
+		encoding = base64.RawStdEncoding
+	}
+	digest, err := encoding.DecodeString(encoded)
+	if err != nil {
+		// Recognised algorithms with base64-shaped but invalid values still
+		// participate in strongest-algorithm selection in Chromium. Do not
+		// silently discard a broken SHA512 assertion in favour of valid SHA256.
+		digest = nil
+	}
+	return HashEntry{Algorithm: algo, Digest: digest, Options: opts, DigestValue: rest}, true
 }
 
 func StrongestAlgorithm(entries []HashEntry) string {

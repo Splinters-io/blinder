@@ -18,7 +18,8 @@ type BodyResult struct {
 }
 
 type RewriteOpts struct {
-	StatusCode      int // Upstream status; diagnostic HTML must not become filler text.
+	CSPPolicies     []string // Original enforcing header policies, before URL/hash translation.
+	StatusCode      int      // Upstream status; diagnostic HTML must not become filler text.
 	Origins         *OriginMapper
 	SRIPipeline     *sri.Pipeline
 	UpstreamBase    *url.URL
@@ -47,6 +48,7 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 				baseReq:         opt.BaseRequest,
 				registerVersion: opt.RegisterVersion,
 				resourceURL:     opt.ResourceURL,
+				cspPolicies:     append([]string(nil), opt.CSPPolicies...),
 			}
 		}
 		hashes := &CSPHashes{}

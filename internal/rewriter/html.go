@@ -15,12 +15,14 @@ import (
 )
 
 type sriRewriter struct {
-	pipeline        *sri.Pipeline
-	upstreamBase    *url.URL
-	effectiveBase   *url.URL
-	baseReq         *http.Request
-	registerVersion func(upstreamURL, bodyVersion string) string
-	resourceURL     func(raw string, base *url.URL) (string, bool)
+	outputIdentities map[string]string
+	cspPolicies      []string
+	pipeline         *sri.Pipeline
+	upstreamBase     *url.URL
+	effectiveBase    *url.URL
+	baseReq          *http.Request
+	registerVersion  func(upstreamURL, bodyVersion string) string
+	resourceURL      func(raw string, base *url.URL) (string, bool)
 }
 
 type sriAction int
@@ -34,11 +36,14 @@ const (
 )
 
 type sriDecision struct {
-	action          sriAction
-	replacementHash string
-	integrityVal    string
-	bodyVersion     string
-	resolvedURL     string
+	effectiveBase                   *url.URL
+	action                          sriAction
+	replacementHash                 string
+	integrityVal                    string
+	bodyVersion                     string
+	resolvedURL                     string
+	integrityChanges                []sri.IntegrityChange
+	originalSHA256, rewrittenSHA256 string
 }
 
 func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, origins *OriginMapper, sr *sriRewriter, policyHashes ...*CSPHashes) []byte {
@@ -46,7 +51,9 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 	if len(policyHashes) > 0 && policyHashes[0] != nil {
 		hashes = policyHashes[0]
 	}
+	decisions := prepareSRIDecisions(body, sr, origins, hashes)
 	z := html.NewTokenizer(bytes.NewReader(body))
+	var sourceOffset int
 	var out bytes.Buffer
 	out.Grow(len(body))
 
@@ -78,6 +85,8 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 		// normalizes newlines in the tokenizer's backing buffer. Keep source
 		// bytes before any of those operations for unchanged-token passthrough.
 		raw := append([]byte(nil), z.Raw()...)
+		tokenOffset := sourceOffset
+		sourceOffset += len(raw)
 
 		switch tt {
 		case html.CommentToken:
@@ -154,18 +163,22 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			}
 			diagnosticElements = enterDiagnosticElement(diagnosticElements, tagName, attrs, tt == html.SelfClosingTagToken)
 
-			if tagName == "base" && sr != nil && sr.upstreamBase != nil {
-				for _, a := range attrs {
-					if a.key == "href" && a.val != "" {
-						if baseHref, err := sr.upstreamBase.Parse(a.val); err == nil {
-							sr.effectiveBase = baseHref
-						}
-						break
+			sriDec, prepared := decisions[tokenOffset]
+			if prepared && sr != nil {
+				sr.effectiveBase = sriDec.effectiveBase
+			}
+			if !prepared {
+				sriDec = decideSRIAction(tagName, attrs, sr, origins)
+			}
+			if tagName == "script" {
+				if sriDec.action != sriReplace && sriDec.action != sriBlock {
+					for _, entry := range sri.ParseIntegrity(sriDec.integrityVal) {
+						token := entry.Algorithm + "-" + entry.DigestValue
+						sriDec.integrityChanges = append(sriDec.integrityChanges, sri.IntegrityChange{Original: token, Replacement: token})
 					}
 				}
+				hashes.recordIntegrity(out.Len(), sriDec.integrityChanges)
 			}
-
-			sriDec := decideSRIAction(tagName, attrs, sr, origins)
 			if sriDec.action == sriBlock {
 				if tagName == "script" {
 					suppressElement = true
@@ -305,13 +318,119 @@ func collectTagAttrs(z *html.Tokenizer) []tagAttr {
 	return attrs
 }
 
+// Prepare external resources before rewriting inline text, reserving their
+// output hash identities. This lets an inline source that converges onto an
+// external resource's bytes receive the same harmless collision suffix as two
+// inline sources. Decisions and fetches are made exactly once, in source order.
+func prepareSRIDecisions(body []byte, sr *sriRewriter, origins *OriginMapper, hashes *CSPHashes) map[int]sriDecision {
+	hashes.reserveOriginalHTML(body)
+	if sr == nil {
+		return nil
+	}
+	state := *sr
+	state.cspPolicies = append([]string(nil), sr.cspPolicies...)
+	if hashes.outputs == nil {
+		hashes.outputs = make(map[string]string)
+	}
+	state.outputIdentities = hashes.outputs
+	decisions := make(map[int]sriDecision)
+	z := html.NewTokenizer(bytes.NewReader(body))
+	offset := 0
+	var document cspDocumentState
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
+		}
+		position := offset
+		offset += len(z.Raw())
+		if tt != html.StartTagToken && tt != html.SelfClosingTagToken && tt != html.EndTagToken {
+			document.observe(tt, "", z.Raw())
+			continue
+		}
+		name, hasAttrs := z.TagName()
+		tag := string(name)
+		inHead := document.observe(tt, tag, nil)
+		if tt == html.EndTagToken {
+			continue
+		}
+		var attrs []tagAttr
+		if hasAttrs {
+			attrs = collectTagAttrs(z)
+		}
+		if document.templateDepth == 0 {
+			if tag == "base" && !document.baseSeen && state.upstreamBase != nil {
+				for _, a := range attrs {
+					if a.key == "href" {
+						// Even an empty, invalid or policy-blocked first href
+						// consumes the document's base element choice.
+						document.baseSeen = true
+						value := strings.TrimFunc(a.val, cspASCIIWhitespace)
+						if base, err := state.upstreamBase.Parse(value); err == nil && base.Scheme != "data" && base.Scheme != "javascript" && cspAllowsBase(state.cspPolicies, base, state.upstreamBase) {
+							state.effectiveBase = base
+						}
+						break
+					}
+				}
+			}
+			if inHead && isCSPMeta(tag, attrs) {
+				for _, a := range attrs {
+					if a.key == "content" {
+						state.cspPolicies = append(state.cspPolicies, a.val)
+						break
+					}
+				}
+			}
+		}
+		var decision sriDecision
+		if document.templateDepth > 0 {
+			decision.action = sriKeep
+			for _, a := range attrs {
+				if a.key == "integrity" {
+					decision.integrityVal = a.val
+					break
+				}
+			}
+		} else {
+			decision = decideSRIAction(tag, attrs, &state, origins)
+		}
+		decision.effectiveBase = state.effectiveBase
+		if tag == "base" {
+			// The base element's own relative href resolves against the
+			// fallback document URL, not against the base it just installed.
+			decision.effectiveBase = nil
+		}
+		decisions[position] = decision
+		if decision.originalSHA256 != "" {
+			hashes.outputs[decision.rewrittenSHA256] = decision.originalSHA256
+		}
+	}
+	return decisions
+}
+
 func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *OriginMapper) sriDecision {
 	if tagName != "script" && tagName != "link" {
 		return sriDecision{}
 	}
 
-	var resourceURL, integrityVal, crossoriginVal string
+	var resourceURL, integrityVal, crossoriginVal, nonceVal, typeVal, relVal string
+	noModule := false
+	seen := make(map[string]bool)
 	for _, a := range attrs {
+		if seen[a.key] {
+			continue
+		}
+		seen[a.key] = true
+		if a.key == "nomodule" { noModule = true }
+		if a.key == "nonce" {
+			nonceVal = a.val
+		}
+		if a.key == "type" {
+			typeVal = a.val
+		}
+		if a.key == "rel" {
+			relVal = a.val
+		}
 		if (tagName == "script" && a.key == "src") || (tagName == "link" && a.key == "href") {
 			resourceURL = a.val
 		}
@@ -323,6 +442,11 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 		}
 	}
 
+	// Do not invent speculative fetches for inert script data blocks or
+	// links whose destination is not supported by this SRI pipeline.
+	if tagName == "script" && (!sriScriptType(typeVal) || noModule && !strings.EqualFold(strings.TrimFunc(typeVal, cspASCIIWhitespace), "module")) || tagName == "link" && !sriHasRel(relVal, "stylesheet") {
+		return sriDecision{action: sriKeep, integrityVal: integrityVal}
+	}
 	if resourceURL == "" {
 		return sriDecision{integrityVal: integrityVal}
 	}
@@ -350,17 +474,32 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 	}
 
 	if integrityVal != "" && sr != nil && sr.pipeline != nil {
+		// CSP nonceability rejects dangling-markup shapes even when an
+		// attribute happens to contain a policy's nonce string.
+		for _, a := range attrs {
+			lower := strings.ToLower(a.key + " " + a.val)
+			if strings.Contains(lower, "<script") || strings.Contains(lower, "<style") {
+				nonceVal = ""
+				break
+			}
+		}
+		resource, err := url.Parse(resolvedURL)
+		if err != nil || !CSPAllowsExternal(sr.cspPolicies, resource, sr.upstreamBase, tagName, nonceVal, integrityVal) {
+			// Retain the element so the browser produces the original CSP
+			// violation/error. Do not turn a policy denial into an upstream GET.
+			return sriDecision{action: sriKeep, integrityVal: integrityVal}
+		}
 		ct := guessContentTypeFromTag(tagName)
 		pageOrigin := sr.upstreamBase
-		result := sr.pipeline.Process(resolvedURL, integrityVal, ct, crossoriginVal, pageOrigin, sr.baseReq)
+		result := sr.pipeline.Process(resolvedURL, integrityVal, ct, crossoriginVal, pageOrigin, sr.baseReq, sr.outputIdentities)
 		if result != nil && result.VerificationFailed {
 			return sriDecision{action: sriBlock, integrityVal: integrityVal}
 		}
 		if result != nil && result.UpstreamValid {
 			if result.BytesModified {
-				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityVal: integrityVal, bodyVersion: result.BodyVersion, resolvedURL: resolvedURL}
+				return sriDecision{action: sriReplace, replacementHash: result.ReplacementHash, integrityChanges: result.IntegrityChanges, originalSHA256: result.OriginalSHA256, rewrittenSHA256: result.RewrittenSHA256, integrityVal: integrityVal, bodyVersion: result.BodyVersion, resolvedURL: resolvedURL}
 			}
-			return sriDecision{action: sriKeep, integrityVal: integrityVal, bodyVersion: result.BodyVersion, resolvedURL: resolvedURL}
+			return sriDecision{action: sriKeep, integrityVal: integrityVal, bodyVersion: result.BodyVersion, resolvedURL: resolvedURL, integrityChanges: result.IntegrityChanges, originalSHA256: result.OriginalSHA256, rewrittenSHA256: result.RewrittenSHA256}
 		}
 		return sriDecision{action: sriKeep, integrityVal: integrityVal}
 	}
@@ -370,6 +509,26 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 	}
 
 	return sriDecision{}
+}
+
+func sriHasRel(value, wanted string) bool {
+	for _, token := range strings.FieldsFunc(value, cspASCIIWhitespace) {
+		if strings.EqualFold(token, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func sriScriptType(value string) bool {
+	value = strings.ToLower(strings.TrimFunc(value, cspASCIIWhitespace))
+	switch value {
+	case "", "module", "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript",
+		"application/x-javascript", "application/x-ecmascript", "text/javascript1.0", "text/javascript1.1",
+		"text/javascript1.2", "text/javascript1.3", "text/javascript1.4", "text/javascript1.5", "text/jscript", "text/livescript", "text/x-javascript", "text/x-ecmascript":
+		return true
+	}
+	return false
 }
 
 // Compute changes once: scrubbing records findings and version registration has

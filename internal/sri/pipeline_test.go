@@ -267,8 +267,8 @@ func TestPipeline_MultipleHashesStrongestWins(t *testing.T) {
 	if !result.UpstreamValid {
 		t.Errorf("strongest algorithm (sha384) matches, should be valid, error: %s", result.UpstreamError)
 	}
-	if !strings.HasPrefix(result.ReplacementHash, "sha384-") {
-		t.Errorf("replacement should use strongest algorithm, got %q", result.ReplacementHash)
+	if result.ReplacementHash != integrity {
+		t.Errorf("verification uses the strongest algorithm, but metadata membership must retain the weaker entry: got %q, want %q", result.ReplacementHash, integrity)
 	}
 }
 

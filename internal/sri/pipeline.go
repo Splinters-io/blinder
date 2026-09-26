@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -52,6 +53,17 @@ type ProcessResult struct {
 	BytesModified      bool
 	VerificationFailed bool
 	BodyVersion        string
+	IntegrityChanges   []IntegrityChange
+	OriginalSHA256     string
+	RewrittenSHA256    string
+}
+
+// IntegrityChange binds one supported integrity entry to its replacement.
+// Tokens omit quotes and ?options so the HTML policy rewriter can coordinate
+// CSP hash sources with the reference's integrity metadata.
+type IntegrityChange struct {
+	Original    string
+	Replacement string
 }
 
 type PipelineConfig struct {
@@ -108,7 +120,12 @@ func (p *Pipeline) Findings() []Finding {
 	return out
 }
 
-func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin string, pageOrigin *url.URL, baseReq *http.Request) *ProcessResult {
+// Process optionally receives identities reserved by this document. Keys are
+// canonical "algorithm-base64" hashes (or a bare base64 SHA256), and values
+// are the corresponding original digest. The caller owns the map, uses it
+// sequentially while rewriting one document, and records returned identities;
+// the pipeline and cache only read it.
+func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin string, pageOrigin *url.URL, baseReq *http.Request, reserved ...map[string]string) *ProcessResult {
 	entries := ParseIntegrity(integrityAttr)
 	if len(entries) == 0 {
 		return nil
@@ -140,7 +157,7 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		cacheKey = CacheKeyForAuthority(canonicalURL, cacheKeyReq, resourceReq.Host)
 	}
 
-	if cached, ok := p.cache.Get(cacheKey); ok {
+	if cached, ok := p.cache.getForDocument(cacheKey, reserved...); ok {
 		if cached.FetchError != "" {
 			return &ProcessResult{UpstreamError: cached.FetchError}
 		}
@@ -168,7 +185,6 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 
 	h := sha256.Sum256(body)
 	bodyVersion := "bl" + hex.EncodeToString(h[:8])
-	p.cache.IndexDigest(cacheKey+"\x01"+bodyVersion, body)
 
 	digests := computeAllDigests(body)
 
@@ -184,12 +200,8 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 	}
 	modified := !bytes.Equal(body, scrubbed)
 
-	strongest := StrongestAlgorithm(entries)
-	replacementHash := ComputeIntegrity(scrubbed, strongest)
-
 	cached := &CacheEntry{
 		ScrubbedBody:      scrubbed,
-		ReplacementHash:   replacementHash,
 		ContentType:       respCT,
 		BytesModified:     modified,
 		ResponseHeaders:   respHeaders,
@@ -198,12 +210,10 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 		OriginalBodyBytes: int64(len(body)),
 		OriginalBodyKnown: true,
 	}
-	p.cache.Put(cacheKey, cached)
+	p.cache.PutResource(cacheKey, cached, reserved...)
+	p.cache.IndexDigest(cacheKey+"\x01"+cached.BodyVersion, body)
 
 	result := p.verifyAgainstCached(cached, entries, integrityAttr, resourceURL)
-	if result != nil {
-		result.BodyVersion = bodyVersion
-	}
 	return result
 }
 
@@ -215,13 +225,51 @@ func (p *Pipeline) verifyAgainstCached(cached *CacheEntry, entries []HashEntry, 
 		}
 	}
 
-	p.recordFinding(resourceURL, true, "", integrityAttr, cached.ReplacementHash, cached.BytesModified)
+	replacement, changes := rewriteIntegrityMetadata(integrityAttr, cached.OriginalDigests, computeAllDigests(cached.ScrubbedBody))
+	p.recordFinding(resourceURL, true, "", integrityAttr, replacement, cached.BytesModified)
 	return &ProcessResult{
-		UpstreamValid:   true,
-		ReplacementHash: cached.ReplacementHash,
-		BytesModified:   cached.BytesModified,
-		BodyVersion:     cached.BodyVersion,
+		UpstreamValid:    true,
+		ReplacementHash:  replacement,
+		BytesModified:    cached.BytesModified,
+		BodyVersion:      cached.BodyVersion,
+		IntegrityChanges: changes,
+		OriginalSHA256:   base64.StdEncoding.EncodeToString(cached.OriginalDigests["sha256"]),
+		RewrittenSHA256:  base64.StdEncoding.EncodeToString(computeDigest(cached.ScrubbedBody, "sha256")),
 	}
+}
+
+func rewriteIntegrityMetadata(attr string, original, rewritten map[string][]byte) (string, []IntegrityChange) {
+	tokens := strings.FieldsFunc(attr, integrityWhitespace)
+	var changes []IntegrityChange
+	for i, token := range tokens {
+		entry, ok := parseIntegrityToken(token)
+		if !ok {
+			// Unknown algorithms/options are browser-owned syntax. Retaining
+			// them also avoids removing a future browser's stronger constraint.
+			continue
+		}
+		before, after := original[entry.Algorithm], rewritten[entry.Algorithm]
+		replacement := entry.Algorithm + "-" + entry.DigestValue
+		if !bytes.Equal(before, after) {
+			switch {
+			case bytes.Equal(entry.Digest, before):
+				replacement = entry.Algorithm + "-" + base64.StdEncoding.EncodeToString(after)
+			case bytes.Equal(entry.Digest, after):
+				// Swap digest identities, rather than collapsing a formerly
+				// invalid entry into the newly valid hash. This is a permutation:
+				// the former original digest cannot validate rewritten bytes.
+				replacement = entry.Algorithm + "-" + base64.StdEncoding.EncodeToString(before)
+			}
+		}
+		changes = append(changes, IntegrityChange{Original: entry.Algorithm + "-" + entry.DigestValue, Replacement: replacement})
+		if replacement != entry.Algorithm+"-"+entry.DigestValue {
+			if q := strings.IndexByte(token, '?'); q >= 0 {
+				replacement += token[q:]
+			}
+			tokens[i] = replacement
+		}
+	}
+	return strings.Join(tokens, " "), changes
 }
 
 func verifyDigests(stored map[string][]byte, entries []HashEntry) bool {

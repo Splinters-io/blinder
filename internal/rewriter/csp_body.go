@@ -7,6 +7,9 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strings"
+
+	"github.com/Splinters-io/blinder/internal/sri"
+	"golang.org/x/net/html"
 )
 
 // CSPHashes records the relationship between source text before and after this
@@ -50,7 +53,7 @@ func (c *CSPHashes) record(kind string, position int, original, rewritten []byte
 		c.outputs = make(map[string]string)
 	}
 	var suffix []byte
-	for previous, exists := c.outputs[after[0]]; exists && previous != before[0]; previous, exists = c.outputs[after[0]] {
+	for c.outputConflict(before, after) {
 		// Routing can collapse distinct source strings to identical output.
 		// Keep their CSP identities distinct using trailing whitespace, which
 		// does not change JS/CSS execution. Only collisions cost bytes.
@@ -72,9 +75,123 @@ func (c *CSPHashes) record(kind string, position int, original, rewritten []byte
 		candidate := append(append([]byte(nil), rewritten...), suffix...)
 		after = cspDigests(candidate)
 	}
-	c.outputs[after[0]] = before[0]
+	c.reserveDigests(before, after)
 	c.changes = append(c.changes, cspHashChange{kind: kind, position: position, original: before, rewritten: after})
 	return suffix
+}
+
+var cspAlgorithms = [3]string{"sha256", "sha384", "sha512"}
+
+func (c *CSPHashes) outputConflict(before, after [3]string) bool {
+	if previous, ok := c.outputs[after[0]]; ok && previous != before[0] {
+		return true
+	}
+	for i, algorithm := range cspAlgorithms {
+		if previous, ok := c.outputs[algorithm+"-"+after[i]]; ok && previous != before[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *CSPHashes) reserveDigests(before, after [3]string) {
+	if c.outputs == nil {
+		c.outputs = make(map[string]string)
+	}
+	c.outputs[after[0]] = before[0]
+	for i, algorithm := range cspAlgorithms {
+		c.outputs[algorithm+"-"+after[i]] = before[i]
+	}
+}
+
+// Reserve unchanged identities before considering any transformed output.
+// Denied and unprocessed external references still carry their original SRI:
+// rewriting another permitted source onto that digest must not authorise them.
+// All algorithms matter, including weaker integrity entries which SRI itself
+// does not use for body verification but CSP requires for metadata membership.
+func (c *CSPHashes) reserveOriginalHTML(body []byte) {
+	if c.outputs == nil {
+		c.outputs = make(map[string]string)
+	}
+	reserve := func(source []byte) { digests := cspDigests(source); c.reserveDigests(digests, digests) }
+	z := html.NewTokenizer(bytes.NewReader(body))
+	rawTag, external := "", false
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			return
+		}
+		raw := append([]byte(nil), z.Raw()...)
+		if tt == html.TextToken {
+			if rawTag == "style" || rawTag == "script" && !external {
+				reserve(cspRawText(raw))
+			}
+			continue
+		}
+		if tt != html.StartTagToken && tt != html.SelfClosingTagToken && tt != html.EndTagToken {
+			continue
+		}
+		tn, hasAttrs := z.TagName()
+		tag := string(tn)
+		if tt == html.EndTagToken {
+			if tag == rawTag {
+				rawTag = ""
+			}
+			continue
+		}
+		var attrs []tagAttr
+		if hasAttrs {
+			attrs = collectTagAttrs(z)
+		}
+		if tag == "script" || tag == "style" {
+			rawTag = tag
+		}
+		if tag == "script" {
+			external = false
+			for _, a := range attrs {
+				if a.key == "src" {
+					external = true
+					break
+				}
+			}
+		}
+		seen := make(map[string]bool)
+		for _, a := range attrs {
+			if seen[a.key] {
+				continue
+			}
+			seen[a.key] = true
+			if a.key == "style" || strings.HasPrefix(a.key, "on") {
+				reserve(cspUTF8([]byte(a.val)))
+			}
+			if tag == "script" && external && a.key == "integrity" {
+				for _, entry := range sri.ParseIntegrity(a.val) {
+					digest := base64.StdEncoding.EncodeToString(entry.Digest)
+					c.outputs[entry.Algorithm+"-"+digest] = digest
+					if entry.Algorithm == "sha256" {
+						c.outputs[digest] = digest
+					}
+				}
+			}
+		}
+	}
+}
+
+// External script CSP compares integrity metadata, rather than hashing an
+// inline text node. Retain each entry (including weaker/invalid entries): CSP
+// requires all supported entries even though SRI verifies only the strongest.
+func (c *CSPHashes) recordIntegrity(position int, changes []sri.IntegrityChange) {
+	for _, change := range changes {
+		before, after := sri.ParseIntegrity(change.Original), sri.ParseIntegrity(change.Replacement)
+		if len(before) != 1 || len(after) != 1 || before[0].Algorithm != after[0].Algorithm {
+			continue
+		}
+		index := map[string]int{"sha256": 0, "sha384": 1, "sha512": 2}[before[0].Algorithm]
+		item := cspHashChange{kind: "script", position: position}
+		item.original[index] = base64.StdEncoding.EncodeToString(before[0].Digest)
+		item.rewritten[index] = base64.StdEncoding.EncodeToString(after[0].Digest)
+		c.changes = append(c.changes, item)
+	}
 }
 
 func cspHashKind(directive, kind string) bool {

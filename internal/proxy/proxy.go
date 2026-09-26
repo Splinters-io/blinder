@@ -994,6 +994,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Path:   r.URL.Path,
 	}
 	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
+		CSPPolicies:     resp.Header.Values("Content-Security-Policy"),
 		StatusCode:      resp.StatusCode,
 		Origins:         requestOrigins,
 		SRIPipeline:     s.sriPipeline,
@@ -1004,6 +1005,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return s.captchaMatcher.RewriteResourceURL(raw, base, s.cfg.UseTor())
 		},
 	})
+	// A version can pin collision-disambiguating whitespace as well as the
+	// original body digest. Regenerate that representation after no-store or
+	// cache eviction; the original bytes were authenticated above.
+	if r.Method == http.MethodGet && sriBodyVersion != "" {
+		result.Body = sri.ApplyBodyVersion(body, result.Body, sriBodyVersion)
+	}
 	s.stats.Scrubbed.Add(1)
 
 	leakCount = gate.ResidualLeakCount(string(result.Body))

@@ -324,3 +324,7 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 - **Routing and scale:** complete the live Tor track above; complex multi-origin applications, long-running sessions, load, memory growth and all release platforms remain separate test work.
 
 Release acceptance requires the open functional failures to be fixed, the full functional command to pass, and the selected operator workflow to have evidence and explicit sign-off. Acceptance of Tor mode also requires the live Tor/onion track; do not substitute the local SOCKS fixture. Keep unsupported capabilities visible in the release scope.
+
+### External CSP and SRI comparison
+
+Run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -run '^TestExternalControlFidelityBrowser$' -v ./internal/proxy` and open the local HTTPS URL written to `/private/tmp/blinder-external-csp-browser-url.txt` in the already trusted Chrome profile. The fixture runs the direct baseline followed by Blinder and verifies execution, policy violations, resource errors and upstream request counts. It writes `/private/tmp/blinder-external-csp-browser-result.json`. See the [29-pair acceptance record](testing-results-2026-09-26-external-csp.md). Do not replace a browser trust failure with a certificate bypass or count an opt-in skip as a pass.
