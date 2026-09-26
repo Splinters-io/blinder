@@ -192,6 +192,30 @@ func run() int {
 		return 1
 	}
 
+	if cfg.HAR != nil && configFile != "" {
+		fc, _ := config.LoadFile(configFile)
+		if fc != nil {
+			if fc.HAR.MaxEntries > 0 {
+				cfg.HAR.MaxEntries = fc.HAR.MaxEntries
+			}
+			if fc.HAR.CaptureBudget > 0 {
+				cfg.HAR.CaptureBudget = fc.HAR.CaptureBudget
+			}
+		}
+	}
+
+	// Report an unusable endpoint before certificate generation or platform trust
+	// checks. Certificate-only commands do not reserve a listening socket.
+	var ln net.Listener
+	if !preflight && !trustCert {
+		ln, err = net.Listen("tcp", cfg.ListenAddr)
+		if err != nil {
+			log.Printf("  Listen failed: %v", err)
+			return 1
+		}
+		defer ln.Close()
+	}
+
 	var extraAliases []string
 	for _, u := range cfg.ExtraOrigins {
 		extraAliases = append(extraAliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
@@ -257,12 +281,6 @@ func run() int {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-	ln, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		log.Printf("  Listen failed: %v", err)
-		return 1
-	}
-	defer ln.Close()
 	log.Printf("  Proxy listening on https://%s", ln.Addr())
 	serverErr := make(chan error, 1)
 

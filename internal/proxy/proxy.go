@@ -170,7 +170,10 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 
 	var harWriter *har.Writer
 	if cfg.HAR != nil {
-		harWriter = har.NewWriter(cfg.HAR.FilePath, cfg.HAR.MaxBodySize, 0)
+		harWriter = har.NewWriter(cfg.HAR.FilePath, cfg.HAR.MaxBodySize, cfg.HAR.MaxEntries)
+		if cfg.HAR.CaptureBudget > 0 {
+			harWriter.SetCaptureBudget(cfg.HAR.CaptureBudget)
+		}
 	}
 
 	session := manifest.NewSession(cfg.AliasDomain, cfg.TargetURL.String())

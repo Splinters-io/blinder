@@ -17,8 +17,10 @@ type TorConfig struct {
 }
 
 type HARConfig struct {
-	FilePath    string
-	MaxBodySize int64
+	FilePath      string
+	MaxBodySize   int64
+	MaxEntries    int
+	CaptureBudget int
 }
 
 type Config struct {

@@ -21,8 +21,10 @@ type FileConfig struct {
 		Addr    string `yaml:"addr"`
 	} `yaml:"tor"`
 	HAR struct {
-		Path    string `yaml:"path"`
-		MaxBody int64  `yaml:"max_body"`
+		Path          string `yaml:"path"`
+		MaxBody       int64  `yaml:"max_body"`
+		MaxEntries    int    `yaml:"max_entries"`
+		CaptureBudget int    `yaml:"capture_budget"`
 	} `yaml:"har"`
 	NoVerifyTLS bool `yaml:"no_verify_tls"`
 	Paranoid    bool `yaml:"paranoid"`
