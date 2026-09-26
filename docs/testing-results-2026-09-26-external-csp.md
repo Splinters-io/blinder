@@ -52,4 +52,4 @@ Broader CSP source-expression translation, dynamic DOM/nonce relationships, Trus
 
 Tor CAPTCHA provider origin isolation is next: the current relay shares an embedding origin and changes provider CORS/CSP behaviour. The new external-resource checks do not close that gate, live Tor/onion acceptance or real-provider human completion.
 
-The acceptance rule follows the [CSP specification](https://www.w3.org/TR/CSP3/), with the browser behaviour recorded explicitly when syntax handling differs from a literal reading. This checkpoint remains local; the previously published baseline is d659e9c.
+The acceptance rule follows the [CSP specification](https://www.w3.org/TR/CSP3/), with the browser behaviour recorded explicitly when syntax handling differs from a literal reading. This report covers source checkpoint `36b700b`, following the previously published baseline `d659e9c`.

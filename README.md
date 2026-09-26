@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/blinder-header.svg" alt="Blinder — less identity, more signal. A content-blind reverse proxy." width="100%">
+  <img src="docs/assets/blinder-header.svg" alt="Blinder" width="100%">
 </p>
 
 <p align="center">
