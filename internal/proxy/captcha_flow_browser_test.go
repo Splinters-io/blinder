@@ -22,8 +22,11 @@ import (
 	"github.com/Splinters-io/blinder/internal/config"
 )
 
+const captchaFlowSolution = "synthetic-valid-solution"
+
 type captchaFlowRequest struct {
 	Method, URI, Host, Origin, Referer string
+	PreflightMethod, PreflightHeaders  string
 	CookieNames                        []string
 	ProviderSession                    string
 	TargetCredential                   bool
@@ -32,7 +35,12 @@ type captchaFlowRequest struct {
 }
 
 func observeCaptchaFlowRequest(r *http.Request) captchaFlowRequest {
-	row := captchaFlowRequest{Method: r.Method, URI: r.URL.RequestURI(), Host: r.Host, Origin: r.Header.Get("Origin"), Referer: r.Header.Get("Referer"), Authorization: r.Header.Get("Authorization") != ""}
+	row := captchaFlowRequest{
+		Method: r.Method, URI: r.URL.RequestURI(), Host: r.Host,
+		Origin: r.Header.Get("Origin"), Referer: r.Header.Get("Referer"),
+		PreflightMethod: r.Header.Get("Access-Control-Request-Method"), PreflightHeaders: r.Header.Get("Access-Control-Request-Headers"),
+		Authorization: r.Header.Get("Authorization") != "",
+	}
 	for _, cookie := range r.Cookies() {
 		row.CookieNames = append(row.CookieNames, cookie.Name)
 		switch cookie.Name {
@@ -84,6 +92,7 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 		observed := append([]string(nil), requests...)
 		providerObserved := append([]captchaFlowRequest(nil), providerRequests...)
 		relayObserved := append([]captchaFlowRelayRequest(nil), relayRequests...)
+		challengeObserved := challengeID
 		retryObserved := make(map[string]string, len(retry))
 		for k, v := range retry {
 			retryObserved[k] = v
@@ -92,7 +101,7 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 		evidence := map[string]any{
 			"completed": completed, "passed": !t.Failed() && completed, "termination": termination,
 			"status": resultStatus, "body": resultBody, "error": resultError,
-			"operatorURL": operatorURL, "challengeID": challengeID, "retry": retryObserved,
+			"operatorURL": operatorURL, "challengeID": challengeObserved, "retry": retryObserved,
 			"providerRequests": observed, "providerObservations": providerObserved,
 			"relayRequests": relayObserved, "socksDestinations": socksDestinations(),
 			"transport": "synthetic local SOCKS; HTTP localhost browser endpoints; no live Tor or TLS trust acceptance",
@@ -161,7 +170,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"token":"synthetic-valid-solution"}`)
+			json.NewEncoder(w).Encode(map[string]string{"token": captchaFlowSolution})
 		case "/widget/status":
 			cookie, err := r.Cookie("provider_session")
 			if err != nil || cookie.Value != "fixture-session" {
@@ -206,6 +215,10 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		mu.Lock()
 		retry = map[string]string{"method": r.Method, "username": r.Form.Get("username"), "csrf": r.Form.Get("csrf"), "token": r.Form.Get("fixture-response"), "cookies": r.Header.Get("Cookie")}
 		mu.Unlock()
+		if r.Form.Get("fixture-response") != captchaFlowSolution {
+			http.Error(w, "invalid synthetic solution", http.StatusForbidden)
+			return
+		}
 		if r.Method != "POST" || r.Form.Get("username") != "fixture-user" || r.Form.Get("csrf") != "fresh" || a == nil || a.Value != "one" || b == nil || b.Value != "two" {
 			http.Error(w, "original session/form lost", 400)
 			return
@@ -262,7 +275,10 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	mux.HandleFunc("/review-bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		token, _ := json.Marshal("Bearer " + s.CaptchaOperatorToken())
-		fmt.Fprintf(w, `<!doctype html><script>(async()=>{const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.ok)location.href='/__blinder/captcha/challenge/%s'})()</script>`, token, challengeID)
+		mu.Lock()
+		id := challengeID
+		mu.Unlock()
+		fmt.Fprintf(w, `<!doctype html><script>(async()=>{const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.ok)location.href='/__blinder/captcha/challenge/%s'})()</script>`, token, id)
 	})
 	mux.HandleFunc("/review-cleanup", func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: captcha.OperatorCookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
@@ -305,8 +321,11 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		body, _ := io.ReadAll(resp.Body)
 		done <- result{status: resp.StatusCode, body: string(body)}
 	}()
-	challengeID = captchaDeliveryWaitID(t, s)
-	captchaFollowupWaiter(t, s, challengeID)
+	id := captchaDeliveryWaitID(t, s)
+	captchaFollowupWaiter(t, s, id)
+	mu.Lock()
+	challengeID = id
+	mu.Unlock()
 	u, _ := url.Parse(server.URL)
 	u.Host = captcha.OperatorHost + ":" + u.Port()
 	u.Path = "/review-bootstrap"
@@ -327,9 +346,13 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		observed := append([]string(nil), requests...)
 		providerObserved := append([]captchaFlowRequest(nil), providerRequests...)
 		relayObserved := append([]captchaFlowRelayRequest(nil), relayRequests...)
+		retriedToken := retry["token"]
 		mu.Unlock()
 		if got.err != nil || got.status != 200 || got.body != "Original request resumed" {
 			t.Errorf("end-to-end flow failed: %v status=%d body=%q", got.err, got.status, got.body)
+		}
+		if retriedToken != captchaFlowSolution {
+			t.Errorf("upstream retry did not receive the exact synthetic provider solution: got %q", retriedToken)
 		}
 		for _, want := range []string{"GET /widget/start", "GET /widget/frame?stage=one", "GET /widget/api.js?render=explicit&onload=ready", "GET /widget/dynamic.js", "GET /widget/inner", "POST /widget/verify?mode=one&mode=two", "GET /widget/status", "PUT /widget/method/PUT", "PATCH /widget/method/PATCH", "DELETE /widget/method/DELETE", "OPTIONS /widget/method/OPTIONS", "PROPFIND /widget/method/PROPFIND", "vendor.sync /widget/method/vendor.sync"} {
 			found := false
@@ -354,6 +377,30 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		for _, row := range relayObserved {
 			if row.Error != "" {
 				t.Errorf("provider relay error for %s %s: %s", row.Request.Method, row.Request.URI, row.Error)
+			}
+			// Provider APIs are same-origin inside their own document. A
+			// browser-added preflight exposes a changed origin relationship;
+			// record the real response, never count it as a completed API call.
+			if row.Request.Method == http.MethodOptions && row.Request.PreflightMethod != "" {
+				t.Errorf("unexpected provider CORS preflight for %s %s: status=%d", row.Request.PreflightMethod, row.Request.URI, row.Status)
+			} else {
+				requestURL, err := url.ParseRequestURI(row.Request.URI)
+				wantStatus := 0
+				if err == nil {
+					switch requestURL.Path {
+					case "/widget/start":
+						wantStatus = http.StatusFound
+					case "/widget/frame", "/widget/api.js", "/widget/dynamic.js", "/widget/inner", "/widget/verify", "/widget/status":
+						wantStatus = http.StatusOK
+					default:
+						if strings.HasPrefix(requestURL.Path, "/widget/method/") {
+							wantStatus = http.StatusNoContent
+						}
+					}
+				}
+				if wantStatus == 0 || row.Status != wantStatus {
+					t.Errorf("provider relay status for %s %s = %d, want %d", row.Request.Method, row.Request.URI, row.Status, wantStatus)
+				}
 			}
 			relayed = append(relayed, row.Request)
 		}
