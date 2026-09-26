@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -19,6 +18,7 @@ import (
 	"github.com/Splinters-io/blinder/internal/cache"
 	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/formedit"
 	"github.com/Splinters-io/blinder/internal/har"
 	"github.com/Splinters-io/blinder/internal/manifest"
 	"github.com/Splinters-io/blinder/internal/rewriter"
@@ -178,19 +178,20 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	sriCache := sri.NewCache(256)
 
 	scrubFn := func(body []byte, contentType, path string) []byte {
-		result := rewriter.RewriteBody(body, contentType, path, gate, cfg.Paranoid)
+		result := rewriter.RewriteBody(body, contentType, path, gate, cfg.Paranoid, rewriter.RewriteOpts{Origins: origins})
 		return result.Body
 	}
 
 	sriCfg := sri.PipelineConfig{
-		Transport: transport,
-		ScrubFn:   scrubFn,
-		Cache:     sriCache,
+		Transport:    transport,
+		ScrubFn:      scrubFn,
+		Cache:        sriCache,
+		FetchTimeout: upstreamTimeout,
 		IsAllowedOrigin: func(u *url.URL) bool {
 			return origins.IsKnownFullOrigin(u)
 		},
-		CookieRestoreFn: func(cookieHeader string) string {
-			return gate.RestoreCookieHeader(cookieHeader)
+		CookieRestoreFn: func(cookieHeader, origin string) string {
+			return gate.RestoreCookieHeader(cookieHeader, origin)
 		},
 	}
 
@@ -200,18 +201,16 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 				return
 			}
 			if rec.Error != "" {
-				harWriter.RecordFetchFailure(rec.Request, rec.Status, rec.Headers, rec.Body, rec.Error, rec.Elapsed)
+				harWriter.RecordFetchFailure(rec.Request, rec.Status, rec.Headers, rec.Body, rec.Error, rec.Elapsed, har.FetchFailureDetails{HTTPVersion: rec.HTTPVersion, StatusLine: rec.StatusLine, EncodedBytes: &rec.EncodedBytes, DecodedBytes: &rec.DecodedBytes})
 				return
 			}
 			resp := &http.Response{
 				StatusCode: rec.Status,
-				Status:     fmt.Sprintf("%d %s", rec.Status, http.StatusText(rec.Status)),
+				Status:     rec.StatusLine,
 				Header:     rec.Headers,
-				Proto:      "HTTP/1.1",
-				ProtoMajor: 1,
-				ProtoMinor: 1,
+				Proto:      rec.HTTPVersion,
 			}
-			harWriter.Record(rec.Request, nil, resp, rec.Body, rec.Elapsed)
+			harWriter.Record(rec.Request, nil, resp, rec.Body, rec.Elapsed, har.ResponseBodyInfo{EncodedBytes: rec.EncodedBytes, DecodedBytes: &rec.DecodedBytes})
 		}
 	}
 
@@ -381,34 +380,32 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.stats.Requests.Add(1)
 
 	if ws.IsUpgrade(r) {
-		wsStart := time.Now()
-		err := s.wsProxy.Handle(w, r)
-		wsElapsed := time.Since(wsStart)
-		if s.harWriter != nil {
-			if err != nil {
-				s.harWriter.RecordError(r, nil, http.StatusBadGateway, err.Error(), wsElapsed)
-			} else {
-				s.harWriter.RecordUpgrade(r, wsElapsed)
-			}
-		}
-		if err != nil {
-			log.Printf("[error] websocket: %v", err)
-			s.stats.Errors.Add(1)
-		}
+		s.handleWebSocket(w, r)
 		return
 	}
 
 	gate := s.gate.ForRequest()
 	status := http.StatusOK
 	var leakCount int
+	observed := newResponseObserver(w, r.Method)
+	w = observed
 	defer func() {
-		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), leakCount)
+		if observed.status != 0 {
+			status = observed.status
+		}
+		if observed.metrics.Source == "proxy" {
+			observed.metrics.RewrittenBodyBytes = observed.writtenBytes
+		}
+		s.manifest.RecordRequest(r.URL.Path, status, gate.ReplacementCount(), leakCount, observed.metrics)
 	}()
 
 	upstream := s.origins.Resolve(r.Host)
 	if upstream == nil {
 		upstream = s.cfg.TargetURL
 	}
+	// Restore issued path mappings before submission scoping, version checks
+	// and cache keys. Preserve escaped segment boundaries just as WS does.
+	rewriter.RestoreURLPath(r.URL, gate)
 
 	if r.ContentLength > maxRequestBody {
 		status = http.StatusRequestEntityTooLarge
@@ -439,38 +436,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			normCT = strings.TrimSpace(normCT[:i])
 		}
 		if strings.HasPrefix(normCT, "application/x-www-form-urlencoded") {
-			if formValues, err := url.ParseQuery(string(reqBodyBuf)); err == nil {
-				needsRestore := false
-				for key, vals := range formValues {
-					if gate.ContainsAlias(key) || gate.ContainsEscape(key) {
-						needsRestore = true
-						break
-					}
-					for _, v := range vals {
-						if gate.ContainsAlias(v) || gate.ContainsEscape(v) {
-							needsRestore = true
-							break
-						}
-					}
-					if needsRestore {
-						break
-					}
-				}
-				if needsRestore {
-					restored := make(url.Values, len(formValues))
-					for key, vals := range formValues {
-						rk := gate.RestoreBody(key)
-						for _, v := range vals {
-							if s.captchaMatcher.SubmissionHasOpaqueFields(r, rk, upstream.Hostname()) {
-								restored.Add(rk, v)
-							} else {
-								restored.Add(rk, gate.RestoreBody(v))
-							}
-						}
-					}
-					reqBodyBuf = []byte(restored.Encode())
-				}
-			}
+			restored, err := formedit.Rewrite(string(reqBodyBuf), gate.RestoreBody, func(key string) bool {
+				return s.captchaMatcher.SubmissionHasOpaqueFields(r, key, upstream.Hostname())
+			})
+			if err == nil {
+				reqBodyBuf = []byte(restored)
+			} // Preserve malformed encoding for the upstream's own error handling.
 		} else if normCT == "application/json" || strings.HasSuffix(normCT, "+json") {
 			opaqueKeys := s.opaqueJSONKeys(r, upstream.Hostname())
 			if len(opaqueKeys) > 0 {
@@ -498,25 +469,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rawQuery := r.URL.RawQuery; rawQuery != "" {
-		if q, err := url.ParseQuery(rawQuery); err == nil {
-			restored := make(url.Values, len(q))
-			changed := false
-			for key, vals := range q {
-				rk := gate.RestoreBody(key)
-				if rk != key {
-					changed = true
-				}
-				for _, v := range vals {
-					rv := gate.RestoreBody(v)
-					if rv != v {
-						changed = true
-					}
-					restored.Add(rk, rv)
-				}
-			}
-			if changed {
-				r.URL.RawQuery = restored.Encode()
-			}
+		if restored, err := formedit.Rewrite(rawQuery, gate.RestoreBody, nil); err == nil {
+			r.URL.RawQuery = restored
 		}
 	}
 
@@ -567,7 +521,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			delete(appQuery, "__blv")
 		}
-		appURI := r.URL.Path
+		appURI := r.URL.EscapedPath()
 		if encoded := appQuery.Encode(); encoded != "" {
 			appURI += "?" + encoded
 		}
@@ -619,6 +573,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				if ok && !cached.VarySentinel {
 					if cached.IsFresh() {
+						original := int64(-1)
+						if cached.OriginalBodyKnown {
+							original = cached.OriginalBodyBytes
+						}
+						observed.representation("cache", original, int64(len(cached.Body)))
 						inm := r.Header.Get("If-None-Match")
 						if cache.MatchesETag(inm, cached.ETag) {
 							for name, values := range cached.Headers {
@@ -654,6 +613,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.URL.Scheme = upstream.Scheme
 	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
+	// Negotiate only encodings we decode ourselves, keeping both byte counts
+	// observable instead of letting http.Transport silently decompress gzip.
+	upstreamReq.Header.Set("Accept-Encoding", "gzip, identity")
 	if parsed, err := url.Parse(upstreamURL); err == nil {
 		upstreamReq.URL.Path = parsed.Path
 		upstreamReq.URL.RawPath = parsed.RawPath
@@ -682,10 +644,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.transport.RoundTrip(upstreamReq)
 	if err != nil {
 		status = http.StatusBadGateway
+		observed.metrics.Upstream = append(observed.metrics.Upstream, manifest.BodyRead{Error: "transport"})
 		elapsed := time.Since(requestStart)
 		log.Printf("[error] upstream: %v", err)
 		if s.harWriter != nil {
-			s.harWriter.RecordError(upstreamReq, reqBodyBuf, http.StatusBadGateway, err.Error(), elapsed)
+			s.harWriter.RecordFetchFailure(upstreamReq, 0, nil, nil, err.Error(), elapsed, har.FetchFailureDetails{RequestBody: reqBodyBuf})
 		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
@@ -697,6 +660,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// --- Upstream 304: revalidation confirmed cached content is current ---
 	if resp.StatusCode == http.StatusNotModified && staleEntry != nil {
+		observed.metrics.Upstream = append(observed.metrics.Upstream, manifest.BodyRead{StatusCode: resp.StatusCode, Complete: true})
+		original := int64(-1)
+		if staleEntry.OriginalBodyKnown {
+			original = staleEntry.OriginalBodyBytes
+		}
+		observed.representation("cache", original, int64(len(staleEntry.Body)))
 		if s.harWriter != nil {
 			s.harWriter.Record(upstreamReq, reqBodyBuf, resp, nil, elapsed)
 		}
@@ -789,12 +758,14 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := s.readResponseBody(resp)
+	body, measured, err := readMeasuredResponse(resp, r.Method)
+	observed.metrics.Upstream = append(observed.metrics.Upstream, measured)
+	elapsed = time.Since(requestStart)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Printf("[error] reading body: %v", err)
 		if s.harWriter != nil {
-			s.harWriter.RecordError(upstreamReq, reqBodyBuf, http.StatusBadGateway, err.Error(), elapsed)
+			s.harWriter.RecordFetchFailure(upstreamReq, resp.StatusCode, resp.Header, body, err.Error(), elapsed, har.FetchFailureDetails{RequestBody: reqBodyBuf, EncodedBytes: &measured.EncodedBytes, HTTPVersion: resp.Proto, StatusLine: resp.Status})
 		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		s.stats.Errors.Add(1)
@@ -802,7 +773,21 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.harWriter != nil {
-		s.harWriter.Record(upstreamReq, reqBodyBuf, resp, body, elapsed)
+		s.harWriter.Record(upstreamReq, reqBodyBuf, resp, body, elapsed, har.ResponseBodyInfo{EncodedBytes: measured.EncodedBytes})
+	}
+	if r.Method == http.MethodHead {
+		observed.representation("upstream", -1, -1)
+		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, s.cfg.TargetURL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+		for name, values := range out {
+			w.Header()[name] = values
+		}
+		// No representation bytes were received, so neither its transformed
+		// length nor its downstream validator can be computed truthfully.
+		w.Header()["Content-Length"] = nil
+		w.Header().Del("Content-Encoding")
+		w.Header().Del("Transfer-Encoding")
+		w.WriteHeader(resp.StatusCode)
+		return
 	}
 
 	s.stats.Bytes.Add(int64(len(body)))
@@ -885,18 +870,24 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				retryResp, retryRespErr := s.transport.RoundTrip(retryReq)
 				retryElapsed := time.Since(retryStart)
 				if retryRespErr != nil {
+					observed.metrics.Upstream = append(observed.metrics.Upstream, manifest.BodyRead{Error: "transport"})
 					log.Printf("[captcha] upstream re-submission failed: %v", retryRespErr)
 					if s.harWriter != nil {
-						s.harWriter.RecordError(retryReq, retryBodyBytes, http.StatusBadGateway, retryRespErr.Error(), retryElapsed)
+						s.harWriter.RecordFetchFailure(retryReq, 0, nil, nil, retryRespErr.Error(), retryElapsed, har.FetchFailureDetails{RequestBody: retryBodyBytes})
 					}
 				} else {
-					retryRespBody, readErr := s.readResponseBody(retryResp)
+					retryRespBody, retryMeasured, readErr := readMeasuredResponse(retryResp, retryMethod)
+					observed.metrics.Upstream = append(observed.metrics.Upstream, retryMeasured)
+					retryElapsed = time.Since(retryStart)
 					retryResp.Body.Close()
 					if readErr != nil {
 						log.Printf("[captcha] reading retry response: %v", readErr)
+						if s.harWriter != nil {
+							s.harWriter.RecordFetchFailure(retryReq, retryResp.StatusCode, retryResp.Header, retryRespBody, readErr.Error(), retryElapsed, har.FetchFailureDetails{RequestBody: retryBodyBytes, EncodedBytes: &retryMeasured.EncodedBytes, HTTPVersion: retryResp.Proto, StatusLine: retryResp.Status})
+						}
 					} else {
 						if s.harWriter != nil {
-							s.harWriter.Record(retryReq, retryBodyBytes, retryResp, retryRespBody, retryElapsed)
+							s.harWriter.Record(retryReq, retryBodyBytes, retryResp, retryRespBody, retryElapsed, har.ResponseBodyInfo{EncodedBytes: retryMeasured.EncodedBytes})
 						}
 						body = retryRespBody
 						resp = retryResp
@@ -938,11 +929,30 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Mutation invalidation: successful writes invalidate cached GET responses.
-	if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch) &&
+	// Extension methods may mutate state too. Only methods with known safe
+	// semantics are exempt from invalidation (RFC 9111, section 4.4).
+	unsafeMethod := r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		r.Method != http.MethodOptions && r.Method != http.MethodTrace
+	if unsafeMethod &&
 		resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		s.responseCache.InvalidateURL(upstreamURL)
 		s.sriCache.InvalidateURL(upstreamURL)
+	}
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+		original, rewritten := int64(0), int64(0)
+		if resp.StatusCode == http.StatusNotModified {
+			original, rewritten = -1, -1
+		}
+		observed.representation("upstream", original, rewritten)
+		out := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, s.cfg.TargetURL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+		for name, values := range out {
+			w.Header()[name] = values
+		}
+		w.Header()["Content-Length"] = nil
+		w.Header().Del("Content-Encoding")
+		w.Header().Del("Transfer-Encoding")
+		w.WriteHeader(resp.StatusCode)
+		return
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -954,6 +964,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Path:   r.URL.Path,
 	}
 	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
+		StatusCode:      resp.StatusCode,
 		Origins:         s.origins,
 		SRIPipeline:     s.sriPipeline,
 		UpstreamBase:    docURL,
@@ -966,6 +977,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.stats.Scrubbed.Add(1)
 
 	leakCount = gate.ResidualLeakCount(string(result.Body))
+	observed.representation("upstream", int64(len(body)), int64(len(result.Body)))
 
 	outHeaders := rewriter.RewriteResponseHeaders(
 		resp.Header,
@@ -1018,6 +1030,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				StatusCode:           resp.StatusCode,
 				Headers:              storedHeaders,
 				ContentType:          contentType,
+				OriginalBodyBytes:    int64(len(body)),
+				OriginalBodyKnown:    true,
 				ETag:                 etag,
 				UpstreamETag:         resp.Header.Get("ETag"),
 				UpstreamLastModified: resp.Header.Get("Last-Modified"),
@@ -1111,6 +1125,11 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 		s.stats.Errors.Add(1)
 		return true
 	}
+	original := int64(-1)
+	if entry.OriginalBodyKnown {
+		original = entry.OriginalBodyBytes
+	}
+	observeRepresentation(w, "sri-cache", original, int64(len(entry.ScrubbedBody)))
 
 	etag := cache.ComputeETag(entry.ScrubbedBody)
 
@@ -1165,6 +1184,11 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 }
 
 func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, headOnly bool, requestOrigin string) {
+	original := int64(-1)
+	if entry.OriginalBodyKnown {
+		original = entry.OriginalBodyBytes
+	}
+	observeRepresentation(w, "cache", original, int64(len(entry.Body)))
 	for name, values := range entry.Headers {
 		for _, v := range values {
 			w.Header().Add(name, v)
@@ -1188,31 +1212,8 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, 
 }
 
 func (s *Server) readResponseBody(resp *http.Response) ([]byte, error) {
-	var reader io.Reader = resp.Body
-
-	encoding := strings.ToLower(strings.TrimSpace(strings.Join(resp.Header.Values("Content-Encoding"), ",")))
-	switch encoding {
-	case "", "identity":
-	case "gzip":
-		gz, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("gzip decode: %w", err)
-		}
-		defer gz.Close()
-		reader = gz
-	default:
-		return nil, fmt.Errorf("unsupported response encoding")
-	}
-
-	body, err := io.ReadAll(io.LimitReader(reader, maxResponseBody+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > maxResponseBody {
-		return nil, fmt.Errorf("response body too large")
-	}
-
-	return body, nil
+	body, _, err := readMeasuredResponse(resp, "")
+	return body, err
 }
 
 func (s *Server) unaliasURL(upstreamURL string) string {
@@ -1397,65 +1398,7 @@ func (s *Server) buildCaptchaRetryBody(originalBody []byte, contentType string, 
 }
 
 func (s *Server) restoreJSONWithOpaqueKeys(gate *scrub.Gate, input []byte, opaqueKeys map[string]bool) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(input))
-	dec.UseNumber()
-	var parsed interface{}
-	if err := dec.Decode(&parsed); err != nil {
-		return []byte(gate.RestoreBody(string(input))), nil
-	}
-	if len(bytes.TrimSpace(input[dec.InputOffset():])) > 0 {
-		return input, nil
-	}
-
-	result, ok := restoreJSONExcludingOpaque(gate, parsed, opaqueKeys)
-	if !ok {
-		return nil, fmt.Errorf("ambiguous JSON body")
-	}
-
-	out, err := json.Marshal(result)
-	if err != nil {
-		return input, nil
-	}
-	return out, nil
-}
-
-func restoreJSONExcludingOpaque(gate *scrub.Gate, v interface{}, opaqueKeys map[string]bool) (interface{}, bool) {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		result := make(map[string]interface{}, len(val))
-		for key, value := range val {
-			restoredKey := gate.RestoreBody(key)
-			if _, exists := result[restoredKey]; exists {
-				return nil, false
-			}
-			if opaqueKeys[restoredKey] {
-				result[restoredKey] = value
-			} else {
-				rv, ok := restoreJSONExcludingOpaque(gate, value, opaqueKeys)
-				if !ok {
-					return nil, false
-				}
-				result[restoredKey] = rv
-			}
-		}
-		return result, true
-	case []interface{}:
-		result := make([]interface{}, len(val))
-		for i, item := range val {
-			rv, ok := restoreJSONExcludingOpaque(gate, item, opaqueKeys)
-			if !ok {
-				return nil, false
-			}
-			result[i] = rv
-		}
-		return result, true
-	case json.Number:
-		return val, true
-	case string:
-		return gate.RestoreBody(val), true
-	default:
-		return v, true
-	}
+	return gate.RestoreJSONWithOpaqueKeys(input, opaqueKeys)
 }
 
 func injectCaptchaCSP(headers http.Header, captchaEntries []string) http.Header {

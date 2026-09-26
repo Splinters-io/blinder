@@ -5,11 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/Splinters-io/blinder/internal/jsonedit"
 )
 
 var (
@@ -376,14 +379,19 @@ func (g *Gate) Aliases() map[string]string {
 	return result
 }
 
-func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) string {
+func cookieValueKey(aliasedName, origin string) string {
+	return aliasedName + "\x00" + origin
+}
+
+func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed, origin string) string {
 	if g.parent != nil {
-		return g.parent.RecordCookieValue(aliasedName, original, scrubbed)
+		return g.parent.RecordCookieValue(aliasedName, original, scrubbed, origin)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	for _, m := range g.cookieValues[aliasedName] {
+	key := cookieValueKey(aliasedName, origin)
+	for _, m := range g.cookieValues[key] {
 		if m.original == original {
 			return m.scrubbed
 		}
@@ -393,7 +401,7 @@ func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) string 
 	h := sha256.Sum256([]byte(original))
 	for hashLen := 3; hashLen <= 32; hashLen++ {
 		collision := false
-		for _, m := range g.cookieValues[aliasedName] {
+		for _, m := range g.cookieValues[key] {
 			if m.scrubbed == unique {
 				collision = true
 				break
@@ -405,9 +413,9 @@ func (g *Gate) RecordCookieValue(aliasedName, original, scrubbed string) string 
 		unique = scrubbed + ":" + hex.EncodeToString(h[:hashLen])
 	}
 
-	updated := make([]cookieValueMapping, len(g.cookieValues[aliasedName]), len(g.cookieValues[aliasedName])+1)
-	copy(updated, g.cookieValues[aliasedName])
-	g.cookieValues[aliasedName] = append(updated, cookieValueMapping{original: original, scrubbed: unique})
+	updated := make([]cookieValueMapping, len(g.cookieValues[key]), len(g.cookieValues[key])+1)
+	copy(updated, g.cookieValues[key])
+	g.cookieValues[key] = append(updated, cookieValueMapping{original: original, scrubbed: unique})
 	return unique
 }
 
@@ -426,13 +434,14 @@ func (g *Gate) ResidualLeakCount(scrubbed string) int {
 	return count
 }
 
-func (g *Gate) RestoreCookieValue(aliasedName, currentValue string) string {
+func (g *Gate) RestoreCookieValue(aliasedName, currentValue, origin string) string {
 	if g.parent != nil {
-		return g.parent.RestoreCookieValue(aliasedName, currentValue)
+		return g.parent.RestoreCookieValue(aliasedName, currentValue, origin)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, m := range g.cookieValues[aliasedName] {
+	key := cookieValueKey(aliasedName, origin)
+	for _, m := range g.cookieValues[key] {
 		if currentValue == m.scrubbed {
 			return m.original
 		}
@@ -440,7 +449,7 @@ func (g *Gate) RestoreCookieValue(aliasedName, currentValue string) string {
 	return currentValue
 }
 
-func (g *Gate) RestoreCookieHeader(header string) string {
+func (g *Gate) RestoreCookieHeader(header, origin string) string {
 	var parts []string
 	for _, pair := range strings.Split(header, ";") {
 		pair = strings.TrimSpace(pair)
@@ -455,7 +464,7 @@ func (g *Gate) RestoreCookieHeader(header string) string {
 		aliasedName := pair[:eqIdx]
 		value := pair[eqIdx+1:]
 		originalName := g.OriginalCookieName(aliasedName)
-		originalValue := g.RestoreCookieValue(aliasedName, value)
+		originalValue := g.RestoreCookieValue(aliasedName, value, origin)
 		parts = append(parts, originalName+"="+originalValue)
 	}
 	return strings.Join(parts, "; ")
@@ -699,27 +708,34 @@ func (g *Gate) Seed() []byte {
 }
 
 func (g *Gate) RestoreJSON(input []byte) []byte {
-	if g.parent != nil {
-		return g.parent.RestoreJSON(input)
-	}
-	dec := json.NewDecoder(bytes.NewReader(input))
-	dec.UseNumber()
-	var parsed interface{}
-	if err := dec.Decode(&parsed); err != nil {
-		return []byte(g.RestoreBody(string(input)))
-	}
-	if len(bytes.TrimSpace(input[dec.InputOffset():])) > 0 {
-		return input
-	}
-	restored, ok := g.restoreJSONValue(parsed)
-	if !ok {
+	out, err := g.RestoreJSONWithOpaqueKeys(input, nil)
+	if err != nil {
 		return nil
 	}
-	out, err := json.Marshal(restored)
-	if err != nil {
-		return []byte(g.RestoreBody(string(input)))
-	}
 	return out
+}
+
+// RestoreJSONWithOpaqueKeys edits only string tokens that contain reversible
+// aliases. Opaque fields retain their complete source value at any nesting depth.
+// Pre-existing duplicate keys are preserved; newly colliding keys are rejected.
+func (g *Gate) RestoreJSONWithOpaqueKeys(input []byte, opaqueKeys map[string]bool) ([]byte, error) {
+	if g.parent != nil {
+		return g.parent.RestoreJSONWithOpaqueKeys(input, opaqueKeys)
+	}
+	out, err := jsonedit.Rewrite(input, g.RestoreBody, func(key string) bool {
+		return opaqueKeys[key]
+	})
+	if errors.Is(err, jsonedit.ErrInvalidJSON) {
+		// Retain the existing malformed-request behaviour. Never truncate a
+		// valid first value followed by extra content into an accepted document.
+		dec := json.NewDecoder(bytes.NewReader(input))
+		var first json.RawMessage
+		if decodeErr := dec.Decode(&first); decodeErr == nil {
+			return input, nil
+		}
+		return []byte(g.RestoreBody(string(input))), nil
+	}
+	return out, err
 }
 
 func (g *Gate) RestoreJSONValue(v interface{}) interface{} {

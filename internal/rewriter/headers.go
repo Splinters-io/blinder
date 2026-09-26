@@ -10,9 +10,6 @@ import (
 
 var passthroughHeaders = map[string]bool{
 	"content-type":                        true,
-	"content-length":                      true,
-	"content-encoding":                    true,
-	"transfer-encoding":                   true,
 	"cache-control":                       true,
 	"pragma":                              true,
 	"expires":                             true,
@@ -49,6 +46,44 @@ var passthroughHeaders = map[string]bool{
 	"retry-after":                         true,
 	"server":                              true,
 	"via":                                 true,
+}
+
+// This rewriter serves a new representation over a separate connection. The
+// proxy computes its own framing and ETag; upstream byte ranges, digests and
+// message signatures do not describe the rewritten output. Keep these explicit
+// now that ordinary application headers no longer require an allowlist entry.
+var droppedResponseHeaders = map[string]bool{
+	"connection":                true,
+	"proxy-connection":          true,
+	"keep-alive":                true,
+	"proxy-authenticate":        true,
+	"proxy-authorization":       true,
+	"proxy-authentication-info": true,
+	"te":                        true,
+	"trailer":                   true,
+	"transfer-encoding":         true,
+	"upgrade":                   true,
+	"content-length":            true,
+	"content-encoding":          true,
+	"etag":                      true,
+	"last-modified":             true,
+	"accept-ranges":             true,
+	"content-range":             true,
+	"content-md5":               true,
+	"digest":                    true,
+	"content-digest":            true,
+	"repr-digest":               true,
+	"signature":                 true,
+	"signature-input":           true,
+	"authentication-info":       true,
+	// These origin-bound controls were previously suppressed. Passing them
+	// through could direct the browser outside the selected proxy route or
+	// install reporting endpoints without origin-aware handling.
+	"alt-svc":             true,
+	"alt-used":            true,
+	"nel":                 true,
+	"report-to":           true,
+	"reporting-endpoints": true,
 }
 
 var identityRiskHeaders = map[string]bool{
@@ -94,8 +129,8 @@ var cspSchemes = map[string]bool{
 var cspNonceHashRe = regexp.MustCompile(`^'(nonce|sha256|sha384|sha512)-[A-Za-z0-9+/=]+'$`)
 
 type ResponseHeaderOpts struct {
-	OriginMapper   *OriginMapper
-	RequestOrigin  string
+	OriginMapper  *OriginMapper
+	RequestOrigin string
 }
 
 func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain string, targetHost string, opts ...ResponseHeaderOpts) http.Header {
@@ -106,9 +141,23 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 		requestOrigin = opts[0].RequestOrigin
 	}
 	out := make(http.Header)
+	connectionFields := make(map[string]bool)
+	for name, values := range resp {
+		if !strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			for _, field := range strings.Split(value, ",") {
+				connectionFields[strings.ToLower(strings.TrimSpace(field))] = true
+			}
+		}
+	}
 
 	for name, values := range resp {
 		lower := strings.ToLower(name)
+		if droppedResponseHeaders[lower] || connectionFields[lower] {
+			continue
+		}
 
 		if passthroughHeaders[lower] {
 			if lower == "content-security-policy" || lower == "content-security-policy-report-only" {
@@ -161,6 +210,19 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 			out[name] = scrubbed
 			continue
 		}
+
+		// Unknown end-to-end fields can carry application diagnostics and other
+		// observable behaviour. Preserve their values and multiplicity using the
+		// same configured redaction as other identity-bearing response headers.
+		// Identity-bearing field names remain suppressed as before: body aliases
+		// are not valid HTTP field-name tokens, and safe reversible name mapping
+		// needs its own collision-aware namespace.
+		if gate.ResidualLeakCount(name) > 0 {
+			continue
+		}
+		for _, value := range values {
+			out.Add(name, gate.Scrub(value, "header:"+lower))
+		}
 	}
 
 	return out
@@ -174,7 +236,7 @@ func RewriteRequestHeaders(req *http.Request, targetHost string, gate *scrub.Gat
 		var parts []string
 		for _, c := range cookies {
 			originalName := gate.OriginalCookieName(c.Name)
-			originalValue := gate.RestoreCookieValue(c.Name, c.Value)
+			originalValue := gate.RestoreCookieValue(c.Name, c.Value, targetHost)
 			parts = append(parts, originalName+"="+originalValue)
 		}
 		clone.Header.Set("Cookie", strings.Join(parts, "; "))
@@ -243,7 +305,7 @@ func rewriteSetCookie(cookie string, gate *scrub.Gate, aliasDomain string, targe
 				cookieValue := trimmed[eqIdx+1:]
 				hashedName := gate.AliasCookieNameAndRecord(cookieName)
 				scrubbed := gate.Scrub(cookieValue, "cookie:value")
-				actual := gate.RecordCookieValue(hashedName, cookieValue, scrubbed)
+				actual := gate.RecordCookieValue(hashedName, cookieValue, scrubbed, targetHost)
 				rewritten = append(rewritten, hashedName+"="+actual)
 				continue
 			}

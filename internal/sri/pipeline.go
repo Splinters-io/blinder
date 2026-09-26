@@ -3,6 +3,7 @@ package sri
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -19,12 +20,20 @@ const maxFetchSize = 16 * 1024 * 1024
 type ScrubFunc func(body []byte, contentType, path string) []byte
 
 type FetchRecord struct {
-	Request *http.Request
-	Status  int
-	Headers http.Header
-	Body    []byte
-	Elapsed time.Duration
-	Error   string
+	HTTPVersion string
+	StatusLine  string
+	// Counts describe bytes observed while reading, not invented full sizes.
+	// EncodedBytes is -1 if the transport already decompressed the body;
+	// DecodedBytes is -1 if decoding could not begin.
+	EncodedBytes int64
+	DecodedBytes int64
+	BodyComplete bool
+	Request      *http.Request
+	Status       int
+	Headers      http.Header
+	Body         []byte
+	Elapsed      time.Duration
+	Error        string
 }
 
 type Finding struct {
@@ -51,7 +60,8 @@ type PipelineConfig struct {
 	Cache           *Cache
 	IsAllowedOrigin func(u *url.URL) bool
 	OnFetch         func(FetchRecord)
-	CookieRestoreFn func(cookieHeader string) string
+	CookieRestoreFn func(cookieHeader, origin string) string
+	FetchTimeout    time.Duration
 }
 
 type Pipeline struct {
@@ -60,13 +70,17 @@ type Pipeline struct {
 	cache           *Cache
 	isAllowedOrigin func(u *url.URL) bool
 	onFetch         func(FetchRecord)
-	cookieRestoreFn func(cookieHeader string) string
+	cookieRestoreFn func(cookieHeader, origin string) string
+	fetchTimeout    time.Duration
 
 	mu       sync.Mutex
 	findings []Finding
 }
 
 func NewPipeline(cfg PipelineConfig) *Pipeline {
+	if cfg.FetchTimeout <= 0 {
+		cfg.FetchTimeout = 30 * time.Second
+	}
 	return &Pipeline{
 		transport:       cfg.Transport,
 		scrubFn:         cfg.ScrubFn,
@@ -74,6 +88,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		isAllowedOrigin: cfg.IsAllowedOrigin,
 		onFetch:         cfg.OnFetch,
 		cookieRestoreFn: cfg.CookieRestoreFn,
+		fetchTimeout:    cfg.FetchTimeout,
 	}
 }
 
@@ -148,13 +163,15 @@ func (p *Pipeline) Process(resourceURL, integrityAttr, contentType, crossorigin 
 	replacementHash := ComputeIntegrity(scrubbed, strongest)
 
 	cached := &CacheEntry{
-		ScrubbedBody:    scrubbed,
-		ReplacementHash: replacementHash,
-		ContentType:     respCT,
-		BytesModified:   modified,
-		ResponseHeaders: respHeaders,
-		OriginalDigests: digests,
-		BodyVersion:     bodyVersion,
+		ScrubbedBody:      scrubbed,
+		ReplacementHash:   replacementHash,
+		ContentType:       respCT,
+		BytesModified:     modified,
+		ResponseHeaders:   respHeaders,
+		OriginalDigests:   digests,
+		BodyVersion:       bodyVersion,
+		OriginalBodyBytes: int64(len(body)),
+		OriginalBodyKnown: true,
 	}
 	p.cache.Put(cacheKey, cached)
 
@@ -203,9 +220,11 @@ func verifyDigests(stored map[string][]byte, entries []HashEntry) bool {
 }
 
 func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Request) ([]byte, string, http.Header, error) {
-	req, err := http.NewRequestWithContext(baseReq.Context(), "GET", resourceURL, nil)
+	ctx, cancel := context.WithTimeout(baseReq.Context(), p.fetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", resourceURL, nil)
 	if err != nil {
-		p.recordFetchEvent(req, 0, nil, nil, 0, fmt.Sprintf("build request: %v", err))
+		p.recordFetchEvent(req, nil, nil, fetchBodyRead{decodedBytes: -1}, 0, fmt.Sprintf("build request: %v", err))
 		return nil, "", nil, fmt.Errorf("build request: %w", err)
 	}
 
@@ -213,7 +232,7 @@ func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Reque
 		if cookie := baseReq.Header.Get("Cookie"); cookie != "" {
 			restored := cookie
 			if p.cookieRestoreFn != nil {
-				restored = p.cookieRestoreFn(cookie)
+				restored = p.cookieRestoreFn(cookie, req.URL.Host)
 			}
 			req.Header.Set("Cookie", restored)
 		}
@@ -227,43 +246,27 @@ func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Reque
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
 		elapsed := time.Since(start)
-		p.recordFetchEvent(req, 0, nil, nil, elapsed, fmt.Sprintf("fetch: %v", err))
+		p.recordFetchEvent(req, nil, nil, fetchBodyRead{decodedBytes: -1}, elapsed, fmt.Sprintf("fetch: %v", err))
 		return nil, "", nil, fmt.Errorf("fetch: %w", err)
 	}
-	defer resp.Body.Close()
-
+	defer func() {
+		cancel()
+		resp.Body.Close()
+	}()
+	body, measured, err := readFetchBody(resp)
+	if err != nil {
+		elapsed := time.Since(start)
+		p.recordFetchEvent(req, resp, body, measured, elapsed, err.Error())
+		return nil, "", nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		elapsed := time.Since(start)
-		p.recordFetchEvent(req, resp.StatusCode, resp.Header.Clone(), nil, elapsed, fmt.Sprintf("fetch status %d", resp.StatusCode))
+		p.recordFetchEvent(req, resp, body, measured, elapsed, fmt.Sprintf("fetch status %d", resp.StatusCode))
 		return nil, "", nil, fmt.Errorf("fetch status %d", resp.StatusCode)
 	}
 
-	var reader io.Reader = resp.Body
-	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-		gz, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			elapsed := time.Since(start)
-			p.recordFetchEvent(req, resp.StatusCode, resp.Header.Clone(), nil, elapsed, fmt.Sprintf("gzip decode: %v", err))
-			return nil, "", nil, fmt.Errorf("gzip decode: %w", err)
-		}
-		defer gz.Close()
-		reader = gz
-	}
-
-	body, err := io.ReadAll(io.LimitReader(reader, maxFetchSize+1))
-	if err != nil {
-		elapsed := time.Since(start)
-		p.recordFetchEvent(req, resp.StatusCode, resp.Header.Clone(), body, elapsed, fmt.Sprintf("read body: %v", err))
-		return nil, "", nil, fmt.Errorf("read body: %w", err)
-	}
-	if len(body) > maxFetchSize {
-		elapsed := time.Since(start)
-		p.recordFetchEvent(req, resp.StatusCode, resp.Header.Clone(), nil, elapsed, fmt.Sprintf("resource too large (>%d bytes)", maxFetchSize))
-		return nil, "", nil, fmt.Errorf("resource too large (>%d bytes)", maxFetchSize)
-	}
-
 	elapsed := time.Since(start)
-	p.recordFetchEvent(req, resp.StatusCode, resp.Header.Clone(), body, elapsed, "")
+	p.recordFetchEvent(req, resp, body, measured, elapsed, "")
 
 	ct := resp.Header.Get("Content-Type")
 	headers := resp.Header.Clone()
@@ -273,18 +276,79 @@ func (p *Pipeline) fetch(resourceURL string, sendCreds bool, baseReq *http.Reque
 	return body, ct, headers, nil
 }
 
-func (p *Pipeline) recordFetchEvent(req *http.Request, status int, headers http.Header, body []byte, elapsed time.Duration, errText string) {
+type fetchBodyRead struct {
+	encodedBytes, decodedBytes int64
+	complete                   bool
+}
+
+type fetchCountingReader struct {
+	io.Reader
+	n int64
+}
+
+func (r *fetchCountingReader) Read(b []byte) (int, error) {
+	n, err := r.Reader.Read(b)
+	r.n += int64(n)
+	return n, err
+}
+
+func readFetchBody(resp *http.Response) (body []byte, measured fetchBodyRead, err error) {
+	measured.decodedBytes = -1
+	if resp.StatusCode < 200 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+		measured.decodedBytes, measured.complete = 0, true
+		return nil, measured, nil
+	}
+	raw := &fetchCountingReader{Reader: resp.Body}
+	defer func() {
+		measured.encodedBytes = raw.n
+		if resp.Uncompressed {
+			measured.encodedBytes = -1
+		}
+	}()
+	var reader io.Reader = raw
+	encoding := strings.ToLower(strings.TrimSpace(strings.Join(resp.Header.Values("Content-Encoding"), ",")))
+	switch encoding {
+	case "", "identity":
+	case "gzip":
+		gz, decodeErr := gzip.NewReader(raw)
+		if decodeErr != nil {
+			return nil, measured, fmt.Errorf("gzip decode: %w", decodeErr)
+		}
+		defer gz.Close()
+		reader = gz
+	default:
+		return nil, measured, fmt.Errorf("unsupported response encoding")
+	}
+	body, err = io.ReadAll(io.LimitReader(reader, maxFetchSize+1))
+	measured.decodedBytes = int64(len(body))
+	if len(body) > maxFetchSize {
+		return body[:maxFetchSize], measured, fmt.Errorf("resource too large (>%d bytes)", maxFetchSize)
+	}
+	if err != nil {
+		return body, measured, fmt.Errorf("read body: %w", err)
+	}
+	measured.complete = true
+	return body, measured, nil
+}
+
+func (p *Pipeline) recordFetchEvent(req *http.Request, response *http.Response, body []byte, measured fetchBodyRead, elapsed time.Duration, errText string) {
 	if p.onFetch == nil {
 		return
 	}
-	p.onFetch(FetchRecord{
-		Request: req,
-		Status:  status,
-		Headers: headers,
-		Body:    body,
-		Elapsed: elapsed,
-		Error:   errText,
-	})
+	rec := FetchRecord{
+		Request:      req,
+		Body:         body,
+		Elapsed:      elapsed,
+		Error:        errText,
+		EncodedBytes: measured.encodedBytes,
+		DecodedBytes: measured.decodedBytes,
+		BodyComplete: measured.complete,
+	}
+	if response != nil {
+		rec.HTTPVersion, rec.StatusLine = response.Proto, response.Status
+		rec.Status, rec.Headers = response.StatusCode, response.Header.Clone()
+	}
+	p.onFetch(rec)
 }
 
 func computeAllDigests(data []byte) map[string][]byte {

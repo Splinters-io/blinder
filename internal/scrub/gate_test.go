@@ -158,7 +158,7 @@ func TestGate_CookieValueRoundTrip(t *testing.T) {
 
 	original := "tok-AcmeCorp-abc123"
 	scrubbed := g.Scrub(original, "cookie:value")
-	g.RecordCookieValue(aliased, original, scrubbed)
+	g.RecordCookieValue(aliased, original, scrubbed, "target.com")
 
 	if scrubbed == original {
 		t.Fatal("scrub should have replaced identity token in cookie value")
@@ -167,7 +167,7 @@ func TestGate_CookieValueRoundTrip(t *testing.T) {
 		t.Errorf("identity token should be replaced with reversible alias, got: %s", scrubbed)
 	}
 
-	restored := g.RestoreCookieValue(aliased, scrubbed)
+	restored := g.RestoreCookieValue(aliased, scrubbed, "target.com")
 	if restored != original {
 		t.Errorf("RestoreCookieValue should return original %q, got %q", original, restored)
 	}
@@ -177,9 +177,9 @@ func TestGate_CookieValueNoMatchPassesThrough(t *testing.T) {
 	g := NewGate(nil, []string{"AcmeCorp"}, "target-001.local")
 	aliased := g.AliasCookieNameAndRecord("pref")
 
-	g.RecordCookieValue(aliased, "original-val", "scrubbed-val")
+	g.RecordCookieValue(aliased, "original-val", "scrubbed-val", "target.com")
 
-	result := g.RestoreCookieValue(aliased, "something-else")
+	result := g.RestoreCookieValue(aliased, "something-else", "target.com")
 	if result != "something-else" {
 		t.Errorf("unmatched value should pass through, got: %s", result)
 	}
@@ -190,9 +190,9 @@ func TestGate_CookieValueChildDelegates(t *testing.T) {
 	child := g.ForRequest()
 
 	aliased := child.AliasCookieNameAndRecord("sess")
-	child.RecordCookieValue(aliased, "tok-AcmeCorp-1", "tok-[REDACTED]-1")
+	child.RecordCookieValue(aliased, "tok-AcmeCorp-1", "tok-[REDACTED]-1", "target.com")
 
-	restored := child.RestoreCookieValue(aliased, "tok-[REDACTED]-1")
+	restored := child.RestoreCookieValue(aliased, "tok-[REDACTED]-1", "target.com")
 	if restored != "tok-AcmeCorp-1" {
 		t.Errorf("child should delegate to parent, got: %s", restored)
 	}
@@ -203,21 +203,21 @@ func TestCookieValueRestoration_MultipleValues(t *testing.T) {
 	aliased := g.AliasCookieNameAndRecord("sid")
 
 	scrubbed1 := g.Scrub("Alice", "cookie:value")
-	actual1 := g.RecordCookieValue(aliased, "Alice", scrubbed1)
+	actual1 := g.RecordCookieValue(aliased, "Alice", scrubbed1, "target.com")
 
 	scrubbed2 := g.Scrub("Bobby", "cookie:value")
-	actual2 := g.RecordCookieValue(aliased, "Bobby", scrubbed2)
+	actual2 := g.RecordCookieValue(aliased, "Bobby", scrubbed2, "target.com")
 
 	if actual1 == actual2 {
 		t.Fatalf("disambiguated scrubbed values must differ, both are %q", actual1)
 	}
 
-	restored1 := g.RestoreCookieValue(aliased, actual1)
+	restored1 := g.RestoreCookieValue(aliased, actual1, "target.com")
 	if restored1 != "Alice" {
 		t.Errorf("first cookie value should be restored, got %q (scrubbed was %q)", restored1, actual1)
 	}
 
-	restored2 := g.RestoreCookieValue(aliased, actual2)
+	restored2 := g.RestoreCookieValue(aliased, actual2, "target.com")
 	if restored2 != "Bobby" {
 		t.Errorf("second cookie value should be restored, got %q (scrubbed was %q)", restored2, actual2)
 	}
@@ -227,13 +227,13 @@ func TestCookieValueRestoration_SameValueIdempotent(t *testing.T) {
 	g := NewGate(nil, nil, "alias.local")
 	aliased := g.AliasCookieNameAndRecord("sid")
 
-	actual1 := g.RecordCookieValue(aliased, "samevalue", "samevalue")
-	actual2 := g.RecordCookieValue(aliased, "samevalue", "samevalue")
+	actual1 := g.RecordCookieValue(aliased, "samevalue", "samevalue", "target.com")
+	actual2 := g.RecordCookieValue(aliased, "samevalue", "samevalue", "target.com")
 	if actual1 != actual2 {
 		t.Errorf("same original should return same scrubbed: %q vs %q", actual1, actual2)
 	}
 
-	restored := g.RestoreCookieValue(aliased, actual1)
+	restored := g.RestoreCookieValue(aliased, actual1, "target.com")
 	if restored != "samevalue" {
 		t.Errorf("should restore, got %q", restored)
 	}
@@ -244,14 +244,14 @@ func TestCookieValueRestoration_LiteralCollisionWithHash(t *testing.T) {
 	aliased := g.AliasCookieNameAndRecord("sid")
 
 	scrubAlice := g.Scrub("Alice", "cookie:value")
-	actualAlice := g.RecordCookieValue(aliased, "Alice", scrubAlice)
+	actualAlice := g.RecordCookieValue(aliased, "Alice", scrubAlice, "target.com")
 
 	scrubBobby := g.Scrub("Bobby", "cookie:value")
-	actualBobby := g.RecordCookieValue(aliased, "Bobby", scrubBobby)
+	actualBobby := g.RecordCookieValue(aliased, "Bobby", scrubBobby, "target.com")
 
 	// Now record a third value whose scrubbed form is crafted to equal one of
 	// the existing scrubbed values (simulating the literal collision).
-	actualThird := g.RecordCookieValue(aliased, "Charlie", actualBobby)
+	actualThird := g.RecordCookieValue(aliased, "Charlie", actualBobby, "target.com")
 
 	if actualThird == actualBobby {
 		t.Fatalf("literal collision: third value's handle %q equals Bobby's %q", actualThird, actualBobby)
@@ -261,14 +261,82 @@ func TestCookieValueRestoration_LiteralCollisionWithHash(t *testing.T) {
 	}
 
 	// All three must restore correctly.
-	if r := g.RestoreCookieValue(aliased, actualAlice); r != "Alice" {
+	if r := g.RestoreCookieValue(aliased, actualAlice, "target.com"); r != "Alice" {
 		t.Errorf("Alice restore failed: got %q", r)
 	}
-	if r := g.RestoreCookieValue(aliased, actualBobby); r != "Bobby" {
+	if r := g.RestoreCookieValue(aliased, actualBobby, "target.com"); r != "Bobby" {
 		t.Errorf("Bobby restore failed: got %q", r)
 	}
-	if r := g.RestoreCookieValue(aliased, actualThird); r != "Charlie" {
+	if r := g.RestoreCookieValue(aliased, actualThird, "target.com"); r != "Charlie" {
 		t.Errorf("Charlie restore failed: got %q", r)
+	}
+}
+
+func TestCookieValueRestoration_CrossOriginIsolation(t *testing.T) {
+	g := NewGate(nil, nil, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("session")
+
+	// Two different origins set a cookie with the same name but different values.
+	actualA := g.RecordCookieValue(aliased, "secret-A", "secret-A", "origin-a.com")
+	actualB := g.RecordCookieValue(aliased, "secret-B", "secret-B", "origin-b.com")
+
+	// Values from one origin must not restore against the other.
+	if r := g.RestoreCookieValue(aliased, actualA, "origin-a.com"); r != "secret-A" {
+		t.Errorf("origin-a restore: got %q, want %q", r, "secret-A")
+	}
+	if r := g.RestoreCookieValue(aliased, actualB, "origin-b.com"); r != "secret-B" {
+		t.Errorf("origin-b restore: got %q, want %q", r, "secret-B")
+	}
+	// Cross-origin lookup must not find the other origin's mapping.
+	if r := g.RestoreCookieValue(aliased, actualA, "origin-b.com"); r != actualA {
+		t.Errorf("cross-origin should pass through, got %q", r)
+	}
+	if r := g.RestoreCookieValue(aliased, actualB, "origin-a.com"); r != actualB {
+		t.Errorf("cross-origin should pass through, got %q", r)
+	}
+}
+
+func TestCookieValueRestoration_SameValueDifferentOrigins(t *testing.T) {
+	g := NewGate(nil, nil, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("csrf")
+
+	// Both origins set the same cookie value — should still isolate.
+	actualA := g.RecordCookieValue(aliased, "shared-token", "shared-token", "origin-a.com")
+	actualB := g.RecordCookieValue(aliased, "shared-token", "shared-token", "origin-b.com")
+
+	// Same value recorded under different origins: scrubbed form should be identical
+	// since the original is the same, but restoration must work for each origin.
+	if actualA != actualB {
+		t.Fatalf("same original should produce same scrubbed: %q vs %q", actualA, actualB)
+	}
+	if r := g.RestoreCookieValue(aliased, actualA, "origin-a.com"); r != "shared-token" {
+		t.Errorf("origin-a restore: got %q", r)
+	}
+	if r := g.RestoreCookieValue(aliased, actualB, "origin-b.com"); r != "shared-token" {
+		t.Errorf("origin-b restore: got %q", r)
+	}
+}
+
+func TestRestoreCookieHeader_OriginScoped(t *testing.T) {
+	g := NewGate(nil, []string{"SecretOrg"}, "alias.local")
+	aliased := g.AliasCookieNameAndRecord("sid")
+	original := "tok-SecretOrg-abc"
+	scrubbed := g.Scrub(original, "cookie:value")
+	actual := g.RecordCookieValue(aliased, original, scrubbed, "app.example.com")
+
+	header := aliased + "=" + actual
+	restored := g.RestoreCookieHeader(header, "app.example.com")
+	if !strings.Contains(restored, original) {
+		t.Errorf("RestoreCookieHeader should restore value for correct origin, got %q", restored)
+	}
+
+	// Wrong origin: value should pass through un-restored (still scrubbed).
+	wrong := g.RestoreCookieHeader(header, "other.example.com")
+	if strings.Contains(wrong, original) {
+		t.Error("RestoreCookieHeader must not restore cookies scoped to a different origin")
+	}
+	if !strings.Contains(wrong, "[REDACTED:") {
+		t.Errorf("wrong-origin restoration should retain the scrubbed alias, got %q", wrong)
 	}
 }
 
