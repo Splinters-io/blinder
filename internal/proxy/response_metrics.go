@@ -15,10 +15,11 @@ import (
 // upgrades use ResponseController through Unwrap; frame bytes are not HTTP bodies.
 type responseObserver struct {
 	http.ResponseWriter
-	metrics      manifest.ResponseMetrics
-	status       int
-	head         bool
-	writtenBytes int64
+	metrics           manifest.ResponseMetrics
+	status            int
+	head              bool
+	writtenBytes      int64
+	beforeFinalHeader func(http.Header)
 }
 
 func newResponseObserver(w http.ResponseWriter, method string) *responseObserver {
@@ -38,7 +39,10 @@ func (w *responseObserver) WriteHeader(status int) {
 		return
 	}
 	w.status = status
-	w.Header().Set("X-Blinder-View", "redacted")
+	if w.beforeFinalHeader != nil {
+		w.beforeFinalHeader(w.Header())
+	}
+	w.Header().Set("X-Blinder-View", "transformed")
 	// Always overwrite upstream-provided measurements. Unknown is explicit.
 	w.Header().Set("X-Blinder-Original-Body-Bytes", strconv.FormatInt(w.metrics.OriginalBodyBytes, 10))
 	w.Header().Set("X-Blinder-Rewritten-Body-Bytes", strconv.FormatInt(w.metrics.RewrittenBodyBytes, 10))

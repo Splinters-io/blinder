@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const SessionName = "AcmeCorp_session"
@@ -32,12 +33,13 @@ func Handler() http.Handler {
 <form method="post" action="/login"><input name="username" value="tester">
 <input name="password" type="password" value="fixture-only"><button>Log in</button></form>
 <p><a href="/form">Origin-checked form</a> · <a href="/api">JSON</a> ·
-<a href="/gzip">Gzip JSON</a> · <a href="/unsupported">Unsupported encoding</a> ·
-<a href="/document.pdf">Document placeholder</a> · <a href="/absolute-redirect">Absolute redirect</a></p>
+<a href="/gzip">Gzip JSON</a> · <a href="/unsupported" title="Negative test: malformed encoding; expect HTTP 502">Unsupported encoding</a> ·
+<a href="/document.pdf" title="Binary replacement test: expect a transparent GIF">Document placeholder</a> · <a href="/absolute-redirect">Absolute redirect</a></p>
 <p id="live">WebSocket connecting…</p><script>
 const socket = new WebSocket('wss://' + location.host + '/ws');
 socket.onmessage = event => { document.getElementById('live').textContent = event.data; };
 socket.onerror = () => { document.getElementById('live').textContent = 'WebSocket failed'; };
+socket.onclose = event => { document.getElementById('live').textContent = 'WebSocket closed (code ' + event.code + ')'; };
 </script>`)
 	})
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +117,13 @@ socket.onerror = () => { document.getElementById('live').textContent = 'WebSocke
 }
 
 // A minimal deterministic server sends one text message split through an identity.
-// It leaves the connection open so tests can also exercise proxy shutdown.
+// Pings keep the manual fixture active while the operator tests other features;
+// a deliberately silent stream would otherwise hit the proxy's idle deadline.
 func websocket(w http.ResponseWriter, r *http.Request) {
+	websocketWithHeartbeat(w, r, 20*time.Second)
+}
+
+func websocketWithHeartbeat(w http.ResponseWriter, r *http.Request, interval time.Duration) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || r.Header.Get("Sec-WebSocket-Version") != "13" {
 		http.Error(w, "WebSocket upgrade required", http.StatusBadRequest)
 		return
@@ -137,7 +144,26 @@ func websocket(w http.ResponseWriter, r *http.Request) {
 	rw.WriteString("Acme")
 	rw.Write([]byte{0x80, 9})
 	rw.WriteString("Corp live")
-	if rw.Flush() == nil {
+	if rw.Flush() != nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
 		io.Copy(io.Discard, rw)
+		close(done)
+	}()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			// Empty, unmasked server ping. Browsers reply with a masked pong;
+			// this fixture does not interpret application messages from clients.
+			if _, err := conn.Write([]byte{0x89, 0x00}); err != nil {
+				return
+			}
+		}
 	}
 }

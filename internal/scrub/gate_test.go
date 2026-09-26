@@ -22,7 +22,7 @@ func TestGate_ScrubsIdentityToken(t *testing.T) {
 	if strings.Contains(result, "Acme Corp") {
 		t.Errorf("identity token should be scrubbed, got: %s", result)
 	}
-	if !strings.Contains(result, "[REDACTED:") {
+	if !strings.Contains(result, ValueAliasPrefix) {
 		t.Errorf("scrubbed token should use reversible alias format, got: %s", result)
 	}
 }
@@ -108,7 +108,7 @@ func TestGate_CaseInsensitiveToken(t *testing.T) {
 	if strings.Contains(result, "acmecorp") {
 		t.Errorf("token scrub should be case-insensitive, got: %s", result)
 	}
-	if !strings.Contains(result, "[REDACTED:") {
+	if !strings.Contains(result, ValueAliasPrefix) {
 		t.Errorf("scrubbed token should use reversible alias format, got: %s", result)
 	}
 }
@@ -163,7 +163,7 @@ func TestGate_CookieValueRoundTrip(t *testing.T) {
 	if scrubbed == original {
 		t.Fatal("scrub should have replaced identity token in cookie value")
 	}
-	if !strings.Contains(scrubbed, "[REDACTED:") {
+	if !strings.Contains(scrubbed, ValueAliasPrefix) {
 		t.Errorf("identity token should be replaced with reversible alias, got: %s", scrubbed)
 	}
 
@@ -335,7 +335,7 @@ func TestRestoreCookieHeader_OriginScoped(t *testing.T) {
 	if strings.Contains(wrong, original) {
 		t.Error("RestoreCookieHeader must not restore cookies scoped to a different origin")
 	}
-	if !strings.Contains(wrong, "[REDACTED:") {
+	if !strings.Contains(wrong, ValueAliasPrefix) {
 		t.Errorf("wrong-origin restoration should retain the scrubbed alias, got %q", wrong)
 	}
 }

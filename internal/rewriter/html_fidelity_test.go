@@ -38,7 +38,7 @@ func TestHTMLFidelityChangedTokenLeavesNeighborsRaw(t *testing.T) {
 	gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 	source := "<DiV\tdata-note='AcmeCorp' keep='one&#38;two'>before &amp; after</DiV >\r\n<SPAN disabled data-x=plain>tail&#33;</SPAN >"
 	got := string(RewriteBody([]byte(source), "text/html", "/", gate, false).Body)
-	if !strings.HasPrefix(got, `<div data-note="[REDACTED:`) || !strings.Contains(got, ` keep="one&amp;two">`) {
+	if !strings.HasPrefix(got, `<div data-note="`+scrub.ValueAliasPrefix) || !strings.Contains(got, ` keep="one&amp;two">`) {
 		t.Fatalf("changed start tag did not retain the configured transformation: %s", got)
 	}
 	wantSuffix := "before &amp; after</DiV >\r\n<SPAN disabled data-x=plain>tail&#33;</SPAN >"
@@ -214,7 +214,7 @@ func TestHTMLFidelitySRIStripAndBlockKeepFollowingSource(t *testing.T) {
 	})
 	t.Run("block", func(t *testing.T) {
 		jsBody := []byte(`const value = "real";`)
-		pipeline, _, srv, gate, origins := sriTestSetup(t,jsBody, func(w http.ResponseWriter, r *http.Request) {
+		pipeline, _, srv, gate, origins := sriTestSetup(t, jsBody, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/javascript")
 			w.Write(jsBody)
 		})
@@ -230,7 +230,7 @@ func TestHTMLFidelitySRIStripAndBlockKeepFollowingSource(t *testing.T) {
 	})
 	t.Run("block_truncated_end_tag", func(t *testing.T) {
 		jsBody := []byte(`const value = "real";`)
-		pipeline, _, srv, gate, origins := sriTestSetup(t,jsBody, func(w http.ResponseWriter, r *http.Request) {
+		pipeline, _, srv, gate, origins := sriTestSetup(t, jsBody, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/javascript")
 			w.Write(jsBody)
 		})

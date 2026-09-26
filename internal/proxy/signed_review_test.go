@@ -37,7 +37,7 @@ func TestSignedReviewPublicConfigurationCannotMintOwnership(t *testing.T) {
 
 func TestSignedReviewEscapeGrammarClosesOverItsOwnOutput(t *testing.T) {
 	g := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
-	marker := "[REDACTED:probe]"
+	marker := scrub.ValueAliasPrefix + "probe]"
 	for depth := 0; depth < 8; depth++ {
 		original := "before " + marker + " after AcmeCorp"
 		transformed := g.Scrub(original, "document")
@@ -55,7 +55,7 @@ func TestSignedPropertyEscapeDepthRoundTrip(t *testing.T) {
 		{"AcmeCorp", "SecretProject"},
 	} {
 		g := scrub.NewGate(nil, tokens, "alias.local")
-		marker := "[REDACTED:depth-test]"
+		marker := scrub.ValueAliasPrefix + "depth-test]"
 		for depth := 0; depth < 16; depth++ {
 			identity := ""
 			if len(tokens) > 0 {

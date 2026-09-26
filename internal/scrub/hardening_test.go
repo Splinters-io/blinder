@@ -23,7 +23,7 @@ func TestGateUnicodeReplacement(t *testing.T) {
 			if tc.prefix != "" && !strings.HasPrefix(got, tc.prefix) {
 				t.Fatalf("prefix %q not preserved, got %q", tc.prefix, got)
 			}
-			if !strings.Contains(got, "[REDACTED:") {
+			if !strings.Contains(got, ValueAliasPrefix) {
 				t.Fatalf("token should be replaced with alias, got %q", got)
 			}
 			if !utf8.ValidString(got) {

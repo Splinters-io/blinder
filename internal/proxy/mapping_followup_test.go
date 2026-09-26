@@ -156,26 +156,27 @@ func TestMappingFollowupLiteralEscapeRoundTrip(t *testing.T) {
 			t.Fatalf("escape prefix not self-escaped: original=%q transformed=%q restored=%q", original, transformed, got)
 		}
 	})
-	t.Run("form_containing_only_escaped_literal", func(t *testing.T) {
-		const original = "[REDACTED:fixture]"
-		var received string
-		s := audit267SRIServer(t, func(r *http.Request) (*http.Response, error) {
-			if r.Method == "POST" {
-				r.ParseForm()
-				received = r.PostForm.Get("name")
-				return audit267SRIResponse("text/plain", "ok"), nil
+	for _, original := range []string{scrub.ValueAliasPrefix + "fixture]", "[REDACTED:fixture]"} {
+		t.Run("form_literal_"+original, func(t *testing.T) {
+			var received string
+			s := audit267SRIServer(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == "POST" {
+					r.ParseForm()
+					received = r.PostForm.Get("name")
+					return audit267SRIResponse("text/plain", "ok"), nil
+				}
+				return audit267SRIResponse("text/html", `<form><input name="name" value="`+original+`"></form>`), nil
+			})
+			page := audit267CacheRequest(s, "GET", "/model", nil)
+			value := audit267SRIAttribute(page.Body.String(), "value")
+			r := httptest.NewRequest("POST", "https://alias.local:18099/submit", strings.NewReader(url.Values{"name": {value}}.Encode()))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			s.ServeHTTP(httptest.NewRecorder(), r)
+			if received != original {
+				t.Fatalf("ContainsAlias skips escaped literal: emitted=%q forwarded=%q want=%q", value, received, original)
 			}
-			return audit267SRIResponse("text/html", `<form><input name="name" value="`+original+`"></form>`), nil
 		})
-		page := audit267CacheRequest(s, "GET", "/model", nil)
-		value := audit267SRIAttribute(page.Body.String(), "value")
-		r := httptest.NewRequest("POST", "https://alias.local:18099/submit", strings.NewReader(url.Values{"name": {value}}.Encode()))
-		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		s.ServeHTTP(httptest.NewRecorder(), r)
-		if received != original {
-			t.Fatalf("ContainsAlias skips escaped literal: emitted=%q forwarded=%q want=%q", value, received, original)
-		}
-	})
+	}
 	t.Run("CSS_rewrite_passes", func(t *testing.T) {
 		var received string
 		s := audit267SRIServer(t, func(r *http.Request) (*http.Response, error) {

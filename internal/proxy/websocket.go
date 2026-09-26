@@ -85,7 +85,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				headers.Del(name)
 			}
 			out := rewriter.RewriteResponseHeaders(headers, gate, s.cfg.AliasDomain, upstreamReq.URL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
-			out.Set("X-Blinder-View", "redacted")
+			out.Set("X-Blinder-View", "transformed")
 			out.Set("X-Blinder-Original-Body-Bytes", "0")
 			out.Set("X-Blinder-Rewritten-Body-Bytes", "0")
 			out.Set("X-Blinder-Body-Size-Match", "exact")

@@ -434,6 +434,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown proxy origin", status)
 		return
 	}
+	observed.beforeFinalHeader = func(headers http.Header) {
+		s.localizeResponseLocations(headers, r.Host, upstream)
+	}
 	// Restore issued path mappings before submission scoping, version checks
 	// and cache keys. Preserve escaped segment boundaries just as WS does.
 	rewriter.RestoreURLPath(r.URL, gate)

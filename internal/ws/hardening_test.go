@@ -52,7 +52,7 @@ func TestRelayKeepsControlBetweenFragments(t *testing.T) {
 	if bytes.Contains(remainder, []byte("AcmeCorp")) {
 		t.Fatal("identity token leaked in reassembled text frame")
 	}
-	if !bytes.Contains(remainder, []byte("[REDACTED:")) {
+	if !bytes.Contains(remainder, []byte(scrub.ValueAliasPrefix)) {
 		t.Fatalf("scrubbed text should contain alias, got %x", remainder)
 	}
 	if len(remainder) < 2 {

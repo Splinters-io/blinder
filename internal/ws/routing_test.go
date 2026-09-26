@@ -100,13 +100,14 @@ func TestWebSocketRestoresIssuedRequestURIComponents(t *testing.T) {
 	if token == "AcmeCorp" || slashToken == "segment/name" || fileAlias == "asset.js" {
 		t.Fatal("fixture did not issue its mappings")
 	}
-	mapper := mustMapper(t,upstream, "127.0.0.1:9443", "alias.local")
+	mapper := mustMapper(t, upstream, "127.0.0.1:9443", "alias.local")
 	p := NewProxy(gate, "alias.local", upstream.Host, upstream.Host, false, true, "", time.Second, mapper)
 	front := startRouteProxy(t, p)
 	pathToken, queryToken := url.PathEscape(token), url.QueryEscape(token)
 	cases := []struct{ name, input, want string }{
 		{"issued-path-and-query", "/socket/" + pathToken + "?first=one%20two&tenant=" + queryToken + "&first=second", "/socket/AcmeCorp?first=one%20two&tenant=AcmeCorp&first=second"},
 		{"escaped-slash-and-unknown-alias", "/a%2fb/" + pathToken + "/%5BREDACTED%3Affffff%5D?keep=%2f&&bare&semi=x;y&tenant=" + queryToken, "/a%2fb/AcmeCorp/%5BREDACTED%3Affffff%5D?keep=%2f&&bare&semi=x;y&tenant=AcmeCorp"},
+		{"escaped-slash-and-neutral-unknown-alias", "/a%2fb/" + pathToken + "/%5Bv%3Affffff%5D?keep=%2f&&bare&semi=x;y&tenant=" + queryToken, "/a%2fb/AcmeCorp/%5Bv%3Affffff%5D?keep=%2f&&bare&semi=x;y&tenant=AcmeCorp"},
 		{"restored-slash-is-segment-data", "/socket/" + url.PathEscape(slashToken), "/socket/segment%2Fname"},
 		{"colliding-query-keys", "/socket?" + queryToken + "=one&AcmeCorp=two&" + queryToken + "=three", "/socket?AcmeCorp=one&AcmeCorp=two&AcmeCorp=three"},
 		{"malformed-query-retained", "/" + pathToken + "?issued=" + queryToken + "&bad=%zz", "/AcmeCorp?issued=" + queryToken + "&bad=%zz"},
@@ -188,7 +189,7 @@ func TestWebSocketRoutesPrimaryAndExtraOrigins(t *testing.T) {
 	extra := httptest.NewTLSServer(handler)
 	defer extra.Close()
 	primaryURL, extraURL := routeURL(t, primary.URL), routeURL(t, extra.URL)
-	mapper := mustMapper(t,primaryURL, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extraURL, Alias: "extra.alias.local"})
+	mapper := mustMapper(t, primaryURL, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extraURL, Alias: "extra.alias.local"})
 	gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 	p := NewProxy(gate, "alias.local", primaryURL.Host, primaryURL.Host, false, false, "", time.Second, mapper)
 	front := startRouteProxy(t, p)
@@ -209,12 +210,12 @@ func TestWebSocketRoutesPrimaryAndExtraOrigins(t *testing.T) {
 				t.Fatal("upstream did not receive upgrade")
 			}
 			_, body, ok := readFrame(reader, true)
-			if !ok || bytes.Contains(body, []byte("AcmeCorp")) || !bytes.Contains(body, []byte("[REDACTED:")) {
+			if !ok || bytes.Contains(body, []byte("AcmeCorp")) || !bytes.Contains(body, []byte(scrub.ValueAliasPrefix)) {
 				t.Fatalf("incorrect downstream text: %q", body)
 			}
 			// Split a generated alias across frames. Restoration must operate on
 			// the assembled message and must not rewrite an unissued suffix.
-			cut := bytes.Index(body, []byte("[REDACTED:")) + 4
+			cut := bytes.Index(body, []byte(scrub.ValueAliasPrefix)) + 4
 			if err := writeFrame(conn, opcodeText, body[:cut], true); err != nil {
 				t.Fatal(err)
 			}
@@ -253,7 +254,7 @@ func TestWebSocketExtraOriginTLSVerification(t *testing.T) {
 	extra := routeURL(t, upstream.URL)
 	extra.Host = net.JoinHostPort("localhost", extra.Port())
 	primary := routeURL(t, "http://127.0.0.1:1")
-	mapper := mustMapper(t,primary, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extra, Alias: "extra.alias.local"})
+	mapper := mustMapper(t, primary, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extra, Alias: "extra.alias.local"})
 	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", primary.Host, primary.Host, false, true, "", time.Second, mapper)
 	front := startRouteProxy(t, p)
 	conn, _, resp := routeHandshake(t, front.URL, "extra.alias.local:9443", "")
@@ -378,7 +379,7 @@ func TestWebSocketExtraOriginSOCKSRoute(t *testing.T) {
 				extra = upURL
 			}
 			primary := routeURL(t, "http://unused.invalid:8000")
-			mapper := mustMapper(t,primary, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extra, Alias: "extra.alias.local"})
+			mapper := mustMapper(t, primary, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extra, Alias: "extra.alias.local"})
 			p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", primary.Host, primary.Host, false, true, socksAddr, time.Second, mapper)
 			front := startRouteProxy(t, p)
 			conn, _, resp := routeHandshake(t, front.URL, "extra.alias.local:9443", "")

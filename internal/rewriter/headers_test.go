@@ -177,7 +177,7 @@ func TestRewriteResponseHeaders_SetCookieValueScrub(t *testing.T) {
 	if strings.Contains(cookie, "AcmeCorp") {
 		t.Errorf("cookie value should have identity token scrubbed, got: %s", cookie)
 	}
-	if !strings.Contains(cookie, "[REDACTED:") {
+	if !strings.Contains(cookie, scrub.ValueAliasPrefix) {
 		t.Errorf("cookie value should contain reversible alias, got: %s", cookie)
 	}
 	if !strings.Contains(cookie, "HttpOnly") {
@@ -205,7 +205,7 @@ func TestRewriteRequestHeaders_CookieValueRestored(t *testing.T) {
 	if !strings.Contains(cookieHeader, "tok-AcmeCorp-xyz") {
 		t.Errorf("cookie value should be restored to original, got: %s", cookieHeader)
 	}
-	if strings.Contains(cookieHeader, "[REDACTED:") {
+	if strings.Contains(cookieHeader, scrub.ValueAliasPrefix) {
 		t.Errorf("cookie value should not contain alias after restoration, got: %s", cookieHeader)
 	}
 }
@@ -259,7 +259,7 @@ func TestRewriteResponseHeaders_LocationOriginAware(t *testing.T) {
 
 func TestRewriteResponseHeaders_CORSACAOMapsToAliasDomain(t *testing.T) {
 	gate := scrub.NewGate([]string{"target.com"}, nil, "alias.local")
-	origins := mustMapper(t,&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
+	origins := mustMapper(t, &url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
 	headers := http.Header{
 		"Access-Control-Allow-Origin": {"https://target.com"},
 	}
@@ -278,7 +278,7 @@ func TestRewriteResponseHeaders_CORSACAOMapsToAliasDomain(t *testing.T) {
 
 func TestRewriteResponseHeaders_CORSACAOWildcardPreserved(t *testing.T) {
 	gate := scrub.NewGate([]string{"target.com"}, nil, "alias.local")
-	origins := mustMapper(t,&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
+	origins := mustMapper(t, &url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
 	headers := http.Header{
 		"Access-Control-Allow-Origin": {"*"},
 	}
@@ -292,7 +292,7 @@ func TestRewriteResponseHeaders_CORSACAOWildcardPreserved(t *testing.T) {
 
 func TestRewriteResponseHeaders_CORSACAOUnrelatedOriginUntouched(t *testing.T) {
 	gate := scrub.NewGate([]string{"target.com"}, nil, "alias.local")
-	origins := mustMapper(t,&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
+	origins := mustMapper(t, &url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
 	headers := http.Header{
 		"Access-Control-Allow-Origin": {"https://other-site.com"},
 	}
@@ -307,7 +307,7 @@ func TestRewriteResponseHeaders_CORSACAOUnrelatedOriginUntouched(t *testing.T) {
 
 func TestRewriteResponseHeaders_CORSACAOMatchesRequestOrigin(t *testing.T) {
 	gate := scrub.NewGate([]string{"target.com"}, nil, "alias.local")
-	origins := mustMapper(t,&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
+	origins := mustMapper(t, &url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:8099", "alias.local")
 
 	for _, tc := range []struct {
 		name, requestOrigin, wantACAO string
@@ -363,7 +363,7 @@ func TestRewriteRequestHeaders(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 
 	gate := scrub.NewGate(nil, nil, "alias.local")
-	rewritten := RewriteRequestHeaders(req, "target.com", gate, mustMapper(t,&url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:443", "alias.local"))
+	rewritten := RewriteRequestHeaders(req, "target.com", gate, mustMapper(t, &url.URL{Scheme: "https", Host: "target.com"}, "127.0.0.1:443", "alias.local"))
 
 	if rewritten.Host != "target.com" {
 		t.Errorf("host should be target, got: %s", rewritten.Host)

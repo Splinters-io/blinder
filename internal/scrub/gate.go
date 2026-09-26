@@ -22,6 +22,10 @@ var (
 	ipv6Re   = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b|(?i)\b(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}\b|(?i)::(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,5}::\b`)
 )
 
+// ValueAliasPrefix identifies reversible opaque identity values. It carries no
+// removal or status wording; ordinary display prose is handled by the rewriter.
+const ValueAliasPrefix = "[v:"
+
 const testNetIPv4 = "203.0.113.1"
 const testNetIPv6 = "2001:db8::1"
 
@@ -38,24 +42,24 @@ type cookieValueMapping struct {
 }
 
 type Gate struct {
-	parent         *Gate // Per-request counters; aliases and aggregate findings stay shared.
-	targetDomains  []string
-	identityTokens []string
-	domainPatterns []*regexp.Regexp
-	tokenPatterns  []*regexp.Regexp
-	aliasDomain    string
-	escapePrefix   string
+	parent           *Gate // Per-request counters; aliases and aggregate findings stay shared.
+	targetDomains    []string
+	identityTokens   []string
+	domainPatterns   []*regexp.Regexp
+	tokenPatterns    []*regexp.Regexp
+	aliasDomain      string
+	escapePrefix     string
 	preserveDomains  map[string]bool
 	preserveURLCheck func(fullURL string) bool
-	mu             sync.Mutex
-	leaks          map[string]*LeakEntry
-	aliases        map[string]string               // alias → real domain
-	cookieAliases  map[string]string               // alias → original cookie name
-	cookieValues   map[string][]cookieValueMapping  // aliased cookie name → value mappings
-	tokenAliases   map[string]string               // alias → original token text
-	emailAliases   map[string]string               // alias → original email
-	ipv4Aliases    map[string]string               // alias → original IPv4
-	ipv6Aliases    map[string]string               // alias → original IPv6
+	mu               sync.Mutex
+	leaks            map[string]*LeakEntry
+	aliases          map[string]string               // alias → real domain
+	cookieAliases    map[string]string               // alias → original cookie name
+	cookieValues     map[string][]cookieValueMapping // aliased cookie name → value mappings
+	tokenAliases     map[string]string               // alias → original token text
+	emailAliases     map[string]string               // alias → original email
+	ipv4Aliases      map[string]string               // alias → original IPv4
+	ipv6Aliases      map[string]string               // alias → original IPv6
 }
 
 // ForRequest keeps replacement counts isolated from concurrent requests while
@@ -67,7 +71,7 @@ func (g *Gate) ForRequest() *Gate {
 		aliasDomain: g.aliasDomain, escapePrefix: g.escapePrefix,
 		preserveDomains:  g.preserveDomains,
 		preserveURLCheck: g.preserveURLCheck,
-		leaks: make(map[string]*LeakEntry),
+		leaks:            make(map[string]*LeakEntry),
 	}
 }
 
@@ -99,7 +103,7 @@ func NewGate(targetDomains []string, identityTokens []string, aliasDomain string
 		targetDomains:  domains,
 		identityTokens: tokens,
 		aliasDomain:    aliasDomain,
-		escapePrefix: "[~" + hex.EncodeToString(nh[:6]) + ":",
+		escapePrefix:   "[~" + hex.EncodeToString(nh[:6]) + ":",
 		leaks:          make(map[string]*LeakEntry),
 		aliases:        make(map[string]string),
 		cookieAliases:  make(map[string]string),
@@ -150,7 +154,7 @@ func literalPattern(value string) *regexp.Regexp {
 
 func (g *Gate) escapeMarkers(input string) string {
 	prefix := g.escapePrefix
-	const target = "[REDACTED:"
+	const target = ValueAliasPrefix
 	if !strings.Contains(input, prefix) && !strings.Contains(input, target) {
 		return input
 	}
@@ -188,7 +192,7 @@ func (g *Gate) unescapeMarkers(input string) string {
 			if i < len(input) {
 				switch input[i] {
 				case 'R':
-					out.WriteString("[REDACTED:")
+					out.WriteString(ValueAliasPrefix)
 					i++
 				case 'E':
 					out.WriteString(prefix)
@@ -221,15 +225,7 @@ func (g *Gate) Scrub(input string, context string) string {
 		})
 	}
 
-	for _, pattern := range g.tokenPatterns {
-		if pattern == nil {
-			continue
-		}
-		result = pattern.ReplaceAllStringFunc(result, func(matched string) string {
-			g.recordLeak(context, "identity_token", "[configured token]")
-			return g.aliasToken(matched)
-		})
-	}
+	result = g.scrubIdentityTokens(result, context)
 
 	result = emailRe.ReplaceAllStringFunc(result, func(email string) string {
 		parts := strings.SplitN(email, "@", 2)
@@ -291,6 +287,62 @@ func (g *Gate) Scrub(input string, context string) string {
 	}
 
 	return result
+}
+
+// scrubIdentityTokens applies configured patterns only to source text. Each
+// replacement and literal escape sequence stays opaque to subsequent patterns,
+// even when a configured identity is "v", a hex digit, or part of the nonce.
+func (g *Gate) scrubIdentityTokens(input, context string) string {
+	if len(g.tokenPatterns) == 0 {
+		return input
+	}
+	type segment struct {
+		text   string
+		opaque bool
+	}
+	var segments []segment
+	remaining := input
+	for {
+		index := strings.Index(remaining, g.escapePrefix)
+		if index < 0 {
+			segments = append(segments, segment{text: remaining})
+			break
+		}
+		segments = append(segments, segment{text: remaining[:index]})
+		end := index + len(g.escapePrefix)
+		if end < len(remaining) && (remaining[end] == 'E' || remaining[end] == 'R') {
+			end++
+		}
+		segments = append(segments, segment{text: remaining[index:end], opaque: true})
+		remaining = remaining[end:]
+	}
+	for _, pattern := range g.tokenPatterns {
+		if pattern == nil {
+			continue
+		}
+		var next []segment
+		for _, part := range segments {
+			if part.opaque {
+				next = append(next, part)
+				continue
+			}
+			last := 0
+			for _, match := range pattern.FindAllStringIndex(part.text, -1) {
+				next = append(next, segment{text: part.text[last:match[0]]})
+				g.recordLeak(context, "identity_token", "[configured token]")
+				next = append(next, segment{text: g.aliasToken(part.text[match[0]:match[1]]), opaque: true})
+				last = match[1]
+			}
+			next = append(next, segment{text: part.text[last:]})
+		}
+		segments = next
+	}
+	var out strings.Builder
+	out.Grow(len(input))
+	for _, part := range segments {
+		out.WriteString(part.text)
+	}
+	return out.String()
 }
 
 func (g *Gate) ScrubBytes(input []byte, context string) []byte {
@@ -482,12 +534,21 @@ func (g *Gate) aliasToken(original string) string {
 		}
 	}
 	h := sha256.Sum256([]byte(original))
-	alias := "[REDACTED:" + hex.EncodeToString(h[:3]) + "]"
-	if _, exists := g.tokenAliases[alias]; exists {
-		alias = "[REDACTED:" + hex.EncodeToString(h[:6]) + "]"
+	for size := 3; size <= len(h); size++ {
+		alias := ValueAliasPrefix + hex.EncodeToString(h[:size]) + "]"
+		if _, exists := g.tokenAliases[alias]; !exists {
+			g.tokenAliases[alias] = original
+			return alias
+		}
 	}
-	g.tokenAliases[alias] = original
-	return alias
+	// Even a full digest collision must not overwrite an existing inverse map.
+	for suffix := 1; ; suffix++ {
+		alias := fmt.Sprintf("%s%x-%d]", ValueAliasPrefix, h, suffix)
+		if _, exists := g.tokenAliases[alias]; !exists {
+			g.tokenAliases[alias] = original
+			return alias
+		}
+	}
 }
 
 func (g *Gate) aliasEmail(original, domain string) string {

@@ -68,8 +68,8 @@ func TestResponseFidelityPreservesDiagnostics(t *testing.T) {
 			if got.Code != tc.status || !strings.Contains(got.Body.String(), tc.diagnostic) || strings.Contains(got.Body.String(), "AcmeCorp") || !utf8.Valid(got.Body.Bytes()) {
 				t.Fatalf("diagnostic changed/lost: status=%d body=%s", got.Code, got.Body.String())
 			}
-			if got.Header().Get("Retry-After") != "30" || got.Header().Get("X-Blinder-View") != "redacted" {
-				t.Fatal("missing diagnostic metadata or explicit redaction label")
+			if got.Header().Get("Retry-After") != "30" || got.Header().Get("X-Blinder-View") != "transformed" {
+				t.Fatal("missing diagnostic metadata or explicit transformation label")
 			}
 			if tc.name == "html200alert" && strings.Contains(got.Body.String(), "ordinary content") {
 				t.Fatal("diagnostic preservation escaped its marked region")

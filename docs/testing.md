@@ -151,6 +151,8 @@ Open `https://127.0.0.1:18099/` in the chosen browser and complete the local cer
 
 The only credentials are the synthetic `tester` / `fixture-only`. The fixture binds only to loopback. No real secrets or production traffic are required. Set the scanner's target URL to the Blinder HTTPS address; Blinder is a reverse proxy, not a forward-proxy configuration field.
 
+The unsupported-encoding link is a deliberate negative test: its body is not valid Brotli despite its `br` header, and HTTP 502 is expected. The document link deliberately becomes a transparent GIF. Their tooltips identify these outcomes even when paranoid mode replaces the visible link text. The WebSocket fixture sends a heartbeat every 20 seconds; its page reports a close code on disconnect rather than leaving a generic failure message. Neither heartbeat traffic nor a successful upgrade alone establishes arbitrary real-application WebSocket compatibility.
+
 ### Local certificate trust
 
 Blinder terminates HTTPS from the browser/scanner and presents its own certificate. The operator must accept or trust that certificate in the client being tested. Clients may use different trust stores, so installing it in the operating system alone is not evidence that every browser or scanner will accept it. Confirm a successful connection in each selected client. The operator must handle browser-generated certificate warnings; browser automation resumes after that step.
@@ -273,7 +275,7 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 ## Explicit scope checks before wider use
 
 - **Absolute links and redirects:** inspect `/absolute-redirect` without following external aliases automatically. Rewritten aliases do not currently provide complete origin/DNS routing. Record whether the intended target depends on this, and block that workflow if it does.
-- **Documents and fonts:** inspect `/document.pdf`. Binary content is replaced with a GIF placeholder while the original MIME type remains; document/font rendering fidelity is not established. The fixture PDF is a metadata sample, not a complete rendered document.
+- **Documents and fonts:** inspect `/document.pdf`. Binary content is replaced with a GIF placeholder and served as `image/gif`; document/font rendering fidelity is not established. The fixture PDF is a metadata sample, not a complete rendered document.
 - **Privacy boundaries:** encoded HTML/JS, arbitrary unknown binary content, cookie values and binary/control WebSocket payloads need separate policy and tests. A passing fixture is not evidence that every response is anonymized.
 - **Evidence:** verify imports into the intended HAR tool. Independent schema, synthetic semantic and Playwright importer/matcher checks pass; binary requests need the optional Playwright export adapter. Selected viewer UI, browser replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.
 - **Routing and scale:** complete the live Tor track above; complex multi-origin applications, long-running sessions, load, memory growth and all release platforms remain separate test work.

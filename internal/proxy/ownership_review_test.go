@@ -73,8 +73,8 @@ func TestOwnershipReviewPrefixDoesNotProveQueryOwnership(t *testing.T) {
 func TestOwnershipReviewLiteralEscapeMarkerRoundTrips(t *testing.T) {
 	g := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 	// Use the actual public output marker; do not assume its spelling or nonce.
-	emitted := g.Scrub("[REDACTED:fixture]", "probe")
-	if emitted == "[REDACTED:fixture]" {
+	emitted := g.Scrub(scrub.ValueAliasPrefix+"fixture]", "probe")
+	if emitted == scrub.ValueAliasPrefix+"fixture]" {
 		t.Fatal("fixture did not escape")
 	}
 	original := "literal " + emitted + " and identity AcmeCorp"
@@ -149,11 +149,11 @@ func TestOwnershipPropertyLiteralMarkerRoundTrip(t *testing.T) {
 		{"x"},
 	} {
 		g := scrub.NewGate(nil, tokens, "alias.local")
-		marker := g.Scrub("[REDACTED:probe]", "discover")
+		marker := g.Scrub(scrub.ValueAliasPrefix+"probe]", "discover")
 		cases := []string{
 			"before " + marker + " after",
 			marker + marker,
-			"nested [REDACTED:" + marker + "]",
+			"nested " + scrub.ValueAliasPrefix + marker + "]",
 			marker,
 		}
 		for _, original := range cases {
