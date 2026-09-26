@@ -61,6 +61,9 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 		return BodyResult{Body: rewriteCSS(body, gate, path, opt.Origins)}
 	case strings.HasPrefix(ct, "text/xml") || ct == "application/xml" || strings.HasSuffix(ct, "+xml"):
 		return BodyResult{Body: gate.ScrubBytes(body, "body:xml:"+path)}
+	case strings.HasPrefix(ct, "image/"):
+		meta := metadata.Extract(body)
+		return BodyResult{Body: rewriteImage(body, gate, "body:image:"+path), Metadata: &meta}
 	case isBinaryContent(ct):
 		meta := metadata.Extract(body)
 		return BodyResult{Body: rewriteBinaryImage(ct), Metadata: &meta, ContentType: "image/gif"}

@@ -4,6 +4,8 @@ Use these as three separate gates. Package regressions check specific defect cla
 
 The [provider-origin report](testing-results-2026-09-26-provider-origins.md) records the latest isolated provider routing and CSP/CORS comparison. The [earlier acceptance report](testing-results-2026-09-26-acceptance.md) records operator browser isolation and independent HAR consumer checks. The [post-commit review](testing-results-2026-09-26-postcommit.md), [fidelity report](testing-results-2026-09-26.md) and [2026-09-23 report](testing-results-2026-09-23.md) preserve earlier verification. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
 
+The [behavior-preservation checkpoint](testing-results-2026-09-26-behavior.md) records the current image, JavaScript-navigation and malformed-source work. An initial browser comparison exposed a percent-encoded JavaScript URL acquiring a CSP grant. The decoded-hash correction has package regressions; the final expanded browser comparison is pending and must not be inferred from earlier passing pairs.
+
 ## Automated checks
 
 Run from the repository root with Go 1.26+, on macOS or Linux:
@@ -32,6 +34,25 @@ go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestControlFidelity
 ```
 
 Open the URL in `/private/tmp/blinder-csp-browser-url.txt` within 180 seconds. The fixture runs the direct baseline, navigates to Blinder, and compares execution, computed style and policy-violation events. It records `/private/tmp/blinder-csp-browser-result.json`. Both stages use local synthetic targets; the command does not install trust or bypass certificate warnings. See the [CSP acceptance report](testing-results-2026-09-26-csp.md) for measured coverage and remaining work.
+
+For image, JavaScript-navigation and malformed-source regressions:
+
+```sh
+go test -race -count=1 ./internal/rewriter -run '^(TestRaster|TestJavaScriptURL|TestHTMLFidelity)'
+go test -race -count=1 ./internal/proxy -run '^(TestMalformedHTMLSource|TestBehaviorFidelityTruncatedSourceWire)'
+```
+
+Raster checks validate actual decoding, format, dimensions and byte lengths for JPEG, static PNG and GIF; GIF timing/frame geometry, minimal JPEG EXIF orientation, corrupt-image failures, textual diagnostics, embedded data URLs and legal padding boundaries are covered separately. Decoding has explicit pixel/dimension/frame budgets. Unsupported formats/APNG and PNG EXIF orientation remain limitations, and decoder tests do not establish every browser's tolerance for corrupt files. JavaScript-navigation tests check executable syntax and string masking, URL percent decoding, original CSP hash scope and denial when only an encoded or transformed spelling matches. Malformed HTML checks retain bogus/unterminated comment envelopes and incomplete source while masking identities, including a real HTTP 503 with preserved diagnostics and actual body length. Cases where identities cross syntax delimiters still exercise conservative omission.
+
+Run the paired browser comparison with an existing certificate trusted for `127.0.0.1`:
+
+```sh
+BLINDER_REVIEW_BROWSER=1 \
+BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-acceptance-certs \
+go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestBehaviorFidelityBrowser$' -v
+```
+
+Open `/private/tmp/blinder-behavior-browser-url.txt` in the chosen browser within 180 seconds. The fixture automatically runs direct and proxied stages and records `/private/tmp/blinder-behavior-browser-result.json`. Compare explicit permitted/blocked JavaScript execution and CSP events, image load/error events and natural dimensions, malformed comment execution boundaries, and actual upstream image requests. The separate wire test checks incomplete trailing source that the browser omits from its DOM. A disconnected browser or timed-out stage remains incomplete acceptance; neither an opt-in skip nor equality between two unexpected failures counts as a pass. See the behavior checkpoint for the exact state of the current rerun.
 
 Run `go test -race -count=1 ./internal/jsonedit` and `go test -race -count=1 ./internal/proxy -run '^TestJSONFidelity'` for JSON source fidelity. Real HTTP fixtures compare direct and proxied request/response bytes, including duplicate keys, whitespace/order, string escapes, large integers, exponent spellings and negative zero. They verify minimal alias edits and nested CAPTCHA opacity scoped to the configured submission path. Malformed error fixtures retain HTTP 500, SQL-style diagnostics and original broken grammar while redacting escaped identities. Ambiguous escapes and cross-fragment residual identities still exercise the `null` fallback.
 
@@ -365,6 +386,7 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 
 - **Absolute links and redirects:** registered same-upstream links and resource URLs should retain the validated browser entry hostname and port; registered extra origins should use distinct aliases. Verify resolution and certificate trust for those aliases before accepting the workflow. Dynamically assembled or escaped URLs require separate observation; static rewriting does not establish complete browser network containment.
 - **Documents and fonts:** inspect `/document.pdf`. Binary content is replaced with a GIF placeholder and served as `image/gif`; document/font rendering fidelity is not established. The fixture PDF is a metadata sample, not a complete rendered document.
+- **Images and executable links:** compare actual image requests, status, load/error events and natural dimensions against the direct target, including a corrupt image and a failed HTTP response. Check permitted and denied `javascript:` navigation under the original corresponding CSP. Supported raster masking and package tests do not close unsupported-format, decoder or arbitrary-JavaScript fidelity gaps.
 - **Privacy boundaries:** encoded HTML/JS, arbitrary unknown binary content, cookie values and binary/control WebSocket payloads need separate policy and tests. A passing fixture is not evidence that every response is anonymized.
 - **Evidence:** verify imports into the intended HAR tool. Independent schema, synthetic semantic and Playwright importer/matcher checks pass; binary requests need the optional Playwright export adapter. Selected viewer UI, browser replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.
 - **Routing and scale:** complete the live Tor track above; complex multi-origin applications, long-running sessions, load, memory growth and all release platforms remain separate test work.

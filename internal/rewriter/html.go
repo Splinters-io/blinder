@@ -74,10 +74,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			// already emitted text is not repeated. Never revive an SRI block.
 			if z.Err() == io.EOF && !suppressElement {
 				raw := append([]byte(nil), z.Raw()...)
-				decoded := html.UnescapeString(string(raw))
-				if gate.Scrub(decoded, "html:truncated") == decoded && gate.ResidualLeakCount(decoded) == 0 {
-					out.Write(raw)
-				}
+				out.Write(rewriteHTMLTruncated(raw, gate))
 			}
 			break
 		}
@@ -206,11 +203,19 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 					kind = "style-attr"
 				} else if strings.HasPrefix(a.key, "on") {
 					kind = "script-attr"
+				} else if isURLAttr(tagName, a.key) {
+					if _, _, ok := javascriptURL(a.val); ok {
+						kind = "script-navigation"
+					}
 				}
 				if kind != "" {
 					for i, transformed := range transformedAttrs {
 						if transformed.key == a.key {
-							suffix := hashes.record(kind, out.Len(), cspUTF8([]byte(a.val)), cspUTF8([]byte(transformed.val)))
+							before, after := cspUTF8([]byte(a.val)), cspUTF8([]byte(transformed.val))
+							if kind == "script-navigation" {
+								before, after = javascriptCSPSource(a.val), javascriptCSPSource(transformed.val)
+							}
+							suffix := hashes.record(kind, out.Len(), before, after)
 							if len(suffix) > 0 {
 								transformedAttrs[i].val += string(suffix)
 								changed = true
@@ -280,34 +285,19 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 	return fitProseToBodyLength(rewritten, proseSpans, len(body), gate)
 }
 
-// Comments carry diagnostic and parser-relevant source. Ordinary comments have
-// an envelope we can preserve while scrubbing an entity-decoded interior. A
-// changed interior is escaped so it cannot introduce markup or a closing '-->'.
-// Bogus/unterminated comment syntax is preserved only when no replacement is
-// needed; otherwise retain the previous omission policy instead of guessing a
-// new syntactic envelope. A residual check also covers configured identities
-// spanning the interior/envelope boundary without rescanning generated aliases.
+// Comments retain their original envelope, including bogus and unterminated
+// forms. The source editor masks an entity-decoded identity in place without
+// serializing a new tag/comment or repairing the original grammar.
 func rewriteHTMLComment(raw []byte, gate *scrub.Gate) []byte {
-	const prefix, suffix = "<!--", "-->"
-	source := string(raw)
-	if strings.HasPrefix(source, prefix) && strings.HasSuffix(source, suffix) && len(source) >= len(prefix)+len(suffix) {
-		interior := source[len(prefix) : len(source)-len(suffix)]
-		decoded := html.UnescapeString(interior)
-		transformed := gate.Scrub(decoded, "html:comment")
-		candidate := source
-		if transformed != decoded {
-			candidate = prefix + html.EscapeString(transformed) + suffix
-		}
-		if gate.ResidualLeakCount(html.UnescapeString(candidate)) != 0 {
-			return nil
-		}
-		return []byte(candidate)
-	}
-	decoded := html.UnescapeString(source)
-	if transformed := gate.Scrub(decoded, "html:comment"); transformed != decoded || gate.ResidualLeakCount(decoded) != 0 {
+	candidate := scrubHTMLSourceSpan(raw, gate, "html:comment")
+	if gate.ResidualLeakCount(html.UnescapeString(string(candidate))) != 0 ||
+		!sameHTMLCommentEnvelope(raw, candidate) || !isSingleHTMLToken(candidate, html.CommentToken) {
+		// Identities crossing a syntactic delimiter cannot always be removed
+		// while keeping that delimiter. Keep the conservative omission for
+		// these ambiguous cases rather than inventing executable source.
 		return nil
 	}
-	return raw
+	return candidate
 }
 
 type tagAttr struct {
@@ -693,10 +683,12 @@ func guessContentTypeFromTag(tagName string) string {
 
 func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate, origins *OriginMapper) string {
 	if tagName == "img" && attrName == "src" {
-		return transparentGifDataURI
+		if rewritten, ok := rewriteImageDataURL(attrVal, gate); ok {
+			return rewritten
+		}
 	}
 	if tagName == "img" && attrName == "alt" {
-		return "[image]"
+		return proseForHTMLText(attrVal, gate.ContentTag([]byte(attrVal)), gate)
 	}
 
 	if attrName == "style" {
@@ -704,6 +696,11 @@ func scrubAttrValue(tagName, attrName, attrVal, relVal string, gate *scrub.Gate,
 	}
 	if strings.HasPrefix(attrName, "on") {
 		return string(rewriteJS([]byte(attrVal), gate, "html:event-handler", origins))
+	}
+	if isURLAttr(tagName, attrName) {
+		if rewritten, ok := rewriteJavaScriptURL(attrVal, gate, origins); ok {
+			return rewritten
+		}
 	}
 	if origins != nil && isURLAttr(tagName, attrName) {
 		return scrubResourceURL(attrVal, gate, "html:"+attrName, origins)

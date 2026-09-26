@@ -85,15 +85,16 @@ func TestHTMLFidelityTruncatedSourceIsObservableWithoutDuplicateBytes(t *testing
 	}
 }
 
-func TestHTMLFidelityTruncatedIdentityRetainsOmission(t *testing.T) {
+func TestHTMLFidelityTruncatedIdentityRetainsSource(t *testing.T) {
 	for _, identity := range []string{"AcmeCorp", "&#65;cmeCorp", "Acme&#x43;orp"} {
 		t.Run(identity, func(t *testing.T) {
 			gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 			const prefix = `<P>SQLSTATE[42000] before truncation</P>`
 			source := prefix + `<DiV data-note='` + identity
 			got := RewriteBody([]byte(source), "text/html", "/", gate, false).Body
-			if string(got) != prefix {
-				t.Fatalf("truncated identity exposed or diagnostics changed: %q", got)
+			want := prefix + `<DiV data-note='` + gate.Scrub("AcmeCorp", "fixture")
+			if string(got) != want || strings.Contains(html.UnescapeString(string(got)), "AcmeCorp") {
+				t.Fatalf("truncated identity source lost, leaked or diagnostics changed: %q", got)
 			}
 		})
 	}
@@ -133,15 +134,17 @@ func TestHTMLFidelityCommentsDecodeIdentityWithoutCreatingMarkup(t *testing.T) {
 	}
 }
 
-func TestHTMLFidelityUnusualCommentsRetainSafeOmissionOnChanges(t *testing.T) {
+func TestHTMLFidelityUnusualCommentsRetainSourceOnChanges(t *testing.T) {
 	for _, source := range []string{
 		`<?E_INPUT AcmeCorp?>`, `<!E_INPUT &#65;cmeCorp>`, `<!-- E_INPUT AcmeCorp --!>`, `<!-- E_INPUT AcmeCorp`,
 	} {
 		t.Run(source, func(t *testing.T) {
 			gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 			got := RewriteBody([]byte(source), "text/html", "/", gate, false).Body
-			if len(got) != 0 {
-				t.Fatalf("changed unusual comment should retain omission policy: %q", got)
+			want := strings.Replace(source, "AcmeCorp", gate.Scrub("AcmeCorp", "fixture"), 1)
+			want = strings.Replace(want, "&#65;cmeCorp", gate.Scrub("AcmeCorp", "fixture"), 1)
+			if string(got) != want {
+				t.Fatalf("changed unusual comment lost original envelope/source: got %q want %q", got, want)
 			}
 		})
 	}
@@ -168,7 +171,7 @@ func TestHTMLFidelityRetainsParanoidImageAndTitleRules(t *testing.T) {
 	const submitted = "<TEXTAREA name=q>unchanged &#00038;\r\nvalue</TEXTAREA >"
 	source := `<TiTlE>Original title</TiTlE >` + `<IMG src='icon' alt='original'>` + diagnostic + submitted + `<p>` + strings.Repeat("Ordinary prose goes here. ", 20) + `</p>`
 	got := string(RewriteBody([]byte(source), "text/html", "/", scrub.NewGate(nil, nil, "alias.local"), true).Body)
-	if (!strings.HasPrefix(got, `<TiTlE>`) || !strings.Contains(got, `</TiTlE >`) || strings.Contains(got, "Original title")) || !strings.Contains(got, transparentGifDataURI) || !strings.Contains(got, `alt='[image]'`) {
+	if (!strings.HasPrefix(got, `<TiTlE>`) || !strings.Contains(got, `</TiTlE >`) || strings.Contains(got, "Original title")) || !strings.Contains(got, `src='icon'`) || strings.Contains(got, `alt='original'`) {
 		t.Fatalf("required image/title transforms were bypassed: %s", got)
 	}
 	if !strings.Contains(got, diagnostic) || !strings.Contains(got, submitted) {

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,43 @@ import (
 	"github.com/Splinters-io/blinder/internal/config"
 )
 
+type captchaFlowRequest struct {
+	Method, URI, Host, Origin, Referer string
+	CookieNames                        []string
+	ProviderSession                    string
+	TargetCredential                   bool
+	OperatorCredential                 bool
+	Authorization                      bool
+}
+
+func observeCaptchaFlowRequest(r *http.Request) captchaFlowRequest {
+	row := captchaFlowRequest{Method: r.Method, URI: r.URL.RequestURI(), Host: r.Host, Origin: r.Header.Get("Origin"), Referer: r.Header.Get("Referer"), Authorization: r.Header.Get("Authorization") != ""}
+	for _, cookie := range r.Cookies() {
+		row.CookieNames = append(row.CookieNames, cookie.Name)
+		switch cookie.Name {
+		case "provider_session":
+			row.ProviderSession = cookie.Value
+		case "target_session", "challenge_stage":
+			row.TargetCredential = true
+		case captcha.OperatorCookieName, "__blinder_op":
+			row.OperatorCredential = true
+		}
+	}
+	return row
+}
+
+type captchaFlowRelayRequest struct {
+	Request captchaFlowRequest
+	Status  int
+	Error   string
+}
+
+type captchaFlowRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f captchaFlowRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 // No real CAPTCHA is solved: a deterministic local provider returns a fixture
 // token after exercising ordinary browser APIs. A human/operator still submits
 // the visible completion form, exactly as in the application workflow.
@@ -30,12 +68,53 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var requests []string
+	var providerRequests []captchaFlowRequest
+	var relayRequests []captchaFlowRelayRequest
+	var retry map[string]string
+	var challengeID, operatorURL string
+	var resultStatus int
+	var resultBody, resultError string
+	var completed bool
+	termination := "setup did not complete"
+	socksDestinations := func() []string { return nil }
+	// Retain failed and timed-out runs too. Snapshots share the handlers' lock,
+	// so a late upstream result cannot race with timeout evidence collection.
+	defer func() {
+		mu.Lock()
+		observed := append([]string(nil), requests...)
+		providerObserved := append([]captchaFlowRequest(nil), providerRequests...)
+		relayObserved := append([]captchaFlowRelayRequest(nil), relayRequests...)
+		retryObserved := make(map[string]string, len(retry))
+		for k, v := range retry {
+			retryObserved[k] = v
+		}
+		mu.Unlock()
+		evidence := map[string]any{
+			"completed": completed, "passed": !t.Failed() && completed, "termination": termination,
+			"status": resultStatus, "body": resultBody, "error": resultError,
+			"operatorURL": operatorURL, "challengeID": challengeID, "retry": retryObserved,
+			"providerRequests": observed, "providerObservations": providerObserved,
+			"relayRequests": relayObserved, "socksDestinations": socksDestinations(),
+			"transport": "synthetic local SOCKS; HTTP localhost browser endpoints; no live Tor or TLS trust acceptance",
+		}
+		encoded, err := json.MarshalIndent(evidence, "", "  ")
+		if err != nil {
+			t.Errorf("encode browser evidence: %v", err)
+			return
+		}
+		if err := os.WriteFile("/private/tmp/blinder-flow-browser-result.json", encoded, 0600); err != nil {
+			t.Errorf("write browser evidence: %v", err)
+		}
+		t.Log(string(encoded))
+	}()
 	var providerOrigin string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observation := observeCaptchaFlowRequest(r)
 		mu.Lock()
 		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		providerRequests = append(providerRequests, observation)
 		mu.Unlock()
-		if r.Header.Get("Authorization") != "" || strings.Contains(r.Header.Get("Cookie"), "target_session") || strings.Contains(r.Header.Get("Cookie"), "__blinder_op") {
+		if observation.Authorization || observation.TargetCredential || observation.OperatorCredential {
 			t.Error("target/operator credentials reached provider")
 		}
 		switch r.URL.Path {
@@ -109,7 +188,6 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	pu, _ := url.Parse(provider.URL)
 	pu.Host = "localhost:" + pu.Port()
 	providerOrigin = pu.String()
-	var retry map[string]string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/protected" {
 			http.NotFound(w, r)
@@ -125,7 +203,9 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		}
 		a, _ := r.Cookie("target_session")
 		b, _ := r.Cookie("challenge_stage")
+		mu.Lock()
 		retry = map[string]string{"method": r.Method, "username": r.Form.Get("username"), "csrf": r.Form.Get("csrf"), "token": r.Form.Get("fixture-response"), "cookies": r.Header.Get("Cookie")}
+		mu.Unlock()
 		if r.Method != "POST" || r.Form.Get("username") != "fixture-user" || r.Form.Get("csrf") != "fresh" || a == nil || a.Value != "one" || b == nil || b.Value != "two" {
 			http.Error(w, "original session/form lost", 400)
 			return
@@ -135,6 +215,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	defer upstream.Close()
 	tu, _ := url.Parse(upstream.URL)
 	socks, seen := captchaRoutingSOCKS(t, map[string]bool{tu.Host: true, pu.Host: true})
+	socksDestinations = seen
 	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      opaque_fields: [fixture-response]\n", providerOrigin))
 	mux := http.NewServeMux()
 	server := httptest.NewUnstartedServer(mux)
@@ -148,8 +229,35 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.transport.(*http.Transport).CloseIdleConnections()
-	var challengeID string
+	transport := s.transport.(*http.Transport)
+	defer transport.CloseIdleConnections()
+	// Count every provider request issued through the configured transport.
+	// Seeing one SOCKS connection is insufficient: a later dynamic URL could
+	// still be fetched directly by the browser from the original provider.
+	s.transport = captchaFlowRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != pu.Host {
+			return transport.RoundTrip(r)
+		}
+		mu.Lock()
+		index := len(relayRequests)
+		relayRequests = append(relayRequests, captchaFlowRelayRequest{Request: observeCaptchaFlowRequest(r)})
+		mu.Unlock()
+		response, err := transport.RoundTrip(r)
+		mu.Lock()
+		if response != nil {
+			relayRequests[index].Status = response.StatusCode
+		}
+		if err != nil {
+			relayRequests[index].Error = err.Error()
+		}
+		mu.Unlock()
+		return response, err
+	})
+	// This fixture intentionally exercises HTTP .localhost endpoints. Configure
+	// aliases to match that listener; production HTTPS alias trust is separate.
+	if err := s.configureProviderRoutes("http"); err != nil {
+		t.Fatal(err)
+	}
 	cleanup := make(chan struct{}, 1)
 	mux.HandleFunc("/review-bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -202,18 +310,24 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	u, _ := url.Parse(server.URL)
 	u.Host = captcha.OperatorHost + ":" + u.Port()
 	u.Path = "/review-bootstrap"
+	operatorURL = u.String()
 	if err := os.WriteFile("/private/tmp/blinder-flow-browser-url.txt", []byte(u.String()), 0600); err != nil {
 		t.Fatal(err)
 	}
+	termination = "waiting for browser completion"
 	select {
 	case got := <-done:
+		completed = true
+		termination = "original request returned"
+		resultStatus, resultBody = got.status, got.body
+		if got.err != nil {
+			resultError = got.err.Error()
+		}
 		mu.Lock()
 		observed := append([]string(nil), requests...)
+		providerObserved := append([]captchaFlowRequest(nil), providerRequests...)
+		relayObserved := append([]captchaFlowRelayRequest(nil), relayRequests...)
 		mu.Unlock()
-		evidence := map[string]any{"status": got.status, "body": got.body, "retry": retry, "providerRequests": observed, "socksDestinations": seen()}
-		encoded, _ := json.MarshalIndent(evidence, "", "  ")
-		os.WriteFile("/private/tmp/blinder-flow-browser-result.json", encoded, 0600)
-		t.Log(string(encoded))
 		if got.err != nil || got.status != 200 || got.body != "Original request resumed" {
 			t.Errorf("end-to-end flow failed: %v status=%d body=%q", got.err, got.status, got.body)
 		}
@@ -225,6 +339,26 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 			if !found {
 				t.Errorf("missing provider request %s", want)
 			}
+		}
+		counts := func(rows []captchaFlowRequest) map[string]int {
+			result := make(map[string]int)
+			for _, row := range rows {
+				// Header observations also distinguish provider fetches using an
+				// opaque/direct browser origin from the request the relay sent.
+				key, _ := json.Marshal(row)
+				result[string(key)]++
+			}
+			return result
+		}
+		var relayed []captchaFlowRequest
+		for _, row := range relayObserved {
+			if row.Error != "" {
+				t.Errorf("provider relay error for %s %s: %s", row.Request.Method, row.Request.URI, row.Error)
+			}
+			relayed = append(relayed, row.Request)
+		}
+		if !reflect.DeepEqual(counts(providerObserved), counts(relayed)) {
+			t.Errorf("provider requests differ from relay requests: received=%v relayed=%v", counts(providerObserved), counts(relayed))
 		}
 		for _, dst := range []string{tu.Host, pu.Host} {
 			found := false
@@ -241,6 +375,8 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 			t.Log("cleanup navigation not received")
 		}
 	case <-ctx.Done():
+		termination = "browser completion deadline exceeded"
+		resultError = ctx.Err().Error()
 		t.Fatal("browser flow did not finish")
 	}
 }

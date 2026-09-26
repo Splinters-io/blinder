@@ -68,7 +68,7 @@ func TestRewriteBody_HTMLPreservesFormStructure(t *testing.T) {
 	}
 }
 
-func TestRewriteBody_HTMLReplacesImages(t *testing.T) {
+func TestRewriteBody_HTMLRoutesImagesWithoutInventingSuccessfulLoad(t *testing.T) {
 	gate := newTestGate()
 	body := []byte(`<img src="https://target.example.com/logo.png" alt="AcmeCorp Logo">`)
 	result := RewriteBody(body, "text/html", "/", gate, false)
@@ -76,8 +76,8 @@ func TestRewriteBody_HTMLReplacesImages(t *testing.T) {
 	if strings.Contains(resultStr, "target.example.com/logo.png") {
 		t.Error("image src should be replaced")
 	}
-	if strings.Contains(resultStr, "data:image/gif;base64,") == false {
-		t.Error("image should be replaced with data URI")
+	if strings.Contains(resultStr, "data:image/") || strings.Contains(resultStr, "AcmeCorp Logo") || !strings.Contains(resultStr, `src="https://`) {
+		t.Error("image must keep a routed request and mask its alternate text")
 	}
 }
 
@@ -120,8 +120,8 @@ func TestRewriteBody_ImageReplacement(t *testing.T) {
 	if string(result.Body) == string(body) {
 		t.Error("image should be replaced, not passed through")
 	}
-	if result.Body[0] != 0x47 || result.Body[1] != 0x49 || result.Body[2] != 0x46 {
-		t.Error("should be replaced with GIF header")
+	if strings.Contains(string(result.Body), "AcmeCorp") || strings.HasPrefix(string(result.Body), "GIF") || result.ContentType != "" {
+		t.Error("invalid image diagnostic should remain scrubbed text, not become a valid image")
 	}
 	if result.Metadata == nil {
 		t.Error("image replacement should produce metadata")

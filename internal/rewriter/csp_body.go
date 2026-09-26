@@ -52,27 +52,33 @@ func (c *CSPHashes) record(kind string, position int, original, rewritten []byte
 	if c.outputs == nil {
 		c.outputs = make(map[string]string)
 	}
-	var suffix []byte
+	var suffix, rawSuffix []byte
 	for c.outputConflict(before, after) {
 		// Routing can collapse distinct source strings to identical output.
 		// Keep their CSP identities distinct using trailing whitespace, which
 		// does not change JS/CSS execution. Only collisions cost bytes.
-		if suffix == nil {
-			suffix = []byte{'\n'}
+		if rawSuffix == nil {
+			rawSuffix = []byte{'\n'}
 			digest := sha256.Sum256(original)
 			for _, b := range digest {
 				for bit := 7; bit >= 0; bit-- {
 					if b&(1<<bit) == 0 {
-						suffix = append(suffix, ' ')
+						rawSuffix = append(rawSuffix, ' ')
 					} else {
-						suffix = append(suffix, '\t')
+						rawSuffix = append(rawSuffix, '\t')
 					}
 				}
 			}
 		} else {
-			suffix = append(suffix, ' ')
+			rawSuffix = append(rawSuffix, ' ')
 		}
-		candidate := append(append([]byte(nil), rewritten...), suffix...)
+		suffix = rawSuffix
+		if kind == "script-navigation" {
+			// Literal trailing whitespace is stripped by URL parsing. Encode
+			// it so navigation keeps both the code and its CSP identity.
+			suffix = []byte(strings.TrimPrefix(encodeJavaScriptURL(string(suffix)), "javascript:"))
+		}
+		candidate := append(append([]byte(nil), rewritten...), rawSuffix...)
 		after = cspDigests(candidate)
 	}
 	c.reserveDigests(before, after)
@@ -164,6 +170,11 @@ func (c *CSPHashes) reserveOriginalHTML(body []byte) {
 			if a.key == "style" || strings.HasPrefix(a.key, "on") {
 				reserve(cspUTF8([]byte(a.val)))
 			}
+			if isURLAttr(tag, a.key) {
+				if source := javascriptCSPSource(a.val); source != nil {
+					reserve(source)
+				}
+			}
 			if tag == "script" && external && a.key == "integrity" {
 				for _, entry := range sri.ParseIntegrity(a.val) {
 					digest := base64.StdEncoding.EncodeToString(entry.Digest)
@@ -203,7 +214,7 @@ func cspHashKind(directive, kind string) bool {
 	case "style-src":
 		return strings.HasPrefix(kind, "style")
 	case "script-src-elem":
-		return kind == "script"
+		return kind == "script" || kind == "script-navigation"
 	case "style-src-elem":
 		return kind == "style"
 	case "script-src-attr":
@@ -248,7 +259,7 @@ func (c *CSPHashes) rewriteHash(token, directive string, after int) []string {
 	seen := make(map[string]bool)
 	collides := false
 	for _, change := range c.changes {
-		if (change.position < after && !strings.HasSuffix(change.kind, "-attr")) || !cspHashKind(directive, change.kind) {
+		if (change.position < after && !strings.HasSuffix(change.kind, "-attr") && change.kind != "script-navigation") || !cspHashKind(directive, change.kind) {
 			continue
 		}
 		if change.original[index] == digest {

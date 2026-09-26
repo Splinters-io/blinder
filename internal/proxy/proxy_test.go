@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"image"
 	"io"
 	"net"
 	"net/http"
@@ -173,7 +175,7 @@ func TestProxy_HeaderScrubbing(t *testing.T) {
 	}
 }
 
-func TestProxy_ImageReplacement(t *testing.T) {
+func TestProxy_InvalidImagePreservesFailure(t *testing.T) {
 	target := startTestTarget(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.Write([]byte("fake jpeg data with AcmeCorp in it"))
@@ -195,8 +197,11 @@ func TestProxy_ImageReplacement(t *testing.T) {
 		t.Error("image body should not contain identity token")
 	}
 
-	if len(body) < 3 || body[0] != 0x47 || body[1] != 0x49 || body[2] != 0x46 {
-		t.Error("image should be replaced with transparent GIF (GIF89a header)")
+	if _, _, err := image.Decode(bytes.NewReader(body)); err == nil {
+		t.Error("invalid upstream image became a successful image load")
+	}
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/jpeg" || !strings.Contains(string(body), "fake jpeg data with ") {
+		t.Error("upstream status, media type or diagnostic text changed")
 	}
 }
 
