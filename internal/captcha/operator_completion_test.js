@@ -31,9 +31,10 @@ function setup(automatic, value = '') {
   const field = new Element('input'); field.name = 'fixture-response'; field.value = value;
   const button = new Element('button'); button.type = 'submit';
   const form = new Form(); form.append(field, button);
+  form.method = 'POST'; form.action = '/__blinder/captcha/challenge/fixture-session';
   const frame = {contentWindow: {}};
   const body = new Element('body');
-  if (automatic) body.append(field); else body.append(form);
+  body.append(form);
   function descendants(node) { return node.children.flatMap(child => [child, ...descendants(child)]); }
   const document = {
     body,
@@ -69,53 +70,60 @@ function setup(automatic, value = '') {
   assert.equal(h.field.value, '', 'untrusted frame filled the form');
   h.windowEvent('message', message);
   assert.equal(h.field.value, 'solved');
-  assert.equal(h.fire(h.form, 'submit').prevented, undefined, 'initial native submission blocked');
+  assert.equal(h.fire(h.form, 'submit').prevented, true, 'default submission must be explicitly replaced');
+  assert.equal(h.state.submissions.length, 1, 'manual submission never invoked native form navigation');
+  assert.equal(h.state.submissions[0], h.form, 'native submission must use the trusted outer form');
   assert.equal(h.button.disabled, true);
   assert.equal(h.status().textContent, 'Submitting solution…');
   assert.equal(h.fire(h.form, 'submit').prevented, true, 'duplicate native submission allowed');
+  assert.equal(h.state.submissions.length, 1, 'duplicate event initiated a second navigation');
   message.data.fields['fixture-response'] = 'changed-during-submission';
   h.windowEvent('message', message);
   assert.equal(h.field.value, 'solved', 'pending submission fields changed');
   h.windowEvent('pageshow', {persisted: true});
   assert.equal(h.button.disabled, false, 'back navigation left retry disabled');
-  assert.equal(h.fire(h.form, 'submit').prevented, undefined, 'explicit retry blocked');
+  assert.equal(h.fire(h.form, 'submit').prevented, true, 'retry must explicitly replace default submission');
+  assert.equal(h.state.submissions.length, 2, 'explicit retry did not initiate native navigation');
 }
 
 {
   const h = setup(true);
+  const message = {source: h.frame.contentWindow, data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
   assert.equal(h.state.submissions.length, 0);
-  h.field.value = 'solved';
-  h.state.observers[0].callback();
+  h.windowEvent('message', {...message, source: {}});
+  h.windowEvent('message', {...message, data: {...message.data, session: 'other-session'}});
+  assert.equal(h.state.submissions.length, 0, 'untrusted window/session submitted automatically');
+  h.windowEvent('message', message);
   assert.equal(h.state.submissions.length, 1);
   const submitted = h.state.submissions[0];
+  assert.equal(submitted, h.form, 'submission must use trusted outer form');
   assert.equal(submitted.method, 'POST');
   assert.equal(submitted.action, '/__blinder/captcha/challenge/fixture-session');
-  assert.deepEqual(submitted.children.map(input => [input.name, input.value]), [['fixture-response', 'solved']]);
+  assert.equal(h.field.value, 'solved');
   assert.equal(h.status().textContent, 'Submitting solution…');
-  assert.equal(h.state.timers[0].active, false);
-  assert.equal(h.state.observers[0].active, false);
-  h.state.observers[0].callback(); h.state.timers[0].callback();
-  assert.equal(h.state.submissions.length, 1, 'queued automatic callbacks resubmitted');
+  assert.equal(h.state.timers.length, 0, 'trusted wrapper must not poll challenge DOM');
+  assert.equal(h.state.observers.length, 0);
+  h.windowEvent('message', message);
+  assert.equal(h.state.submissions.length, 1, 'repeated provider message resubmitted');
   h.windowEvent('pageshow', {persisted: true});
-  assert.equal(h.retry().hidden, false);
-  assert.equal(h.body.children.includes(submitted), false, 'back navigation kept stale hidden solution fields');
-  h.state.timers[0].callback(); h.state.observers[0].callback();
+  assert.equal(h.button.disabled, false);
+  h.windowEvent('message', message);
   assert.equal(h.state.submissions.length, 1, 'back navigation restarted automatic submission');
-  h.fire(h.retry(), 'click');
-  assert.equal(h.state.submissions.length, 2, 'manual retry did not submit');
+  assert.equal(h.fire(h.form, 'submit').prevented, true, 'retry must explicitly replace default submission');
+  assert.equal(h.state.submissions.length, 2, 'explicit retry did not initiate native navigation');
 }
 
 {
   const h = setup(true);
-  h.field.value = 'solved';
+  const message = {source: h.frame.contentWindow, data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
   h.state.throwNext = true;
-  h.state.timers[0].callback();
+  h.windowEvent('message', message);
   assert.match(h.status().textContent, /could not start/);
-  assert.equal(h.retry().hidden, false);
-  h.state.timers[0].callback(); h.state.observers[0].callback();
+  assert.equal(h.button.disabled, false);
+  h.windowEvent('message', message);
   assert.equal(h.state.submissions.length, 1, 'failed navigation entered an automatic retry loop');
-  h.fire(h.retry(), 'click');
-  assert.equal(h.state.submissions.length, 2);
+  assert.equal(h.fire(h.form, 'submit').prevented, true, 'manual retry did not own default submission');
+  assert.equal(h.state.submissions.length, 2, 'manual retry did not invoke native navigation');
 }
 assert.doesNotMatch(source, /\bfetch\s*\(/, 'completion must preserve native-navigation authorization');
 assert.doesNotMatch(source, /Solution submitted/, 'client must not invent a successful receipt');

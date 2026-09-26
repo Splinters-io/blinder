@@ -143,7 +143,9 @@ captcha:
     - hcaptcha
 ```
 
-The operator authenticates at `/__blinder/captcha/` using the bearer token printed at startup. Challenge pages are served at `/__blinder/captcha/solve/<id>` with the target's hostname injected into the CAPTCHA provider script URL (`?host=<target_hostname>`), so the provider validates against the target's registered domain rather than Blinder's listen address. Anti-framing headers (`X-Frame-Options: DENY`, `frame-ancestors 'none'`) prevent proxied pages from embedding operator endpoints.
+Open the browser login URL printed at startup: `https://blinder-operator.localhost:<port>/__blinder/captcha/login?token=…`. This separate, local-only origin holds the operator session; target pages cannot read its queue or challenge details. Raw challenge content runs inside an opaque sandbox, including in a separate solve window. Bearer authentication remains available for API clients. Verify certificate trust for the operator hostname as well as the target-facing endpoint; see the [operator and certificate guide](testing.md#local-certificate-trust).
+
+Synthetic browser checks cover provider resource routing and completion with the original session preserved. Provider-specific origin restrictions and real human completion still require acceptance with the selected provider; rewriting a script URL alone does not establish compatibility.
 
 Provider resources with `tor_policy: route-with-target` (the default) are relayed through the configured SOCKS transport via `/__blinder/captcha/res?u=`. Providers with `tor_policy: direct` bypass Tor. Custom providers are supported with explicit `resource_origins`, `resource_url_regex`, `opaque_fields` and `submissions`.
 

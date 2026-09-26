@@ -1,7 +1,6 @@
 package captcha
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -13,12 +12,19 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Splinters-io/blinder/internal/endpoint"
 )
 
-const operatorCookieName = "__blinder_op"
+const (
+	OperatorHost       = endpoint.OperatorHost
+	OperatorCookieName = "__Host-blinder-operator"
+	operatorCookieName = OperatorCookieName
+)
 
 type OperatorHandler struct {
 	queue            *ChallengeQueue
@@ -29,6 +35,7 @@ type OperatorHandler struct {
 	resourceTimeout  time.Duration
 	sessionMu        sync.Mutex
 	resourceSessions map[string]*cookiejar.Jar
+	operatorOrigin   string
 }
 
 func generateOperatorToken() string {
@@ -59,6 +66,32 @@ func (h *OperatorHandler) SetResourceTimeout(timeout time.Duration) {
 	}
 }
 
+// SetOperatorOrigin fixes the browser origin used to authorize native form
+// submissions. Configure it before serving; never infer it from request headers.
+func (h *OperatorHandler) SetOperatorOrigin(origin string) error {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() != OperatorHost || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(origin, "#") || strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("invalid CAPTCHA operator origin")
+	}
+	port := u.Port()
+	defaultPort := "443"
+	if u.Scheme == "http" {
+		defaultPort = "80"
+	}
+	if port == "" {
+		port = defaultPort
+	}
+	number, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || number == 0 {
+		return fmt.Errorf("invalid CAPTCHA operator origin port")
+	}
+	h.operatorOrigin = u.Scheme + "://" + OperatorHost
+	if strconv.FormatUint(number, 10) != defaultPort {
+		h.operatorOrigin += ":" + strconv.FormatUint(number, 10)
+	}
+	return nil
+}
+
 func hashToken(token string) [32]byte {
 	return sha256.Sum256([]byte(token))
 }
@@ -76,6 +109,9 @@ func (h *OperatorHandler) authorize(r *http.Request) bool {
 		if subtle.ConstantTimeCompare(hash[:], h.bearerHash[:]) == 1 {
 			dest := r.Header.Get("Sec-Fetch-Dest")
 			if dest == "" || dest == "document" {
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					return h.operatorOrigin != "" && r.Header.Get("Origin") == h.operatorOrigin
+				}
 				return true
 			}
 		}
@@ -92,7 +128,7 @@ func (h *OperatorHandler) setAuthCookie(w http.ResponseWriter, r *http.Request) 
 	http.SetCookie(w, &http.Cookie{
 		Name:     operatorCookieName,
 		Value:    token,
-		Path:     "/__blinder/captcha/",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -113,7 +149,7 @@ func (h *OperatorHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     operatorCookieName,
 		Value:    token,
-		Path:     "/__blinder/captcha/",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -129,15 +165,27 @@ func (h *OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Cache-Control", "no-store")
+	// Native same-origin form POSTs need their concrete Origin for the CSRF
+	// check. no-referrer turns that Origin into null in the browser.
+	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'; form-action 'self'")
+	if h.routeResources {
+		w.Header().Set("Content-Security-Policy", h.matcher.OperatorCSP()+"; worker-src 'none'")
+	}
 	if path == "/login" {
+		// The bootstrap token is in this URL; never make it a Referer, including
+		// on the redirect to the trusted queue page.
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		h.handleLogin(w, r)
 		return
-	}
-
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-	if h.routeResources {
-		w.Header().Set("Content-Security-Policy", h.matcher.OperatorCSP())
 	}
 
 	if !h.authorize(r) {
@@ -223,6 +271,12 @@ h1 { font-size: 1.25rem; }
 }
 
 func (h *OperatorHandler) showChallenge(w http.ResponseWriter, r *http.Request, id string) {
+	h.showChallengeWrapper(w, r, id, false)
+}
+
+// Only this trusted wrapper runs at the operator origin. The original challenge
+// stays in an opaque sandbox, including when opened in its own solve window.
+func (h *OperatorHandler) showChallengeWrapper(w http.ResponseWriter, r *http.Request, id string, automatic bool) {
 	ch, ok := h.queue.Get(id)
 	if !ok {
 		http.Error(w, "challenge not found or expired", http.StatusNotFound)
@@ -237,11 +291,16 @@ func (h *OperatorHandler) showChallenge(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	pageBody := ch.PageBody
-	if h.routeResources {
-		base, _ := url.Parse(ch.PageURL)
-		pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
-		pageBody = h.injectRuntime(pageBody, base, r, id)
+	base, _ := url.Parse(ch.PageURL)
+	if base != nil {
+		pageBody = rewriteCaptchaScriptHost(pageBody, "host="+url.QueryEscape(base.Host))
 	}
+	if h.routeResources {
+		pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
+	}
+	// The completion bridge is needed in both direct and Tor modes. Its network
+	// interception is disabled outside Tor mode; credentials never enter srcdoc.
+	pageBody = h.injectRuntime(pageBody, base, r, id)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html>
@@ -263,7 +322,7 @@ iframe { width: 100%%; height: 500px; border: 1px solid #ddd; border-radius: 4px
 <div>Page: %s</div>
 <div>ID: %s</div>
 </div>
-<p>Complete the CAPTCHA below. If the widget does not load in the preview, <a href="/__blinder/captcha/solve/%s" target="_blank" rel="noopener">solve in a new window</a> (auto-submits on completion).</p>
+<p>Complete the CAPTCHA below, or <a href="/__blinder/captcha/solve/%s" target="_blank" rel="noopener">open a separate solve window</a> (auto-submits on completion).</p>
 <iframe srcdoc="%s" sandbox="allow-scripts allow-forms"></iframe>
 <form method="POST" action="/__blinder/captcha/challenge/%s" class="fields">`,
 		html.EscapeString(ch.ProviderName),
@@ -280,7 +339,7 @@ iframe { width: 100%%; height: 500px; border: 1px solid #ddd; border-radius: 4px
 	}
 	fmt.Fprint(w, `<div class="actions"><button type="submit">Submit Solution</button></div>
 </form>`)
-	fmt.Fprint(w, operatorTokenBridge(ch.ID, opaqueFields))
+	fmt.Fprint(w, operatorCompletionScript(ch.ID, opaqueFields, automatic))
 	fmt.Fprint(w, `</body></html>`)
 }
 
@@ -358,71 +417,19 @@ func writeCompletionPage(w http.ResponseWriter, status int, id, message string) 
 }
 
 func (h *OperatorHandler) serveSolvePage(w http.ResponseWriter, r *http.Request, id string) {
-	ch, ok := h.queue.Get(id)
-	if !ok {
-		http.Error(w, "challenge not found or expired", http.StatusNotFound)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	opaqueFields := []string{}
-	for _, p := range h.matcher.providers {
-		if p.Name == ch.ProviderName {
-			opaqueFields = p.OpaqueFields
-			break
-		}
-	}
-
-	ct := ch.ContentType
-	if ct == "" {
-		ct = "text/html; charset=utf-8"
-	}
-
-	pageBody := ch.PageBody
-	if h.routeResources && strings.HasPrefix(strings.ToLower(ct), "text/html") {
-		base, _ := url.Parse(ch.PageURL)
-		pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
-		pageBody = h.injectRuntime(pageBody, base, r, id)
-	}
-
-	targetHost := ""
-	if parsed, err := url.Parse(ch.PageURL); err == nil {
-		targetHost = parsed.Host
-	}
-
-	if targetHost != "" {
-		hostParam := "host=" + url.QueryEscape(targetHost)
-		pageBody = rewriteCaptchaScriptHost(pageBody, hostParam)
-	}
-
-	submitScript := operatorSolveSubmission(id, opaqueFields)
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	injected := bytes.Replace(pageBody, []byte("</body>"), []byte(submitScript+"</body>"), 1)
-	if len(injected) == len(pageBody) {
-		injected = append(pageBody, []byte(submitScript)...)
-	}
-	w.Write(injected)
+	h.showChallengeWrapper(w, r, id, true)
 }
 
 func (h *OperatorHandler) serveChallengePage(w http.ResponseWriter, r *http.Request, id string) {
-	ch, ok := h.queue.Get(id)
-	if !ok {
-		http.Error(w, "challenge not found", http.StatusNotFound)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	ct := ch.ContentType
-	if ct == "" {
-		ct = "text/html; charset=utf-8"
-	}
-	w.Header().Set("Content-Type", ct)
-	body := ch.PageBody
-	if h.routeResources && strings.HasPrefix(strings.ToLower(ct), "text/html") {
-		base, _ := url.Parse(ch.PageURL)
-		body = h.matcher.RewriteProviderHTML(body, base, id)
-		body = h.injectRuntime(body, base, r, id)
-	}
-	w.Write(body)
+	h.showChallengeWrapper(w, r, id, false)
 }
 
 var captchaScriptRe = regexp.MustCompile(`(<script\s[^>]*src=["']https://js\.hcaptcha\.com/1/api\.js)(\?[^"']*)?["']`)

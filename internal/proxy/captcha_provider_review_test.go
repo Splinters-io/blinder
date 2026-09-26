@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +106,10 @@ func TestCaptchaProviderOperatorChallengeBrowserRoute(t *testing.T) {
 	upURL, _ := url.Parse(upstream.URL)
 	socksAddr, seen := captchaRoutingSOCKS(t, map[string]bool{upURL.Host: true, providerURL.Host: true})
 	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      tor_policy: route-with-target\n", providerURL.String()))
-	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp"}, true, false, false, socksAddr, "", 0, "", "", 10, 60)
+	mux := http.NewServeMux()
+	server := httptest.NewUnstartedServer(mux)
+	defer server.Close()
+	cfg, err := config.New(upstream.URL, server.Listener.Addr().String(), "alias.local", []string{"AcmeCorp"}, true, false, false, socksAddr, "", 0, "", "", 10, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,15 +121,15 @@ func TestCaptchaProviderOperatorChallengeBrowserRoute(t *testing.T) {
 	defer s.transport.(*http.Transport).CloseIdleConnections()
 	challenge := fmt.Sprintf(`<!doctype html><p>operator challenge</p><script src="%s/widget.js"></script>`, providerURL.String())
 	id := s.captchaQueue.Submit("synthetic", upstream.URL+"/protected", []byte(challenge), "text/html")
-	mux := http.NewServeMux()
 	mux.HandleFunc("/review-bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		token, _ := json.Marshal("Bearer " + s.CaptchaOperatorToken())
-		fmt.Fprintf(w, `<!doctype html><script>(async()=>{await fetch('/target-probe');const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.status===200)location.href='/__blinder/captcha/challenge/%s';})()</script>`, token, id)
+		targetProbe, _ := json.Marshal("http://localhost:" + strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port) + "/target-probe")
+		fmt.Fprintf(w, `<!doctype html><script>(async()=>{await fetch(%s,{mode:'no-cors'});const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.status===200)location.href='/__blinder/captcha/challenge/%s';})()</script>`, targetProbe, token, id)
 	})
 	cleanup := make(chan struct{}, 1)
 	mux.HandleFunc("/review-cleanup", func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "__blinder_op", Value: "", Path: "/__blinder/captcha/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: captcha.OperatorCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 		io.WriteString(w, "Synthetic browser fixture complete.")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
@@ -135,10 +140,12 @@ func TestCaptchaProviderOperatorChallengeBrowserRoute(t *testing.T) {
 		}
 	})
 	mux.Handle("/", s.server.Handler)
-	server := httptest.NewServer(mux)
-	defer server.Close()
+	if err := s.captchaOperator.SetOperatorOrigin("http://" + captcha.OperatorHost + ":" + strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port)); err != nil {
+		t.Fatal(err)
+	}
+	server.Start()
 	u, _ := url.Parse(server.URL)
-	u.Host = "localhost:" + u.Port()
+	u.Host = captcha.OperatorHost + ":" + u.Port()
 	u.Path = "/review-bootstrap"
 	os.WriteFile("/private/tmp/blinder-captcha-provider-browser-url.txt", []byte(u.String()), 0600)
 	select {

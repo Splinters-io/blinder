@@ -2,7 +2,7 @@
 
 Use these as three separate gates. Package regressions check specific defect classes; functional tests exercise the actual CLI and network boundary; UAT verifies the selected browser/scanner workflow with an operator. Green CI alone is not UAT approval or a general anonymization guarantee.
 
-The [2026-09-26 report](testing-results-2026-09-26.md) records current local verification. The [2026-09-23 report](testing-results-2026-09-23.md) preserves the three reproduced issues on main `34eb0a0` and their subsequent working-tree fixes. Browser/scanner, OS trust and successful live Tor/onion UAT remain separate acceptance gates.
+The [current acceptance report](testing-results-2026-09-26-acceptance.md) records operator browser isolation and independent HAR consumer checks. The [post-commit review](testing-results-2026-09-26-postcommit.md), [fidelity report](testing-results-2026-09-26.md) and [2026-09-23 report](testing-results-2026-09-23.md) preserve earlier verification. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
 
 ## Automated checks
 
@@ -78,7 +78,7 @@ go test -tags functional -race -count=1 -timeout 120s -json ./tests/functional >
 
 Preserve the command's exit code when using CI wrappers. The updated GitHub workflow runs the default package race suite, vet with functional tests included, the full `make test-functional` suite and a static build. This configuration is local until published; a new remote CI result has not been claimed. Keep acceptance tests active.
 
-## Independent HAR schema check
+## Independent HAR compatibility checks
 
 The fixture contains only synthetic data. It exercises journal materialization, text/gzip, binary requests and responses, redirects/cookies, 101 upgrades, partial HTTP 503 and transport failure status 0. The checker uses the separately maintained [HAR schema](https://github.com/ahmadnassri/har-schema) through a pinned validator, with local semantic assertions. No capture is uploaded, and the validator is not a production dependency.
 
@@ -89,7 +89,44 @@ BLINDER_HAR_COMPAT_OUTPUT="$har_check_dir/compat.har" go test -race -count=1 ./i
 BLINDER_HAR_VALIDATOR="$har_check_dir/node_modules/har-validator" node scripts/validate-har.cjs "$har_check_dir/compat.har" --fixture
 ```
 
-`har-validator` is deprecated; this isolated, pinned check tests the historical HAR 1.2 format. Schema acceptance does not prove viewer compatibility or replay. In particular, binary request `postData._encoding` is a Blinder extension. Import the fixture into the intended tool as a separate acceptance step.
+`har-validator` is deprecated; this isolated, pinned check tests the historical HAR 1.2 format. Schema acceptance does not prove viewer compatibility or replay. Binary request `postData._encoding` is a Blinder extension.
+
+Playwright 1.62.1's installed HAR importer/matcher was tested separately, without launching a browser. It requires binary request attachments instead of that extension. Export a consumer copy with the optional local adapter:
+
+```sh
+node scripts/export-playwright-har.cjs "$har_check_dir/compat.har" "$har_check_dir/playwright-export"
+node --test scripts/export-playwright-har.test.cjs
+BLINDER_PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright \
+  node --test scripts/export-playwright-har.test.cjs
+```
+
+The export directory must be new. The source capture remains unchanged; keep exported `capture.har` and its private attachments together. The last command enables the independent consumer test, which otherwise skips. Matching the original binary POST bytes and response is verified; viewer UI, browser replay, gzip fulfillment, transport failures and WebSocket frame replay are not established by this check. See [HAR export details](playwright-har-export.md).
+
+## CAPTCHA browser acceptance
+
+Configured operator controls are served at `https://blinder-operator.localhost:<listen-port>/__blinder/captcha/`. Use the **Browser login** URL printed at startup to establish the temporary operator cookie. The hostname resolves locally and uses the same listener as the target proxy, but a separate browser origin. Only loopback peers can access controls. Target-origin control URLs return 404; the scoped provider `/res` relay remains available. Treat the printed login token as an operator credential.
+
+Run the browser fixtures **one at a time**: their host-only operator cookie shares a hostname across ports. They use synthetic data and HTTP localhost secure contexts, so they do not verify production HTTPS certificate trust or solve live CAPTCHAs. Opt-in skips are not acceptance passes.
+
+For authenticated popup and service-worker isolation:
+
+```sh
+BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 150s ./internal/proxy -run '^TestCaptchaSessionBrowserOperatorIsolation$' -v
+```
+
+Open the URL in `/private/tmp/blinder-captcha-browser-url.txt`. The fixture first verifies a cookie-authenticated operator document, then opens the target page and activates its service worker. When enabled, click **Run popup isolation check**. A real popup must reach the authenticated operator endpoint; blocking the popup does not count as isolation. The test requires denied target access to operator DOM/fetch/frame content, denied operator worker registration, no operator cookie on target requests, and no operator navigation interception by the active target worker. It automatically unregisters the worker, clears the cookie on the operator origin and finishes. Results are written to `/private/tmp/blinder-captcha-browser-result.json`.
+
+For the complete synthetic operator flow:
+
+```sh
+BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 190s ./internal/proxy -run '^TestCaptchaFlowBrowser$' -v
+```
+
+Open the URL in `/private/tmp/blinder-flow-browser-url.txt`. Wait for “Provider APIs and nested frame passed” and the populated synthetic response field, then click **Submit Solution**. After the receipt, navigate to `/review-cleanup` on the operator fixture origin within 25 seconds to clear its cookie. The test asserts provider redirects, scripts, frames, POST/fetch and XHR, PUT/PATCH/DELETE/OPTIONS, PROPFIND and `vendor.sync`, including session cookies and bodies. It also verifies the original username, refreshed CSRF field and target cookies reach the resumed request. `/private/tmp/blinder-flow-browser-result.json` records the observed requests and recording-SOCKS destinations. This is a local SOCKS fixture, not a live Tor circuit.
+
+For a standalone challenge-provider route, run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 100s ./internal/proxy -run '^TestCaptchaProviderOperatorChallengeBrowserRoute$' -v`. Open `/private/tmp/blinder-captcha-provider-browser-url.txt`, verify the synthetic widget, then navigate to `/review-cleanup` on its operator origin. The recording SOCKS fixture must observe both target and provider. `TestCaptchaBrowserRoutingIframeAndProviderRoute` uses the same environment flag, the URL file `/private/tmp/blinder-captcha-routing-browser-url.txt` and automatic cookie cleanup to check target resource routing and authenticated iframe separation.
+
+The package regressions `TestProviderRelayArbitraryMethodsOnWire`, `TestProviderRelayArbitraryPreflightMethods`, `TestProviderRelayCustomMethodRequiresSession`, and `TestProxyCustomMutationInvalidatesCachedGET` cover method fidelity and cache effects without a browser. Malformed method tokens, expired sessions, out-of-scope redirects, excessive request bodies and provider read timeouts are tested separately. Only genuine CORS preflights are handled locally; ordinary OPTIONS reaches the provider.
 
 ## Manual UAT setup
 
@@ -144,6 +181,8 @@ Exit 0 means platform verification passed for the displayed host; exit 2 means p
 
 Review the fingerprint, type `yes` and complete any OS approval. This installs the displayed server certificate for SSL to that host in the current user's login Keychain; it does not install a signing CA or change administrator trust. Declining leaves trust unchanged. If platform trust is already verified, installation is skipped. Run preflight in a new process after changing trust, then verify the browser/scanner separately.
 
+Preflight and `--trust-cert` currently check/trust the **listen host only**. CAPTCHA UAT also requires a verified browser connection to `blinder-operator.localhost` on the same port. Its name is in the certificate, but listen-host trust does not establish operator-host trust. Compare the same fingerprint and complete the selected client's trust setup for that hostname separately.
+
 **Ubuntu / Debian:** use the printed `curl --cacert` command for a verified CLI request after starting Blinder. For example, replacing the path with the exported public certificate:
 
 ```sh
@@ -166,19 +205,11 @@ The default certificate directory is under the platform's user configuration dir
 
 Normal proxy startup also creates `version-signing.key` (32 random bytes, mode 0600) in this private store. It survives certificate renewal and authenticates expired SRI references after restart. Back it up with the private state; corruption or unsafe permissions stop startup instead of silently rotating ownership. Removing/changing the store loses the ability to recognise previously issued references, so discard old client pages when deliberately replacing it. Ephemeral TLS still uses the default endpoint directory for this separate key.
 
-`TestVersionRegistryProcessPersistence` checks issuance and expired-reference ownership in separate OS processes. CAPTCHA browser fixtures are opt-in: run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 100s ./internal/proxy -run '^TestCaptchaProviderOperatorChallengeBrowserRoute$' -v`, open the temporary URL written to `/private/tmp/blinder-captcha-provider-browser-url.txt`, and verify the synthetic widget appears. Navigate to `/review-cleanup` on that fixture origin to clear its temporary operator cookie and finish. The recording SOCKS fixture must observe both target and provider. `TestCaptchaBrowserRoutingIframeAndProviderRoute` separately checks ordinary resource routing and the former iframe-read regression. These synthetic fixtures never solve a live CAPTCHA.
-
-For the complete synthetic operator flow, run:
-
-```sh
-BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 190s ./internal/proxy -run '^TestCaptchaFlowBrowser$' -v
-```
-
-Open the URL in `/private/tmp/blinder-flow-browser-url.txt`. Wait for “Provider APIs and nested frame passed” and the populated synthetic response field, then click **Submit Solution**. Navigate to `/review-cleanup` on the fixture origin within 25 seconds to clear its temporary operator cookie. The test asserts provider redirects, scripts, frames, POST/fetch and XHR, PUT/PATCH/DELETE/OPTIONS, PROPFIND and `vendor.sync`, including session cookies and bodies. It also verifies the original username, refreshed CSRF field and target cookies reach the resumed request. `/private/tmp/blinder-flow-browser-result.json` records the observed requests and recording-SOCKS destinations. This is a local SOCKS fixture, not a live Tor circuit.
-
-The package regressions `TestProviderRelayArbitraryMethodsOnWire`, `TestProviderRelayArbitraryPreflightMethods`, `TestProviderRelayCustomMethodRequiresSession`, and `TestProxyCustomMutationInvalidatesCachedGET` cover method fidelity and cache effects without a browser. Malformed method tokens, expired sessions, out-of-scope redirects, excessive request bodies and provider read timeouts are tested separately. Only genuine CORS preflights are handled locally; ordinary OPTIONS reaches the provider.
+`TestVersionRegistryProcessPersistence` checks issuance and expired-reference ownership in separate OS processes.
 
 Persistent certificates last 90 days. Startup renews them when seven days or less remain, and reissues them if required endpoint names change. A replacement changes the fingerprint and needs new trust approval. Previous public certificates are retained as `previous-<fingerprint>.pem`; use them to identify and remove obsolete trust. On macOS, the operator can remove the old user trust setting with `security remove-trusted-cert` and the chosen previous public certificate path, then manage any remaining certificate entry in Keychain Access. Other clients use their own certificate removal interface.
+
+The operator hostname is now a required certificate SAN. Upgrading a store whose certificate lacks it reissues the certificate and changes its fingerprint. The store location and separate version-signing key remain unchanged; recheck trust for both the target-facing endpoint and operator hostname.
 
 For UAT, record the fingerprint, expiry, endpoint, selected client and trust scope. After trusting/importing the public certificate, verify a connection with certificate verification enabled. Restart with the same store and names and confirm the fingerprint and successful connection are unchanged. Repeat the trust step after renewal/reissue. `--ephemeral-cert` opts out of persistence and generates a new 24-hour certificate per run; it cannot be combined with `--cert-dir` or `--trust-cert`. `curl --insecure` is only a per-request bypass, not evidence that trust setup succeeded.
 
@@ -244,7 +275,7 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 - **Absolute links and redirects:** inspect `/absolute-redirect` without following external aliases automatically. Rewritten aliases do not currently provide complete origin/DNS routing. Record whether the intended target depends on this, and block that workflow if it does.
 - **Documents and fonts:** inspect `/document.pdf`. Binary content is replaced with a GIF placeholder while the original MIME type remains; document/font rendering fidelity is not established. The fixture PDF is a metadata sample, not a complete rendered document.
 - **Privacy boundaries:** encoded HTML/JS, arbitrary unknown binary content, cookie values and binary/control WebSocket payloads need separate policy and tests. A passing fixture is not evidence that every response is anonymized.
-- **Evidence:** verify imports into the intended HAR tool. Independent schema and synthetic semantic checks pass. Selected viewer import, replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.
+- **Evidence:** verify imports into the intended HAR tool. Independent schema, synthetic semantic and Playwright importer/matcher checks pass; binary requests need the optional Playwright export adapter. Selected viewer UI, browser replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.
 - **Routing and scale:** complete the live Tor track above; complex multi-origin applications, long-running sessions, load, memory growth and all release platforms remain separate test work.
 
 Release acceptance requires the open functional failures to be fixed, the full functional command to pass, and the selected operator workflow to have evidence and explicit sign-off. Acceptance of Tor mode also requires the live Tor/onion track; do not substitute the local SOCKS fixture. Keep unsupported capabilities visible in the release scope.

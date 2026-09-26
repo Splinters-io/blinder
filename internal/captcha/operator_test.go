@@ -24,6 +24,9 @@ captcha:
 	}
 	q := NewChallengeQueue(5 * time.Minute)
 	h, token := NewOperatorHandler(q, cfg.Matcher, nil)
+	if err := h.SetOperatorOrigin("https://" + OperatorHost + ":8099"); err != nil {
+		t.Fatal(err)
+	}
 	return h, q, cfg.Matcher, token
 }
 
@@ -173,8 +176,8 @@ func TestOperatorServeChallengePage(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status=%d", w.Code)
 	}
-	if w.Body.String() != string(pageBody) {
-		t.Fatalf("wrong page body")
+	if !strings.Contains(w.Body.String(), `sandbox="allow-scripts allow-forms"`) || !strings.Contains(w.Body.String(), "please solve captcha") || strings.Contains(w.Body.String(), string(pageBody)) {
+		t.Fatalf("challenge page is not an opaque wrapper")
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Fatalf("wrong content type: %s", ct)
@@ -255,7 +258,7 @@ func TestOperatorCookieAuth(t *testing.T) {
 	q.Submit("hcaptcha", "https://example.com", []byte("ch"), "text/html")
 
 	r := httptest.NewRequest("GET", "/__blinder/captcha/", nil)
-	r.AddCookie(&http.Cookie{Name: "__blinder_op", Value: token})
+	r.AddCookie(&http.Cookie{Name: OperatorCookieName, Value: token})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -278,13 +281,16 @@ func TestOperatorBearerSetsCookie(t *testing.T) {
 	cookies := w.Result().Cookies()
 	var found bool
 	for _, c := range cookies {
-		if c.Name == "__blinder_op" && c.Value == token {
+		if c.Name == OperatorCookieName && c.Value == token {
 			found = true
 			if !c.HttpOnly {
 				t.Fatal("cookie must be HttpOnly")
 			}
 			if !c.Secure {
 				t.Fatal("cookie must be Secure")
+			}
+			if c.Path != "/" || c.Domain != "" {
+				t.Fatal("operator cookie must be host-only with root path")
 			}
 		}
 	}

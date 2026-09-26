@@ -178,6 +178,11 @@ func (h *OperatorHandler) serveResource(w http.ResponseWriter, r *http.Request) 
 		}
 		w.Header().Set("Content-Security-Policy", strings.TrimPrefix(h.matcher.OperatorCSP(), "frame-ancestors 'none'; "))
 	}
+	// A provider response can also be opened directly as a document. It must
+	// never acquire operator-origin privileges, even for SVG or a MIME mismatch.
+	// A sandbox on a script resource does not sandbox its embedding document.
+	w.Header().Add("Content-Security-Policy", "sandbox allow-scripts allow-forms")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	for _, name := range []string{"Content-Type", "Cache-Control", "ETag", "Last-Modified"} {
 		if (session != "" && name == "Cache-Control") || (rewrittenHTML && (name == "ETag" || name == "Last-Modified")) {
 			continue

@@ -34,6 +34,7 @@ func completionBrowserRequest(id, token, body string) *http.Request {
 	r.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("Sec-Fetch-Dest", "document")
+	r.Header.Set("Origin", "https://"+OperatorHost+":8099")
 	r.AddCookie(&http.Cookie{Name: operatorCookieName, Value: token})
 	return r
 }

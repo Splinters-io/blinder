@@ -44,8 +44,14 @@ func captchaDeliveryWaitID(t *testing.T, s *Server) string {
 	t.Fatal("challenge was not queued")
 	return ""
 }
+func captchaDeliveryOperatorRequest(s *Server, method, suffix string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(method, s.CaptchaOperatorURL()+suffix, body)
+	r.RemoteAddr = "127.0.0.1:40001"
+	return r
+}
+
 func captchaDeliveryOperatorPost(s *Server, id, value, token string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("POST", "https://alias.local:18099/__blinder/captcha/challenge/"+id, strings.NewReader(url.Values{"h-captcha-response": {value}}.Encode()))
+	r := captchaDeliveryOperatorRequest(s, "POST", "challenge/"+id, strings.NewReader(url.Values{"h-captcha-response": {value}}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -99,15 +105,15 @@ func TestCaptchaDeliveryOperatorControlIsPrivate(t *testing.T) {
 			if kind == "complete" {
 				w = captchaDeliveryOperatorPost(s, id, "untrusted-client-token", "")
 			} else {
-				path := "/__blinder/captcha/"
+				path := ""
 				if kind == "raw_page" {
-					path = "/__blinder/captcha/page/" + id
+					path = "page/" + id
 				}
 				w = httptest.NewRecorder()
-				s.server.Handler.ServeHTTP(w, httptest.NewRequest("GET", "https://alias.local:18099"+path, nil))
+				s.server.Handler.ServeHTTP(w, captchaDeliveryOperatorRequest(s, "GET", path, nil))
 			}
-			if w.Code == 200 {
-				t.Fatalf("ordinary proxy client can access operator %s without operator authorization: body=%q", kind, w.Body.String())
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("operator %s did not reject missing authorization: status=%d body=%q", kind, w.Code, w.Body.String())
 			}
 		})
 	}

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
 )
 
@@ -139,27 +140,45 @@ func TestCaptchaBrowserRoutingIframeAndProviderRoute(t *testing.T) {
 	providerURL.Host = "localhost:" + providerURL.Port()
 	const pageScript = `<pre id="result">Checking browser boundaries...</pre><script>
 (async()=>{
+ const operatorOrigin=OPERATOR_ORIGIN;
  const result={providerLoaded:window.syntheticProviderLoaded===true};
- const frame=(path)=>new Promise((resolve,reject)=>{const f=document.createElement('iframe');f.onload=()=>resolve(f);f.onerror=()=>reject(new Error('frame load failed'));f.src=path;document.body.appendChild(f);setTimeout(()=>resolve(f),1500)});
+ const frame=(path)=>new Promise(resolve=>{
+  const f=document.createElement('iframe');let done=false;
+  const finish=()=>{if(done)return;done=true;let state={readable:false,body:''};try{const d=f.contentDocument;if(d&&d.location.href!=='about:blank')state={readable:true,body:d.body?d.body.innerText:''};}catch(e){}f.remove();resolve(state);};
+  f.onload=finish;f.onerror=finish;f.src=path;document.body.appendChild(f);setTimeout(finish,2000);
+ });
  try {
   result.fetchStatus=(await fetch('/__blinder/captcha/')).status;
-  const list=await frame('/__blinder/captcha/');
-  const link=list.contentDocument.querySelector('a');
-  result.canReadList=!!link;result.listText=list.contentDocument.body.innerText;
-  if(link){const id=link.getAttribute('href').split('/').pop();const p=await frame('/__blinder/captcha/page/'+id);result.pageBody=p.contentDocument.body.innerText;}
+  result.list=await frame(operatorOrigin+'/__blinder/captcha/');
+  result.page=await frame(operatorOrigin+'/__blinder/captcha/page/CHALLENGE_ID');
  }catch(e){result.error=String(e)}
  document.getElementById('result').textContent=JSON.stringify(result);
- await fetch('/review-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)});
+ const form=document.createElement('form');form.method='POST';form.action=operatorOrigin+'/review-report';
+ const report=document.createElement('input');report.type='hidden';report.name='report';report.value=JSON.stringify(result);form.appendChild(report);document.body.appendChild(form);form.submit();
 })();</script>`
+	var operatorOriginURL, challengeID string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, `<!doctype html><script src="%s/widget.js"></script>%s`, providerURL.String(), pageScript)
+		originJSON, _ := json.Marshal(operatorOriginURL)
+		page := strings.NewReplacer("OPERATOR_ORIGIN", string(originJSON), "CHALLENGE_ID", challengeID).Replace(pageScript)
+		fmt.Fprintf(w, `<!doctype html><script src="%s/widget.js"></script>%s`, providerURL.String(), page)
 	}))
 	defer upstream.Close()
 	upURL, _ := url.Parse(upstream.URL)
 	socksAddr, seen := captchaRoutingSOCKS(t, map[string]bool{upURL.Host: true, providerURL.Host: true})
 	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      tor_policy: route-with-target\n", providerURL.String()))
-	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp"}, true, false, false, socksAddr, "", 0, "", "", 10, 60)
+	mux := http.NewServeMux()
+	server := httptest.NewUnstartedServer(mux)
+	defer server.Close()
+	listen := server.Listener.Addr().String()
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorAuthority := net.JoinHostPort(captcha.OperatorHost, port)
+	operatorOriginURL = "http://" + operatorAuthority
+	targetOrigin := "http://localhost:" + port
+	cfg, err := config.New(upstream.URL, listen, "alias.local", []string{"AcmeCorp"}, true, false, false, socksAddr, "", 0, "", "", 10, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,53 +188,102 @@ func TestCaptchaBrowserRoutingIframeAndProviderRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.transport.(*http.Transport).CloseIdleConnections()
-	s.captchaQueue.Submit("synthetic", "https://private-target.synthetic/account", []byte("<p>"+secret+"</p>"), "text/html")
+	defer s.captchaQueue.Shutdown()
+	if err := s.captchaOperator.SetOperatorOrigin(operatorOriginURL); err != nil {
+		t.Fatal(err)
+	}
+	challengeID = s.captchaQueue.Submit("synthetic", "https://private-target.synthetic/account", []byte("<p>"+secret+"</p>"), "text/html")
 	report := make(chan string, 1)
-	mux := http.NewServeMux()
+	reportBody := func(body string) {
+		select {
+		case report <- body:
+		default:
+		}
+	}
+	var authVerified atomic.Bool
+	var targetCookieLeaks atomic.Int32
 	mux.HandleFunc("/review-bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != operatorAuthority {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
 		token, _ := json.Marshal("Bearer " + s.CaptchaOperatorToken())
-		fmt.Fprintf(w, `<!doctype html><script>(async()=>{const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.status===200)location.href='/fixture-page';})()</script>`, token)
+		fmt.Fprintf(w, `<!doctype html><script>(async()=>{try{const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.status!==200)throw Error('operator bootstrap '+r.status);location.href='/review-auth-probe';}catch(e){document.body.textContent=String(e);await fetch('/review-report',{method:'POST',body:new URLSearchParams({report:JSON.stringify({error:String(e)})})});}})()</script>`, token)
+	})
+	mux.HandleFunc("/review-auth-probe", func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != operatorAuthority {
+			http.NotFound(w, r)
+			return
+		}
+		cookie, cookieErr := r.Cookie(captcha.OperatorCookieName)
+		probe := r.Clone(r.Context())
+		probe.URL.Path = "/__blinder/captcha/"
+		result := httptest.NewRecorder()
+		s.server.Handler.ServeHTTP(result, probe)
+		if cookieErr != nil || cookie.Value != s.CaptchaOperatorToken() || r.Header.Get("Authorization") != "" || r.Header.Get("Sec-Fetch-Dest") != "document" || result.Code != http.StatusOK {
+			http.SetCookie(w, &http.Cookie{Name: captcha.OperatorCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+			http.Error(w, "operator cookie verification failed", http.StatusForbidden)
+			reportBody(`{"error":"operator cookie verification failed"}`)
+			return
+		}
+		authVerified.Store(true)
+		http.Redirect(w, r, targetOrigin+"/fixture-page", http.StatusSeeOther)
 	})
 	mux.HandleFunc("/review-report", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		http.SetCookie(w, &http.Cookie{Name: "__blinder_op", Value: "", Path: "/__blinder/captcha/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-		w.WriteHeader(204)
+		if r.Host != operatorAuthority || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid fixture report", http.StatusBadRequest)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: captcha.OperatorCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+		io.WriteString(w, "Synthetic browser routing fixture complete.")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		report <- string(b)
+		reportBody(r.Form.Get("report"))
 	})
-	mux.Handle("/", s.server.Handler)
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	u, _ := url.Parse(server.URL)
-	u.Host = "localhost:" + u.Port()
-	u.Path = "/review-bootstrap"
-	os.WriteFile("/private/tmp/blinder-captcha-routing-browser-url.txt", []byte(u.String()), 0600)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != operatorAuthority {
+			if _, err := r.Cookie(captcha.OperatorCookieName); err == nil {
+				targetCookieLeaks.Add(1)
+			}
+		}
+		s.server.Handler.ServeHTTP(w, r)
+	})
+	server.Start()
+	if err := os.WriteFile("/private/tmp/blinder-captcha-routing-browser-url.txt", []byte(operatorOriginURL+"/review-bootstrap"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case body := <-report:
 		var got struct {
-			ProviderLoaded bool   `json:"providerLoaded"`
-			FetchStatus    int    `json:"fetchStatus"`
-			CanReadList    bool   `json:"canReadList"`
-			PageBody       string `json:"pageBody"`
-			Error          string `json:"error"`
+			ProviderLoaded bool `json:"providerLoaded"`
+			FetchStatus    int  `json:"fetchStatus"`
+			List, Page     struct {
+				Readable bool   `json:"readable"`
+				Body     string `json:"body"`
+			}
+			Error string `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(body), &got); err != nil {
 			t.Fatal(err)
 		}
 		destinations := seen()
-		evidence := map[string]any{"browser": got, "socksDestinations": destinations, "target": upURL.Host, "provider": providerURL.Host, "providerHits": providerHits.Load()}
+		evidence := map[string]any{"browser": got, "operatorAuthenticated": authVerified.Load(), "targetCookieLeaks": targetCookieLeaks.Load(), "socksDestinations": destinations, "target": upURL.Host, "provider": providerURL.Host, "providerHits": providerHits.Load()}
 		b, _ := json.MarshalIndent(evidence, "", "  ")
 		os.WriteFile("/private/tmp/blinder-captcha-routing-browser-result.json", b, 0600)
 		t.Log(string(b))
 		t.Run("iframe_isolation", func(t *testing.T) {
-			if got.CanReadList && got.PageBody == secret {
-				t.Fatal("proxied script bypassed Sec-Fetch-Dest guard through readable same-origin iframes")
-			}
-			if got.Error != "" {
-				t.Log(got.Error)
+			// This fixture retains authenticated fetch/iframe separation checks.
+			// Active target service-worker and popup isolation are exercised by
+			// TestCaptchaSessionBrowserOperatorIsolation, not inferred here.
+			if !authVerified.Load() || targetCookieLeaks.Load() != 0 || got.Error != "" || got.FetchStatus != http.StatusNotFound || got.List.Readable || got.Page.Readable || strings.Contains(got.List.Body+got.Page.Body, secret) {
+				t.Fatalf("operator origin isolation failed: %s", b)
 			}
 		})
 		t.Run("provider_route", func(t *testing.T) {

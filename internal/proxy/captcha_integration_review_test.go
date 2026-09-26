@@ -177,7 +177,7 @@ captcha:
 		t.Fatalf("wrong provider detected: %s", ch.ProviderName)
 	}
 
-	opReq := httptest.NewRequest("POST", "https://alias.local:18099/__blinder/captcha/challenge/"+id,
+	opReq := captchaDeliveryOperatorRequest(s, "POST", "challenge/"+id,
 		strings.NewReader(url.Values{"synth-token": {"synth-solution-abc"}}.Encode()))
 	opReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	opReq.Header.Set("Authorization", "Bearer "+s.CaptchaOperatorToken())

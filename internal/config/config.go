@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Splinters-io/blinder/internal/captcha"
+	"github.com/Splinters-io/blinder/internal/endpoint"
 )
 
 type TorConfig struct {
@@ -141,6 +142,9 @@ func New(
 
 	if alias == "" {
 		alias = "target-001.local"
+	}
+	if strings.EqualFold(strings.TrimSuffix(alias, "."), endpoint.OperatorHost) {
+		return nil, errors.New("alias is reserved for the local operator interface")
 	}
 
 	tokensCopy := make([]string, len(tokens))

@@ -209,6 +209,9 @@ func run() int {
 			return 1
 		}
 		defer ln.Close()
+		if _, port, _ := net.SplitHostPort(cfg.ListenAddr); port == "0" {
+			cfg.ListenAddr = ln.Addr().String()
+		}
 	}
 
 	var extraAliases []string
@@ -270,7 +273,9 @@ func run() int {
 
 	if token := srv.CaptchaOperatorToken(); token != "" && cfg.Captcha != nil && len(cfg.Captcha.Providers) > 0 {
 		log.Printf("  CAPTCHA operator token: %s", token)
-		log.Printf("  Use: curl -H 'Authorization: Bearer %s' https://%s/__blinder/captcha/", token, cfg.ListenAddr)
+		log.Printf("  Operator: %s", srv.CaptchaOperatorURL())
+		log.Printf("  Browser login: %slogin?token=%s", srv.CaptchaOperatorURL(), token)
+		log.Printf("  Use: curl -H 'Authorization: Bearer %s' %s", token, srv.CaptchaOperatorURL())
 	}
 
 	sigCh := make(chan os.Signal, 1)

@@ -89,6 +89,9 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	if err := cfg.HAR.Validate(); err != nil {
 		return nil, err
 	}
+	if err := validateOperatorEndpoint(cfg); err != nil {
+		return nil, err
+	}
 	keyDir := cfg.VersionKeyDir
 	if keyDir == "" {
 		keyDir = cfg.CertDir
@@ -240,6 +243,11 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	matcher.SetPrimaryHost(cfg.TargetURL.Hostname())
 	challengeQueue := captcha.NewChallengeQueue(10 * time.Minute)
 	operatorHandler, operatorToken := captcha.NewOperatorHandler(challengeQueue, matcher, transport, cfg.UseTor())
+	if _, port, _ := net.SplitHostPort(cfg.ListenAddr); port != "0" {
+		if err := operatorHandler.SetOperatorOrigin(operatorOrigin(cfg.ListenAddr)); err != nil {
+			return nil, err
+		}
+	}
 	operatorHandler.SetResourceTimeout(upstreamTimeout)
 
 	s := &Server{
@@ -265,15 +273,11 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		go s.periodicHARFlush()
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/__blinder/captcha/", s.captchaOperator)
-	mux.HandleFunc("/", s.handleRequest)
-
 	clientTimeout := time.Duration(cfg.ClientTimeout) * time.Second
 
 	s.server = &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      mux,
+		Handler:      s,
 		ReadTimeout:  clientTimeout,
 		WriteTimeout: clientTimeout,
 		IdleTimeout:  120 * time.Second,
@@ -287,7 +291,12 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 }
 
 func (s *Server) ListenAndServe() error {
-	return s.server.ListenAndServeTLS("", "")
+	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	return s.ListenAndServeOnListener(ln)
 }
 
 func (s *Server) Addr() string {
@@ -295,6 +304,13 @@ func (s *Server) Addr() string {
 }
 
 func (s *Server) ListenAndServeOnListener(ln net.Listener) error {
+	if _, port, _ := net.SplitHostPort(s.cfg.ListenAddr); port == "0" {
+		s.cfg.ListenAddr = ln.Addr().String()
+		s.server.Addr = s.cfg.ListenAddr
+		if err := s.captchaOperator.SetOperatorOrigin(operatorOrigin(s.cfg.ListenAddr)); err != nil {
+			return err
+		}
+	}
 	tlsLn := tls.NewListener(ln, s.server.TLSConfig)
 	return s.server.Serve(tlsLn)
 }
@@ -315,7 +331,7 @@ func (s *Server) CaptchaOperatorToken() string {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.handleRequest(w, r)
+	s.routeRequest(w, r)
 }
 
 func (s *Server) GetStats() (requests, bytes, errors, scrubbed int64) {

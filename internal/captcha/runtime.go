@@ -28,7 +28,11 @@ func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Requ
 	for _, p := range h.matcher.providers {
 		fields = append(fields, p.OpaqueFields...)
 	}
-	cfg, _ := json.Marshal(map[string]any{"base": base.String(), "endpoint": endpoint, "session": session, "origins": h.matcher.RouteWithTargetOrigins(), "fields": fields})
+	var origins []string
+	if h.routeResources {
+		origins = h.matcher.RouteWithTargetOrigins()
+	}
+	cfg, _ := json.Marshal(map[string]any{"base": base.String(), "endpoint": endpoint, "session": session, "origins": origins, "fields": fields})
 	bootstrap := []byte("<script>;(function(cfg){" + resourceRuntime + "})(" + string(cfg) + ");</script>")
 	pos := 0
 	trim := bytes.TrimLeft(body, " \r\n\t")

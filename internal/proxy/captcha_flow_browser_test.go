@@ -6,15 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
 )
 
@@ -133,7 +136,10 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	tu, _ := url.Parse(upstream.URL)
 	socks, seen := captchaRoutingSOCKS(t, map[string]bool{tu.Host: true, pu.Host: true})
 	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      opaque_fields: [fixture-response]\n", providerOrigin))
-	cfg, err := config.New(upstream.URL, "127.0.0.1:0", "alias.local", []string{"AcmeCorp"}, true, false, false, socks, "", 0, "", "", 10, 180)
+	mux := http.NewServeMux()
+	server := httptest.NewUnstartedServer(mux)
+	defer server.Close()
+	cfg, err := config.New(upstream.URL, server.Listener.Addr().String(), "alias.local", []string{"AcmeCorp"}, true, false, false, socks, "", 0, "", "", 10, 180)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,23 +151,30 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	defer s.transport.(*http.Transport).CloseIdleConnections()
 	var challengeID string
 	cleanup := make(chan struct{}, 1)
-	mux := http.NewServeMux()
 	mux.HandleFunc("/review-bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		token, _ := json.Marshal("Bearer " + s.CaptchaOperatorToken())
 		fmt.Fprintf(w, `<!doctype html><script>(async()=>{const r=await fetch('/__blinder/captcha/',{headers:{Authorization:%s}});if(r.ok)location.href='/__blinder/captcha/challenge/%s'})()</script>`, token, challengeID)
 	})
 	mux.HandleFunc("/review-cleanup", func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "__blinder_op", Value: "", Path: "/__blinder/captcha/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: captcha.OperatorCookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 		io.WriteString(w, "Synthetic flow complete")
 		select {
 		case cleanup <- struct{}{}:
 		default:
 		}
 	})
-	mux.Handle("/", s.server.Handler)
-	server := httptest.NewServer(mux)
-	defer server.Close()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/__blinder/captcha/challenge/") {
+			_, cookieErr := r.Cookie(captcha.OperatorCookieName)
+			t.Logf("operator completion request: origin=%q dest=%q cookie=%t", r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Dest"), cookieErr == nil)
+		}
+		s.server.Handler.ServeHTTP(w, r)
+	})
+	if err := s.captchaOperator.SetOperatorOrigin("http://" + captcha.OperatorHost + ":" + strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port)); err != nil {
+		t.Fatal(err)
+	}
+	server.Start()
 	defer s.captchaQueue.Shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
@@ -187,7 +200,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	challengeID = captchaDeliveryWaitID(t, s)
 	captchaFollowupWaiter(t, s, challengeID)
 	u, _ := url.Parse(server.URL)
-	u.Host = "localhost:" + u.Port()
+	u.Host = captcha.OperatorHost + ":" + u.Port()
 	u.Path = "/review-bootstrap"
 	if err := os.WriteFile("/private/tmp/blinder-flow-browser-url.txt", []byte(u.String()), 0600); err != nil {
 		t.Fatal(err)

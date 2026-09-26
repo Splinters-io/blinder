@@ -39,7 +39,7 @@ func TestCaptchaFollowupCompletionRequiresAuthWhileWaiting(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	captchaFollowupWaiter(t, s, id)
 	w := captchaDeliveryOperatorPost(s, id, "unauthorized-solution", "")
-	if w.Code < 400 {
+	if w.Code != http.StatusForbidden {
 		t.Fatalf("having a waiter authorizes an unauthenticated completion: status=%d body=%q", w.Code, w.Body.String())
 	}
 }
@@ -82,10 +82,14 @@ func TestCaptchaFollowupRetryPreservesTargetSessionAndRequest(t *testing.T) {
 	}()
 	id := captchaDeliveryWaitID(t, s)
 	captchaFollowupWaiter(t, s, id)
-	r := httptest.NewRequest("POST", "https://alias.local:18099/__blinder/captcha/challenge/"+id, strings.NewReader("h-captcha-response=valid-for-this-fixture"))
+	r := captchaDeliveryOperatorRequest(s, "POST", "challenge/"+id, strings.NewReader("h-captcha-response=valid-for-this-fixture"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("Authorization", "Bearer "+s.CaptchaOperatorToken())
-	s.server.Handler.ServeHTTP(httptest.NewRecorder(), r)
+	completion := httptest.NewRecorder()
+	s.server.Handler.ServeHTTP(completion, r)
+	if completion.Code != http.StatusOK {
+		t.Fatalf("fixture operator completion rejected: status=%d body=%q", completion.Code, completion.Body.String())
+	}
 	select {
 	case got := <-done:
 		if got.Code != 200 || got.Body.String() != "protected account" {
