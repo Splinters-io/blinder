@@ -9,14 +9,16 @@ import (
 )
 
 type CacheEntry struct {
-	FetchError      string
-	ScrubbedBody    []byte
-	ReplacementHash string
-	ContentType     string
-	BytesModified   bool
-	ResponseHeaders http.Header
-	OriginalDigests map[string][]byte
-	BodyVersion     string
+	FetchError        string
+	ScrubbedBody      []byte
+	ReplacementHash   string
+	ContentType       string
+	BytesModified     bool
+	ResponseHeaders   http.Header
+	OriginalDigests   map[string][]byte
+	BodyVersion       string
+	OriginalBodyBytes int64
+	OriginalBodyKnown bool
 }
 
 func CacheKey(resourceURL string, req *http.Request) string {

@@ -11,10 +11,12 @@ import (
 )
 
 type Entry struct {
-	Body        []byte
-	StatusCode  int
-	Headers     http.Header
-	ContentType string
+	Body              []byte
+	StatusCode        int
+	Headers           http.Header
+	ContentType       string
+	OriginalBodyBytes int64
+	OriginalBodyKnown bool
 
 	ETag string
 

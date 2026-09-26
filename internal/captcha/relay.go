@@ -42,9 +42,25 @@ func relayURL(raw, session string) string {
 	return result
 }
 
+// HTTP methods are nonempty, case-sensitive tokens (RFC 9110, section 9.1).
+// Validate syntax only; extension methods need no allowlist.
+func validHTTPMethod(method string) bool {
+	if method == "" {
+		return false
+	}
+	for i := 0; i < len(method); i++ {
+		c := method[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (h *OperatorHandler) serveResource(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" && r.Method != "HEAD" && r.Method != "POST" && r.Method != "OPTIONS" {
-		http.Error(w, "method not allowed", 405)
+	if !validHTTPMethod(r.Method) {
+		http.Error(w, "invalid method", 400)
 		return
 	}
 	rawURL := r.URL.Query().Get("u")
@@ -66,7 +82,7 @@ func (h *OperatorHandler) serveResource(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "challenge session expired", 403)
 			return
 		}
-	} else if r.Method == "POST" || r.Method == "OPTIONS" {
+	} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "challenge session required", 403)
 		return
 	}
@@ -80,10 +96,12 @@ func (h *OperatorHandler) serveResource(w http.ResponseWriter, r *http.Request) 
 		}
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	if r.Method == "OPTIONS" {
-		method := r.Header.Get("Access-Control-Request-Method")
-		if method != "GET" && method != "HEAD" && method != "POST" {
-			http.Error(w, "method not allowed", 405)
+	methods := r.Header.Values("Access-Control-Request-Method")
+	// An ordinary OPTIONS request belongs to the provider. Only browser CORS
+	// preflights are answered locally, with the exact requested method.
+	if r.Method == http.MethodOptions && r.Header.Get("Origin") != "" && len(methods) > 0 {
+		if len(methods) != 1 || !validHTTPMethod(methods[0]) {
+			http.Error(w, "invalid preflight method", 400)
 			return
 		}
 		for _, name := range strings.Split(r.Header.Get("Access-Control-Request-Headers"), ",") {
@@ -94,7 +112,7 @@ func (h *OperatorHandler) serveResource(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST")
+		w.Header().Set("Access-Control-Allow-Methods", methods[0])
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Accept-Language")
 		w.WriteHeader(204)
 		return

@@ -6,7 +6,11 @@ import (
 	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
-func rewriteJS(body []byte, gate *scrub.Gate, path string) []byte {
+func rewriteJS(body []byte, gate *scrub.Gate, path string, origins ...*OriginMapper) []byte {
+	var mapper *OriginMapper
+	if len(origins) > 0 {
+		mapper = origins[0]
+	}
 	s := string(body)
 	var out strings.Builder
 	out.Grow(len(s))
@@ -14,9 +18,9 @@ func rewriteJS(body []byte, gate *scrub.Gate, path string) []byte {
 	i := 0
 	for i < len(s) {
 		if s[i] == '\'' || s[i] == '"' {
-			i = writeScrubbedJSString(s, i, gate, path, &out)
+			i = writeScrubbedJSString(s, i, gate, path, &out, mapper)
 		} else if s[i] == '`' {
-			i = writeScrubbedJSTemplate(s, i, gate, path, &out)
+			i = writeScrubbedJSTemplate(s, i, gate, path, &out, mapper)
 		} else if i+1 < len(s) && s[i] == '/' && s[i+1] == '/' {
 			start := i
 			for i < len(s) && s[i] != '\n' {
@@ -43,7 +47,8 @@ func rewriteJS(body []byte, gate *scrub.Gate, path string) []byte {
 	return []byte(out.String())
 }
 
-func writeScrubbedJSString(s string, pos int, gate *scrub.Gate, path string, out *strings.Builder) int {
+func writeScrubbedJSString(s string, pos int, gate *scrub.Gate, path string, out *strings.Builder, origins *OriginMapper) int {
+	quoteStart := pos
 	quote := s[pos]
 	out.WriteByte(quote)
 	pos++
@@ -58,7 +63,11 @@ func writeScrubbedJSString(s string, pos int, gate *scrub.Gate, path string, out
 		}
 		pos++
 	}
-	out.WriteString(gate.Scrub(s[start:pos], "body:js:string:"+path))
+	value := s[start:pos]
+	if pos < len(s) && !strings.ContainsRune(value, '\\') && !jsStringIsConcatenated(s, quoteStart, pos) {
+		value = origins.RewriteWebSocketURL(value)
+	}
+	out.WriteString(gate.Scrub(value, "body:js:string:"+path))
 	if pos < len(s) {
 		out.WriteByte(quote)
 		pos++
@@ -66,7 +75,15 @@ func writeScrubbedJSString(s string, pos int, gate *scrub.Gate, path string, out
 	return pos
 }
 
-func writeScrubbedJSTemplate(s string, pos int, gate *scrub.Gate, path string, out *strings.Builder) int {
+// URL assembly is outside the literal route mapper. Conservatively leave
+// obvious concatenations to the existing scrubber instead of guessing the URL.
+func jsStringIsConcatenated(s string, start, end int) bool {
+	before := strings.TrimRight(s[:start], " \t\r\n")
+	after := strings.TrimLeft(s[end+1:], " \t\r\n")
+	return strings.HasSuffix(before, "+") || strings.HasPrefix(after, "+")
+}
+
+func writeScrubbedJSTemplate(s string, pos int, gate *scrub.Gate, path string, out *strings.Builder, origins *OriginMapper) int {
 	out.WriteByte('`')
 	pos++
 	textStart := pos
@@ -89,9 +106,9 @@ func writeScrubbedJSTemplate(s string, pos int, gate *scrub.Gate, path string, o
 			for pos < len(s) && depth > 0 {
 				switch {
 				case s[pos] == '\'' || s[pos] == '"':
-					pos = writeScrubbedJSString(s, pos, gate, path, out)
+					pos = writeScrubbedJSString(s, pos, gate, path, out, origins)
 				case s[pos] == '`':
-					pos = writeScrubbedJSTemplate(s, pos, gate, path, out)
+					pos = writeScrubbedJSTemplate(s, pos, gate, path, out, origins)
 				case s[pos] == '{':
 					depth++
 					out.WriteByte(s[pos])

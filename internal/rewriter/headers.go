@@ -171,7 +171,8 @@ func RewriteResponseHeaders(resp http.Header, gate *scrub.Gate, aliasDomain stri
 			if lower == "access-control-allow-origin" && originMapper != nil {
 				scrubbed := make([]string, len(values))
 				for i, v := range values {
-					scrubbed[i] = originMapper.RewriteResponseOrigin(v, requestOrigin)
+					rewritten := originMapper.RewriteResponseOrigin(v, requestOrigin)
+					scrubbed[i] = gate.Scrub(rewritten, "header:"+lower)
 				}
 				out[name] = scrubbed
 				continue

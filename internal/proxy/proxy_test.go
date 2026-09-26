@@ -97,7 +97,7 @@ func TestProxy_BasicHTMLScrubbing(t *testing.T) {
 	if strings.Contains(bodyStr, "acmecorp.io") {
 		t.Error("domain 'acmecorp.io' should be scrubbed from body")
 	}
-	if !strings.Contains(bodyStr, "[Blinder: title removed]") {
+	if !strings.Contains(bodyStr, "<title>Transformed view</title>") {
 		t.Error("title should be replaced")
 	}
 	if resp.Header.Get("Server") != "nginx/1.25" {

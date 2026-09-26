@@ -8,19 +8,32 @@ import (
 	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
-func TestJSONFailsClosed(t *testing.T) {
-	for _, source := range []string{
-		`{"company":"\u0041cmeCorp"`,
-		`{"safe":1}]`,
-		`{"safe":1} {"company":"\u0041cmeCorp"}`,
+func TestJSONMalformedDiagnosticsPreserved(t *testing.T) {
+	for _, tc := range []struct{ source, prefix, suffix string }{
+		{`{"company":"\u0041cmeCorp"`, `{"company":"`, `"`},
+		{`{"safe":1}]`, `{"safe":1}]`, ``},
+		{`{"safe":1} {"company":"\u0041cmeCorp"}`, `{"safe":1} {"company":"`, `"}`},
 	} {
-		t.Run(source, func(t *testing.T) {
+		t.Run(tc.source, func(t *testing.T) {
 			gate := scrub.NewGate(nil, []string{"AcmeCorp", "OtherOrg"}, "alias.local")
-			got := RewriteBody([]byte(source), "application/json", "/", gate, false).Body
-			if string(got) != "null" {
-				t.Fatalf("ambiguous/invalid JSON must fail closed, got %s", got)
+			want := tc.prefix + gate.Scrub("AcmeCorp", "fixture") + tc.suffix
+			if tc.suffix == "" {
+				want = tc.source
+			}
+			got := RewriteBody([]byte(tc.source), "application/json", "/", gate, false).Body
+			if string(got) != want || json.Valid(got) {
+				t.Fatalf("malformed grammar/diagnostics changed: got %q want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestJSONAmbiguousEscapesStillFailClosed(t *testing.T) {
+	for _, source := range []string{`{"company":"\u0041cmeCorp","bad":"\q"}`, `{"company":"\u0041cmeCorp\`, `\u0041cmeCorp`} {
+		got := RewriteBody([]byte(source), "application/json", "/", scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local"), false).Body
+		if string(got) != "null" {
+			t.Fatalf("ambiguous escapes must fail closed, got %q", got)
+		}
 	}
 }
 
@@ -54,7 +67,7 @@ func FuzzJSONScrubbing(f *testing.F) {
 			t.Skip()
 		}
 		got := RewriteBody([]byte(source), "application/json", "/", scrub.NewGate(nil, []string{"AcmeCorp", "OtherOrg"}, "alias.local"), false).Body
-		if !json.Valid(got) {
+		if json.Valid([]byte(source)) && !json.Valid(got) {
 			t.Fatalf("output must be valid JSON: %q", got)
 		}
 		if bytes.Contains(got, []byte("AcmeCorp")) {

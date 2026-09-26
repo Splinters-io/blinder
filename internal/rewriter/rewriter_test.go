@@ -32,17 +32,20 @@ func TestRewriteBody_HTMLScrubsTitle(t *testing.T) {
 	if strings.Contains(string(result.Body), "AcmeCorp") {
 		t.Error("identity token should be scrubbed from title")
 	}
-	if !strings.Contains(string(result.Body), "[Blinder: title removed]") {
+	if !strings.Contains(string(result.Body), "<title>Transformed view</title>") {
 		t.Error("title should be replaced")
 	}
 }
 
-func TestRewriteBody_HTMLStripsComments(t *testing.T) {
+func TestRewriteBody_HTMLPreservesScrubbedComments(t *testing.T) {
 	gate := newTestGate()
-	body := []byte(`<html><!-- internal: build v3.2.1 by dev@target.example.com --><body>hi</body></html>`)
+	body := []byte(`<html><!-- E_BUILD: internal diagnostic by dev@target.example.com --><body>hi</body></html>`)
 	result := RewriteBody(body, "text/html", "/", gate, false)
-	if strings.Contains(string(result.Body), "internal:") {
-		t.Error("HTML comments should be stripped")
+	if !strings.Contains(string(result.Body), "<!-- E_BUILD: internal diagnostic by ") || !strings.Contains(string(result.Body), " --><body>hi</body>") {
+		t.Errorf("diagnostic comment should survive: %s", result.Body)
+	}
+	if strings.Contains(string(result.Body), "target.example.com") {
+		t.Errorf("configured identity should be scrubbed from comment: %s", result.Body)
 	}
 }
 
@@ -271,7 +274,7 @@ func TestRewriteBody_HTMLStripsSRIForProxiedRelativeURL(t *testing.T) {
 
 func TestRewriteBody_HTMLPreservesSRIForExternalCDN(t *testing.T) {
 	gate := newTestGate()
-	origins := NewOriginMapper(
+	origins := mustMapper(t,
 		&url.URL{Scheme: "https", Host: "target.example.com"},
 		"127.0.0.1:8099", "target-001.local",
 	)
@@ -288,7 +291,7 @@ func TestRewriteBody_HTMLPreservesSRIForExternalCDN(t *testing.T) {
 
 func TestRewriteBody_HTMLStripsSRIForUpstreamURL(t *testing.T) {
 	gate := newTestGate()
-	origins := NewOriginMapper(
+	origins := mustMapper(t,
 		&url.URL{Scheme: "https", Host: "target.example.com"},
 		"127.0.0.1:8099", "target-001.local",
 	)
@@ -304,7 +307,7 @@ func TestRewriteBody_HTMLBodyURLsUseOriginMapper(t *testing.T) {
 	gate := scrub.NewGate([]string{"app.example.com", "api.example.com"}, nil, "target-001.local")
 	primary, _ := url.Parse("https://app.example.com")
 	api, _ := url.Parse("https://api.example.com")
-	origins := NewOriginMapper(primary, "127.0.0.1:8099", "target-001.local",
+	origins := mustMapper(t,primary, "127.0.0.1:8099", "target-001.local",
 		OriginRoute{Upstream: api, Alias: "host-api.target-001.local"},
 	)
 

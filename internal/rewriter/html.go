@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,15 +13,6 @@ import (
 	"github.com/Splinters-io/blinder/internal/scrub"
 	"github.com/Splinters-io/blinder/internal/sri"
 )
-
-var sriDropAttrs = map[string]bool{
-	"integrity":   true,
-	"crossorigin": true,
-}
-
-const loremText = "Lorem ipsum dolor sit amet consectetur adipiscing elit"
-
-var loremWords = strings.Fields(loremText)
 
 type sriRewriter struct {
 	pipeline        *sri.Pipeline
@@ -56,41 +48,68 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 
 	var rawTextTag string
 	var suppressElement bool
+	var diagnosticElements []diagnosticElement
+	var proseSpans []proseSpan
 
 	for {
 		tt := z.Next()
 		if tt == html.ErrorToken {
+			// On EOF the tokenizer may expose a final incomplete tag that it
+			// could not emit as a normal token. Keep harmless source truncation
+			// observable without guessing how to rewrite its broken grammar.
+			// Next advances Raw's start, so an ordinary EOF has an empty span;
+			// already emitted text is not repeated. Never revive an SRI block.
+			if z.Err() == io.EOF && !suppressElement {
+				raw := append([]byte(nil), z.Raw()...)
+				decoded := html.UnescapeString(string(raw))
+				if gate.Scrub(decoded, "html:truncated") == decoded && gate.ResidualLeakCount(decoded) == 0 {
+					out.Write(raw)
+				}
+			}
 			break
 		}
+		// Token decoding lowercases tag names, unescapes attributes/text and
+		// normalizes newlines in the tokenizer's backing buffer. Keep source
+		// bytes before any of those operations for unchanged-token passthrough.
+		raw := append([]byte(nil), z.Raw()...)
 
 		switch tt {
 		case html.CommentToken:
+			if !suppressElement {
+				out.Write(rewriteHTMLComment(raw, gate))
+			}
 
 		case html.DoctypeToken:
-			out.Write(append([]byte(nil), z.Raw()...))
+			out.Write(raw)
 
 		case html.TextToken:
 			if suppressElement {
 				continue
 			}
-			text := string(append([]byte(nil), z.Text()...))
 			switch rawTextTag {
 			case "script":
-				out.Write(rewriteJS([]byte(text), gate, "html:script"))
+				out.Write(rewriteJS(raw, gate, "html:script", origins))
 			case "style":
-				out.Write(rewriteCSS([]byte(text), gate, "html:style"))
+				out.Write(rewriteCSS(raw, gate, "html:style"))
 			case "title":
 				// Discarded; replacement emitted in the EndTagToken handler.
 			default:
-				if paranoid {
-					trimmed := strings.TrimSpace(text)
-					if len(trimmed) > 0 {
-						out.WriteString(loremForLength(len(trimmed)))
+				text := string(z.Text())
+				if paranoid && !inDiagnosticElement(diagnosticElements) {
+					if strings.TrimSpace(text) != "" {
+						left, right := proseContentBounds(string(raw))
+						proseSpans = append(proseSpans, proseSpan{out.Len() + left, out.Len() + right})
+						out.WriteString(proseForHTMLText(string(raw)))
 					} else {
-						out.WriteString(text)
+						out.Write(raw)
 					}
 				} else {
-					out.WriteString(html.EscapeString(gate.Scrub(text, "html:body")))
+					transformed := gate.Scrub(text, "html:body")
+					if transformed == text {
+						out.Write(raw)
+					} else {
+						out.WriteString(html.EscapeString(transformed))
+					}
 				}
 			}
 
@@ -106,6 +125,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 			if hasAttr {
 				attrs = collectTagAttrs(z)
 			}
+			diagnosticElements = enterDiagnosticElement(diagnosticElements, tagName, attrs, tt == html.SelfClosingTagToken)
 
 			if tagName == "base" && sr != nil && sr.upstreamBase != nil {
 				for _, a := range attrs {
@@ -126,9 +146,14 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 				continue
 			}
 
+			transformedAttrs, changed := rewriteTagAttrs(tagName, attrs, gate, origins, sriDec, sr)
+			if !changed && gate.ResidualLeakCount(html.UnescapeString(string(raw))) == 0 {
+				out.Write(raw)
+				continue
+			}
 			out.WriteByte('<')
 			out.WriteString(tagName)
-			writeScrubbedAttrs(&out, tagName, attrs, gate, origins, sriDec, sr)
+			writeTagAttrs(&out, transformedAttrs)
 
 			if tt == html.SelfClosingTagToken {
 				out.WriteString(" /")
@@ -138,10 +163,16 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 		case html.EndTagToken:
 			tn, _ := z.TagName()
 			tagName := string(tn)
+			for i := len(diagnosticElements) - 1; i >= 0; i-- {
+				if diagnosticElements[i].tag == tagName {
+					diagnosticElements = diagnosticElements[:i]
+					break
+				}
+			}
 
 			if tagName == rawTextTag {
 				if tagName == "title" && !suppressElement {
-					out.WriteString("[Blinder: title removed]")
+					out.WriteString("Transformed view")
 				}
 				rawTextTag = ""
 			}
@@ -151,13 +182,49 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid bool, origins *OriginMa
 				continue
 			}
 
-			out.WriteString("</")
-			out.WriteString(tagName)
-			out.WriteByte('>')
+			// Closing-tag attributes are ignored by browsers and were dropped
+			// by the previous serializer. Do not newly expose their identities
+			// when retaining unusual but otherwise unchanged closing-tag syntax.
+			decoded := html.UnescapeString(string(raw))
+			if gate.Scrub(decoded, "html:end-tag") == decoded {
+				out.Write(raw)
+			} else if closing := "</" + tagName + ">"; gate.ResidualLeakCount(closing) == 0 {
+				out.WriteString(closing)
+			}
 		}
 	}
 
-	return out.Bytes()
+	return fitProseToBodyLength(out.Bytes(), proseSpans, len(body))
+}
+
+// Comments carry diagnostic and parser-relevant source. Ordinary comments have
+// an envelope we can preserve while scrubbing an entity-decoded interior. A
+// changed interior is escaped so it cannot introduce markup or a closing '-->'.
+// Bogus/unterminated comment syntax is preserved only when no replacement is
+// needed; otherwise retain the previous omission policy instead of guessing a
+// new syntactic envelope. A residual check also covers configured identities
+// spanning the interior/envelope boundary without rescanning generated aliases.
+func rewriteHTMLComment(raw []byte, gate *scrub.Gate) []byte {
+	const prefix, suffix = "<!--", "-->"
+	source := string(raw)
+	if strings.HasPrefix(source, prefix) && strings.HasSuffix(source, suffix) && len(source) >= len(prefix)+len(suffix) {
+		interior := source[len(prefix) : len(source)-len(suffix)]
+		decoded := html.UnescapeString(interior)
+		transformed := gate.Scrub(decoded, "html:comment")
+		candidate := source
+		if transformed != decoded {
+			candidate = prefix + html.EscapeString(transformed) + suffix
+		}
+		if gate.ResidualLeakCount(html.UnescapeString(candidate)) != 0 {
+			return nil
+		}
+		return []byte(candidate)
+	}
+	decoded := html.UnescapeString(source)
+	if transformed := gate.Scrub(decoded, "html:comment"); transformed != decoded || gate.ResidualLeakCount(decoded) != 0 {
+		return nil
+	}
+	return raw
 }
 
 type tagAttr struct {
@@ -244,7 +311,15 @@ func decideSRIAction(tagName string, attrs []tagAttr, sr *sriRewriter, origins *
 	return sriDecision{}
 }
 
-func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sri sriDecision, sr *sriRewriter) {
+// Compute changes once: scrubbing records findings and version registration has
+// side effects, so a separate speculative pass would duplicate both.
+func rewriteTagAttrs(tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sri sriDecision, sr *sriRewriter) ([]tagAttr, bool) {
+	result := make([]tagAttr, 0, len(attrs))
+	changed := false
+	appendAttr := func(original tagAttr, value string) {
+		result = append(result, tagAttr{key: original.key, val: value})
+		changed = changed || original.val != value
+	}
 	relVal := ""
 	if tagName == "link" {
 		for _, a := range attrs {
@@ -260,29 +335,22 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 			if a.key == "integrity" {
 				switch sri.action {
 				case sriStrip:
+					changed = true
 					continue
 				case sriReplace:
-					out.WriteByte(' ')
-					out.WriteString(`integrity="`)
-					out.WriteString(html.EscapeString(sri.replacementHash))
-					out.WriteByte('"')
+					appendAttr(a, sri.replacementHash)
 					continue
 				case sriKeep:
-					out.WriteByte(' ')
-					out.WriteString(`integrity="`)
-					out.WriteString(html.EscapeString(sri.integrityVal))
-					out.WriteByte('"')
+					appendAttr(a, sri.integrityVal)
 					continue
 				}
 			}
 			if a.key == "crossorigin" && sri.action == sriStrip {
+				changed = true
 				continue
 			}
 		}
 
-		out.WriteByte(' ')
-		out.WriteString(a.key)
-		out.WriteString(`="`)
 		var val string
 		handled := false
 		if sr != nil && sr.resourceURL != nil && isURLAttr(tagName, a.key) {
@@ -314,7 +382,17 @@ func writeScrubbedAttrs(out *bytes.Buffer, tagName string, attrs []tagAttr, gate
 				val = base + "?__blv=" + token + frag
 			}
 		}
-		out.WriteString(html.EscapeString(val))
+		appendAttr(a, val)
+	}
+	return result, changed
+}
+
+func writeTagAttrs(out *bytes.Buffer, attrs []tagAttr) {
+	for _, a := range attrs {
+		out.WriteByte(' ')
+		out.WriteString(a.key)
+		out.WriteString(`="`)
+		out.WriteString(html.EscapeString(a.val))
 		out.WriteByte('"')
 	}
 }
@@ -464,25 +542,4 @@ done:
 		return nil
 	}
 	return r
-}
-
-func loremForLength(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(n)
-	wordIdx := 0
-	for b.Len() < n {
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(loremWords[wordIdx%len(loremWords)])
-		wordIdx++
-	}
-	result := b.String()
-	if len(result) > n {
-		result = result[:n]
-	}
-	return result
 }

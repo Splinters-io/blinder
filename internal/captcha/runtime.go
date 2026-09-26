@@ -12,6 +12,9 @@ import (
 //go:embed runtime.js
 var resourceRuntime string
 
+//go:embed operator_completion.js
+var operatorCompletionRuntime string
+
 func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Request, session string) []byte {
 	if base == nil {
 		return body
@@ -42,6 +45,17 @@ func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Requ
 }
 
 func operatorTokenBridge(id string, fields []string) string {
-	data, _ := json.Marshal(map[string]any{"session": id, "fields": fields})
-	return `<script>(function(c){const frame=document.querySelector('iframe');const form=document.querySelector('form.fields');window.addEventListener('message',function(e){if(e.source!==frame.contentWindow||!e.data||e.data.type!=='blinder-fields'||e.data.session!==c.session)return;for(const name of c.fields){const value=e.data.fields&&e.data.fields[name];if(typeof value!=='string'||value.length>65536)continue;for(const input of form.elements){if(input.name===name)input.value=value;}}});})(` + strings.TrimSpace(string(data)) + `);</script>`
+	return operatorCompletionScript(id, fields, false)
+}
+
+func operatorSolveSubmission(id string, fields []string) string {
+	return operatorCompletionScript(id, fields, true)
+}
+
+func operatorCompletionScript(id string, fields []string, automatic bool) string {
+	if fields == nil {
+		fields = []string{}
+	}
+	data, _ := json.Marshal(map[string]any{"session": id, "fields": fields, "automatic": automatic})
+	return `<script>(function(c){` + operatorCompletionRuntime + `})(` + strings.TrimSpace(string(data)) + `);</script>`
 }

@@ -18,10 +18,11 @@ func sha384hash(data []byte) string {
 	return base64.StdEncoding.EncodeToString(h[:])
 }
 
-func sriTestSetup(jsBody []byte, handler http.HandlerFunc) (*sri.Pipeline, *sri.Cache, *httptest.Server, *scrub.Gate, *OriginMapper) {
+func sriTestSetup(t *testing.T, jsBody []byte, handler http.HandlerFunc) (*sri.Pipeline, *sri.Cache, *httptest.Server, *scrub.Gate, *OriginMapper) {
+	t.Helper()
 	srv := httptest.NewServer(handler)
 	gate := scrub.NewGate([]string{"target.example.com"}, []string{"AcmeCorp"}, "target-001.local")
-	origins := NewOriginMapper(
+	origins := mustMapper(t,
 		&url.URL{Scheme: "http", Host: srv.Listener.Addr().String()},
 		"127.0.0.1:8099", "target-001.local",
 	)
@@ -40,7 +41,7 @@ func TestSRIIntegration_ValidOriginalChangedBytes(t *testing.T) {
 	jsBody := []byte(`var company = "AcmeCorp"; console.log(company);`)
 	integrity := "sha384-" + sha384hash(jsBody)
 
-	pipeline, cache, srv, gate, origins := sriTestSetup(jsBody, func(w http.ResponseWriter, r *http.Request) {
+	pipeline, cache, srv, gate, origins := sriTestSetup(t,jsBody, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(jsBody)
 	})
@@ -98,7 +99,7 @@ func TestSRIIntegration_ValidOriginalUnchangedBytes(t *testing.T) {
 	defer srv.Close()
 
 	gate := scrub.NewGate(nil, nil, "target-001.local")
-	origins := NewOriginMapper(
+	origins := mustMapper(t,
 		&url.URL{Scheme: "http", Host: srv.Listener.Addr().String()},
 		"127.0.0.1:8099", "target-001.local",
 	)
@@ -132,7 +133,7 @@ func TestSRIIntegration_InvalidOriginalBlocked(t *testing.T) {
 	realBody := []byte(`console.log("real");`)
 	wrongIntegrity := "sha384-" + sha384hash([]byte("attacker controlled content"))
 
-	pipeline, cache, srv, gate, origins := sriTestSetup(realBody, func(w http.ResponseWriter, r *http.Request) {
+	pipeline, cache, srv, gate, origins := sriTestSetup(t,realBody, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(realBody)
 	})
@@ -168,7 +169,7 @@ func TestSRIIntegration_InvalidOriginalBlocked(t *testing.T) {
 }
 
 func TestSRIIntegration_NoSRIPreserved(t *testing.T) {
-	pipeline, _, srv, gate, origins := sriTestSetup(nil, func(w http.ResponseWriter, r *http.Request) {
+	pipeline, _, srv, gate, origins := sriTestSetup(t,nil, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`var x = 1;`))
 	})
 	defer srv.Close()
@@ -191,7 +192,7 @@ func TestSRIIntegration_NoSRIPreserved(t *testing.T) {
 }
 
 func TestSRIIntegration_ExternalCDNPreserved(t *testing.T) {
-	pipeline, _, srv, gate, origins := sriTestSetup(nil, func(w http.ResponseWriter, r *http.Request) {})
+	pipeline, _, srv, gate, origins := sriTestSetup(t,nil, func(w http.ResponseWriter, r *http.Request) {})
 	defer srv.Close()
 
 	upstreamBase, _ := url.Parse("http://" + srv.Listener.Addr().String())
@@ -218,7 +219,7 @@ func TestSRIIntegration_LinkStylesheet(t *testing.T) {
 	cssBody := []byte(`body { color: red; font-family: "AcmeCorp Sans"; }`)
 	integrity := "sha384-" + sha384hash(cssBody)
 
-	pipeline, _, srv, gate, origins := sriTestSetup(cssBody, func(w http.ResponseWriter, r *http.Request) {
+	pipeline, _, srv, gate, origins := sriTestSetup(t,cssBody, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css")
 		w.Write(cssBody)
 	})
@@ -248,7 +249,7 @@ func TestSRIIntegration_FindingsRecorded(t *testing.T) {
 	jsBody := []byte(`var org = "AcmeCorp";`)
 	integrity := "sha384-" + sha384hash(jsBody)
 
-	pipeline, _, srv, gate, origins := sriTestSetup(jsBody, func(w http.ResponseWriter, r *http.Request) {
+	pipeline, _, srv, gate, origins := sriTestSetup(t,jsBody, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(jsBody)
 	})
@@ -282,7 +283,7 @@ func TestSRIIntegration_FindingsRecorded(t *testing.T) {
 
 func TestSRIIntegration_NoPipelineFallsBackToStrip(t *testing.T) {
 	gate := newTestGate()
-	origins := NewOriginMapper(
+	origins := mustMapper(t,
 		&url.URL{Scheme: "https", Host: "target.example.com"},
 		"127.0.0.1:8099", "target-001.local",
 	)

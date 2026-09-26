@@ -12,11 +12,44 @@ import (
 )
 
 type RequestEntry struct {
-	Path       string `json:"path"`
-	StatusCode int    `json:"status_code"`
-	ScrubCount int    `json:"scrub_count"` // Identity/domain matches replaced for this request.
-	LeakCount  int    `json:"leak_count"`  // -1 when residual identity leakage has not been measured.
-	Timestamp  string `json:"timestamp"`
+	Path       string           `json:"path"`
+	StatusCode int              `json:"status_code"`
+	ScrubCount int              `json:"scrub_count"` // Identity/domain matches replaced for this request.
+	LeakCount  int              `json:"leak_count"`  // -1 when residual identity leakage has not been measured.
+	Timestamp  string           `json:"timestamp"`
+	Response   *ResponseMetrics `json:"response,omitempty"`
+}
+
+// BodyRead measures payload bytes, excluding HTTP framing and TLS overhead.
+// -1 means unavailable. Incomplete reads report observed bytes, not a total.
+type BodyRead struct {
+	StatusCode   int    `json:"status_code"`
+	EncodedBytes int64  `json:"encoded_bytes"`
+	DecodedBytes int64  `json:"decoded_bytes"`
+	Complete     bool   `json:"complete"`
+	Error        string `json:"error,omitempty"`
+}
+
+type ResponseMetrics struct {
+	Source             string     `json:"source"`
+	Upstream           []BodyRead `json:"upstream"`
+	OriginalBodyBytes  int64      `json:"original_body_bytes"`
+	RewrittenBodyBytes int64      `json:"rewritten_body_bytes"`
+	DownstreamBytes    int64      `json:"downstream_body_bytes"`
+	RewriteDeltaBytes  *int64     `json:"rewrite_delta_bytes"`
+}
+
+func cloneResponse(m *ResponseMetrics) *ResponseMetrics {
+	if m == nil {
+		return nil
+	}
+	copy := *m
+	copy.Upstream = append([]BodyRead{}, m.Upstream...)
+	if m.RewriteDeltaBytes != nil {
+		n := *m.RewriteDeltaBytes
+		copy.RewriteDeltaBytes = &n
+	}
+	return &copy
 }
 
 type LeakEntry struct {
@@ -88,13 +121,16 @@ func (s *Session) AliasDomain() string {
 	return s.aliasDomain
 }
 
-func (s *Session) RecordRequest(path string, statusCode, scrubCount, leakCount int) {
+func (s *Session) RecordRequest(path string, statusCode, scrubCount, leakCount int, response ...ResponseMetrics) {
 	entry := RequestEntry{
 		Path:       path,
 		StatusCode: statusCode,
 		ScrubCount: scrubCount,
 		LeakCount:  leakCount,
 		Timestamp:  time.Now().Format(time.RFC3339Nano),
+	}
+	if len(response) > 0 {
+		entry.Response = cloneResponse(&response[0])
 	}
 
 	s.mu.Lock()
@@ -181,6 +217,9 @@ func (s *Session) Requests() []RequestEntry {
 	defer s.mu.Unlock()
 	result := make([]RequestEntry, len(s.requests))
 	copy(result, s.requests)
+	for i := range result {
+		result[i].Response = cloneResponse(result[i].Response)
+	}
 	return result
 }
 

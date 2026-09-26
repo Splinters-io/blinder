@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/formedit"
 	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
 	socks "golang.org/x/net/proxy"
@@ -58,6 +59,24 @@ type Proxy struct {
 	closed      bool
 }
 
+// HandleOptions connects handshake responses to the owning HTTP proxy without
+// coupling frame transport to its capture or representation policy.
+type HandleOptions struct {
+	Gate                  *scrub.Gate
+	HandshakeTimeout      time.Duration
+	RefusedResponse       func(http.ResponseWriter, *http.Request, *http.Response, time.Duration) error
+	RewriteUpgradeHeaders func(*http.Request, *http.Response) http.Header
+	ObserveHandshake      func(HandshakeEvent)
+}
+
+type HandshakeEvent struct {
+	Request           *http.Request
+	Response          *http.Response
+	Elapsed           time.Duration
+	Error             error
+	UpstreamAttempted bool
+}
+
 func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useTLS, verifyTLS bool, socksAddr string, idleTimeout time.Duration, origins *rewriter.OriginMapper) *Proxy {
 	if idleTimeout <= 0 {
 		idleTimeout = 5 * time.Minute
@@ -68,7 +87,7 @@ func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useT
 		if useTLS {
 			scheme = "https"
 		}
-		origins = rewriter.NewOriginMapper(&url.URL{Scheme: scheme, Host: targetHost}, "", aliasDomain)
+		origins, _ = rewriter.NewOriginMapper(&url.URL{Scheme: scheme, Host: targetHost}, "", aliasDomain)
 	}
 	return &Proxy{
 		gate:        gate,
@@ -91,7 +110,33 @@ func IsUpgrade(r *http.Request) bool {
 		hasHeaderToken(r.Header, "Connection", "upgrade")
 }
 
-func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
+func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request, options ...HandleOptions) (resultErr error) {
+	var opt HandleOptions
+	if len(options) > 0 {
+		opt = options[0]
+	}
+	gate := p.gate
+	if opt.Gate != nil {
+		gate = opt.Gate
+	}
+	timeout := opt.HandshakeTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	start := time.Now()
+	var upgradeReq *http.Request
+	var upstreamResp *http.Response
+	var attempted, reported bool
+	observe := func(err error) {
+		if reported {
+			return
+		}
+		reported = true
+		if opt.ObserveHandshake != nil {
+			opt.ObserveHandshake(HandshakeEvent{Request: upgradeReq, Response: upstreamResp, Elapsed: time.Since(start), Error: err, UpstreamAttempted: attempted})
+		}
+	}
+	defer func() { observe(resultErr) }()
 	if !IsUpgrade(r) {
 		return ErrNotWebSocket
 	}
@@ -102,7 +147,23 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 		http.Error(w, "invalid websocket handshake", http.StatusBadRequest)
 		return ErrNotWebSocket
 	}
-	upstreamConn, err := p.dialUpstream()
+	// Resolve before dialing: each alias selects its registered complete origin,
+	// including scheme and port. An unknown Host must not reach the primary.
+	upstream := p.origins.Resolve(r.Host)
+	if upstream == nil || !p.origins.IsKnownFullOrigin(upstream) {
+		http.Error(w, "unknown websocket origin", http.StatusMisdirectedRequest)
+		return errors.New("unknown websocket origin")
+	}
+	upgradeReq = buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, upstream.Host, gate, p.origins), upstream.Host, p.aliasDomain)
+	upgradeReq.URL.Scheme = upstream.Scheme
+	restoreRequestURI(upgradeReq, gate)
+	upgradeReq.Header.Set("Accept-Encoding", "gzip, identity")
+	dialCtx, cancel := context.WithTimeout(r.Context(), timeout)
+	stop := context.AfterFunc(p.ctx, cancel)
+	defer stop()
+	defer cancel()
+	attempted = true
+	upstreamConn, err := p.dialRoute(dialCtx, upstream)
 	if err != nil {
 		http.Error(w, "websocket upstream error", http.StatusBadGateway)
 		return fmt.Errorf("%w: %v", ErrUpstreamDial, err)
@@ -114,8 +175,8 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 		return errors.New("websocket proxy closed")
 	}
 	defer p.release(upstreamConn)
-	upstreamConn.SetDeadline(time.Now().Add(30 * time.Second))
-	upgradeReq := buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, p.targetHost, p.gate, p.origins), p.targetHost, p.aliasDomain)
+	deadline, _ := dialCtx.Deadline()
+	upstreamConn.SetDeadline(deadline)
 	if err := upgradeReq.Write(upstreamConn); err != nil {
 		upstreamConn.Close()
 		http.Error(w, "websocket upstream error", http.StatusBadGateway)
@@ -123,15 +184,34 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	upstreamBuf := bufio.NewReader(upstreamConn)
-	upstreamResp, err := http.ReadResponse(upstreamBuf, upgradeReq)
-	if err != nil {
-		upstreamConn.Close()
-		http.Error(w, "websocket upstream error", http.StatusBadGateway)
-		return fmt.Errorf("read upgrade response: %w", err)
+	for {
+		upstreamResp, err = http.ReadResponse(upstreamBuf, upgradeReq)
+		if err != nil {
+			upstreamConn.Close()
+			http.Error(w, "websocket upstream error", http.StatusBadGateway)
+			return fmt.Errorf("read upgrade response: %w", err)
+		}
+		if upstreamResp.StatusCode == http.StatusSwitchingProtocols || upstreamResp.StatusCode >= 200 {
+			break
+		}
+		// Informational responses are not a refusal. Continue to the final
+		// response under the same handshake deadline.
+		upstreamResp.Body.Close()
 	}
 
 	if upstreamResp.StatusCode != http.StatusSwitchingProtocols {
-		upstreamConn.Close()
+		defer func() {
+			// This connection is never reused. Close it before Body.Close so an
+			// unread/oversized refusal cannot trigger an implicit body drain.
+			upstreamConn.Close()
+			upstreamResp.Body.Close()
+		}()
+		if opt.RefusedResponse != nil {
+			// The callback consumes and records the actual HTTP response while
+			// the connection remains open. It owns this event's capture.
+			reported = true
+			return opt.RefusedResponse(w, upgradeReq, upstreamResp, time.Since(start))
+		}
 		http.Error(w, "websocket upgrade refused", http.StatusBadGateway)
 		return fmt.Errorf("%w: got %d", ErrUpgradeRefused, upstreamResp.StatusCode)
 	}
@@ -141,20 +221,35 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 		return errors.New("invalid upstream websocket handshake")
 	}
 	protocol := upstreamResp.Header.Get("Sec-WebSocket-Protocol")
-	if p.gate.Scrub(protocol, "ws:protocol") != protocol {
+	if gate.Scrub(protocol, "ws:protocol") != protocol {
 		http.Error(w, "unsupported websocket subprotocol", http.StatusBadGateway)
 		return errors.New("identity-bearing websocket subprotocol")
 	}
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		upstreamConn.Close()
-		http.Error(w, "hijack not supported", http.StatusInternalServerError)
-		return errors.New("ResponseWriter does not support Hijack")
+	responseHeaders := make(http.Header)
+	if opt.RewriteUpgradeHeaders != nil {
+		responseHeaders = opt.RewriteUpgradeHeaders(upgradeReq, upstreamResp)
+		if responseHeaders == nil {
+			responseHeaders = make(http.Header)
+		}
+	}
+	// These are protocol fields, not arbitrary metadata. Reconstruct them only
+	// from the already validated upstream handshake, never from scrubbed text.
+	for _, name := range []string{"Content-Length", "Content-Encoding", "Transfer-Encoding", "Trailer", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol"} {
+		responseHeaders.Del(name)
+	}
+	responseHeaders.Set("Upgrade", "websocket")
+	responseHeaders.Set("Connection", "Upgrade")
+	responseHeaders.Set("Sec-WebSocket-Accept", upstreamResp.Header.Get("Sec-WebSocket-Accept"))
+	if protocol != "" {
+		responseHeaders.Set("Sec-WebSocket-Protocol", protocol)
 	}
 
-	clientConn, clientBuf, err := hijacker.Hijack()
+	clientConn, clientBuf, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		upstreamConn.Close()
+		if errors.Is(err, http.ErrNotSupported) {
+			http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		}
 		return fmt.Errorf("hijack: %w", err)
 	}
 
@@ -164,22 +259,24 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer p.release(clientConn)
 	clientConn.SetWriteDeadline(time.Now().Add(p.idleTimeout))
-	switchResp := fmt.Sprintf("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n")
-	if secAccept := upstreamResp.Header.Get("Sec-WebSocket-Accept"); secAccept != "" {
-		switchResp += fmt.Sprintf("Sec-WebSocket-Accept: %s\r\n", secAccept)
+	_, err = clientBuf.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+	if err == nil {
+		err = responseHeaders.Write(clientBuf)
 	}
-	if proto := upstreamResp.Header.Get("Sec-WebSocket-Protocol"); proto != "" {
-		switchResp += fmt.Sprintf("Sec-WebSocket-Protocol: %s\r\n", proto)
+	if err == nil {
+		_, err = clientBuf.WriteString("\r\n")
 	}
-	switchResp += "\r\n"
-
-	if _, err := clientConn.Write([]byte(switchResp)); err != nil {
+	if err == nil {
+		err = clientBuf.Flush()
+	}
+	if err != nil {
 		clientConn.Close()
 		upstreamConn.Close()
 		return fmt.Errorf("write 101: %w", err)
 	}
 
 	log.Printf("[ws] upgrade complete, relaying frames")
+	observe(nil)
 
 	p.relay(clientConn, clientBuf, upstreamConn, upstreamBuf)
 	return nil
@@ -260,21 +357,37 @@ func (p *Proxy) Close() {
 	p.mu.Unlock()
 }
 func (p *Proxy) dealiasText(text string) string {
-	return strings.ReplaceAll(text, p.aliasDomain, p.targetHost)
+	return p.gate.RestoreBody(text)
 }
 
 func (p *Proxy) dialUpstream() (net.Conn, error) {
-	addr := p.targetAddr
-	if _, _, err := net.SplitHostPort(addr); err != nil {
+	scheme := "http"
+	if p.useTLS {
+		scheme = "https"
+	}
+	return p.dialRoute(p.ctx, &url.URL{Scheme: scheme, Host: p.targetAddr})
+}
+
+func (p *Proxy) dialRoute(parent context.Context, upstream *url.URL) (net.Conn, error) {
+	useTLS := upstream.Scheme == "https"
+	if upstream.Scheme != "http" && !useTLS || upstream.Hostname() == "" {
+		return nil, errors.New("invalid websocket upstream origin")
+	}
+	addr := upstream.Host
+	if upstream.Port() == "" {
 		port := "80"
-		if p.useTLS {
+		if useTLS {
 			port = "443"
 		}
-		addr = net.JoinHostPort(strings.Trim(addr, "[]"), port)
+		addr = net.JoinHostPort(upstream.Hostname(), port)
 	}
-	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
+	timeout := 30 * time.Second
+	if deadline, ok := parent.Deadline(); ok {
+		timeout = time.Until(deadline)
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	dialer := &net.Dialer{Timeout: timeout}
 	var conn net.Conn
 	var err error
 	if p.socksAddr != "" {
@@ -293,9 +406,8 @@ func (p *Proxy) dialUpstream() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.useTLS {
-		host, _, _ := net.SplitHostPort(addr)
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: !p.verifyTLS, MinVersion: tls.VersionTLS12})
+	if useTLS {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: upstream.Hostname(), InsecureSkipVerify: !p.verifyTLS, MinVersion: tls.VersionTLS12})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("tls handshake: %w", err)
@@ -349,4 +461,17 @@ func buildUpgradeRequest(r *http.Request, targetHost, aliasDomain string) *http.
 	outReq.Header.Del("Sec-WebSocket-Extensions")
 
 	return outReq
+}
+
+// Restore issued mappings in URL components without changing the route chosen
+// from the incoming Host. Work on escaped path segments so an encoded slash
+// remains segment data rather than becoming a new path separator.
+func restoreRequestURI(req *http.Request, gate *scrub.Gate) {
+	rewriter.RestoreURLPath(req.URL, gate)
+	if rawQuery := req.URL.RawQuery; rawQuery != "" {
+		if restored, err := formedit.Rewrite(rawQuery, gate.RestoreBody, nil); err == nil {
+			req.URL.RawQuery = restored
+		} // Leave malformed parameters for the upstream's own error handling.
+	}
+	req.RequestURI = req.URL.RequestURI()
 }

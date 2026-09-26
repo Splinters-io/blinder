@@ -17,6 +17,7 @@ type BodyResult struct {
 }
 
 type RewriteOpts struct {
+	StatusCode      int // Upstream status; diagnostic HTML must not become filler text.
 	Origins         *OriginMapper
 	SRIPipeline     *sri.Pipeline
 	UpstreamBase    *url.URL
@@ -47,11 +48,11 @@ func RewriteBody(body []byte, contentType string, path string, gate *scrub.Gate,
 				resourceURL:     opt.ResourceURL,
 			}
 		}
-		return BodyResult{Body: rewriteHTML(body, gate, paranoid, opt.Origins, sr), Metadata: meta}
+		return BodyResult{Body: rewriteHTML(body, gate, paranoid && opt.StatusCode < 400, opt.Origins, sr), Metadata: meta}
 	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
 		return BodyResult{Body: scrubJSON(body, gate, "body:json:"+path)}
 	case strings.HasPrefix(ct, "text/javascript") || ct == "application/javascript":
-		return BodyResult{Body: rewriteJS(body, gate, path)}
+		return BodyResult{Body: rewriteJS(body, gate, path, opt.Origins)}
 	case strings.HasPrefix(ct, "text/css"):
 		return BodyResult{Body: rewriteCSS(body, gate, path)}
 	case strings.HasPrefix(ct, "text/xml") || ct == "application/xml" || strings.HasSuffix(ct, "+xml"):

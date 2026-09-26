@@ -152,6 +152,7 @@ func TestProxy_TextFrameScrubbing(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("GET", "/ws", nil)
+	req.Host = "alias.local"
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")

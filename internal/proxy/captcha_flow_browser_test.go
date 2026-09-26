@@ -57,6 +57,10 @@ await new Promise((resolve,reject)=>{const s=document.createElement('script');s.
 if(!window.fixtureDynamic)throw Error('dynamic script missing');
 const response=await fetch('verify?mode=one&mode=two',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:'synthetic'})});
 if(!response.ok)throw Error('POST '+response.status);const data=await response.json();
+for(const method of ['PUT','PATCH','DELETE','OPTIONS','PROPFIND','vendor.sync']){
+const result=await fetch('method/'+encodeURIComponent(method),{method,headers:{'Content-Type':'application/json'},body:JSON.stringify({method})});
+if(!result.ok)throw Error(method+' '+result.status);
+}
 await new Promise((resolve,reject)=>{const x=new XMLHttpRequest();x.open('GET','status');x.withCredentials=true;x.onload=()=>x.status===200?resolve():reject(Error('XHR '+x.status));x.onerror=reject;x.send()});
 await inner;document.body.insertAdjacentHTML('beforeend','<p>Provider APIs and nested frame passed</p>');
 parent.postMessage({type:'fixture-token',token:data.token},'*');
@@ -84,6 +88,17 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 			}
 			io.WriteString(w, "ok")
 		default:
+			if strings.HasPrefix(r.URL.Path, "/widget/method/") {
+				method := strings.TrimPrefix(r.URL.Path, "/widget/method/")
+				var body struct{ Method string }
+				cookie, err := r.Cookie("provider_session")
+				if json.NewDecoder(r.Body).Decode(&body) != nil || body.Method != method || r.Method != method || err != nil || cookie.Value != "fixture-session" {
+					http.Error(w, "custom method/body/session changed", 400)
+					return
+				}
+				w.WriteHeader(204)
+				return
+			}
 			http.NotFound(w, r)
 		}
 	}))
@@ -189,7 +204,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		if got.err != nil || got.status != 200 || got.body != "Original request resumed" {
 			t.Errorf("end-to-end flow failed: %v status=%d body=%q", got.err, got.status, got.body)
 		}
-		for _, want := range []string{"GET /widget/start", "GET /widget/frame?stage=one", "GET /widget/api.js?render=explicit&onload=ready", "GET /widget/dynamic.js", "GET /widget/inner", "POST /widget/verify?mode=one&mode=two", "GET /widget/status"} {
+		for _, want := range []string{"GET /widget/start", "GET /widget/frame?stage=one", "GET /widget/api.js?render=explicit&onload=ready", "GET /widget/dynamic.js", "GET /widget/inner", "POST /widget/verify?mode=one&mode=two", "GET /widget/status", "PUT /widget/method/PUT", "PATCH /widget/method/PATCH", "DELETE /widget/method/DELETE", "OPTIONS /widget/method/OPTIONS", "PROPFIND /widget/method/PROPFIND", "vendor.sync /widget/method/vendor.sync"} {
 			found := false
 			for _, got := range observed {
 				found = found || got == want

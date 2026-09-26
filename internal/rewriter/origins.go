@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -23,12 +24,15 @@ type OriginMapper struct {
 	upstreamToLocal  map[string]string
 	routes           map[string]*url.URL
 	localAddr        string
+	listenPort       string
+	aliases          []string
 }
 
 // NewOriginMapper builds an origin mapper for the primary target and any extra
 // upstream origins. Each extra origin is served under its own alias hostname.
-// Unrelated, opaque and malformed origins reach the target unchanged.
-func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRoute) *OriginMapper {
+// Unrelated, opaque and malformed origins reach the target unchanged. Returns
+// an error if two routes would claim the same hostname.
+func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRoute) (*OriginMapper, error) {
 	m := &OriginMapper{
 		clientToUpstream: make(map[string]url.URL),
 		upstreamToLocal:  make(map[string]string),
@@ -40,6 +44,7 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 	if err != nil {
 		port = "443"
 	}
+	m.listenPort = port
 
 	targetCopy := url.URL{Scheme: target.Scheme, Host: target.Host}
 
@@ -67,12 +72,21 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 		}
 	}
 
+	if alias != "" {
+		m.aliases = append(m.aliases, alias)
+	}
+
 	primaryLocal := (&url.URL{Scheme: "https", Host: net.JoinHostPort(alias, port)}).String()
 	if key := originKey(&targetCopy); key != "" {
 		m.upstreamToLocal[key] = primaryLocal
 	}
 
 	for _, extra := range extras {
+		lowerAlias := strings.ToLower(extra.Alias)
+		if prev, ok := m.routes[lowerAlias]; ok {
+			return nil, fmt.Errorf("route collision: %s and %s both claim hostname %s", prev.Host, extra.Upstream.Host, extra.Alias)
+		}
+
 		extraCopy := url.URL{Scheme: extra.Upstream.Scheme, Host: extra.Upstream.Host}
 
 		aliasURL := &url.URL{Scheme: "https", Host: net.JoinHostPort(extra.Alias, port)}
@@ -80,7 +94,8 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 			m.clientToUpstream[key] = extraCopy
 		}
 
-		m.routes[strings.ToLower(extra.Alias)] = extra.Upstream
+		m.routes[lowerAlias] = extra.Upstream
+		m.aliases = append(m.aliases, extra.Alias)
 
 		localAlias := (&url.URL{Scheme: "https", Host: net.JoinHostPort(extra.Alias, port)}).String()
 		if key := originKey(&extraCopy); key != "" {
@@ -88,7 +103,7 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 		}
 	}
 
-	return m
+	return m, nil
 }
 
 func isLoopback(host string) bool {
@@ -160,16 +175,34 @@ func (m *OriginMapper) IsKnownOrigin(host string) bool {
 }
 
 // Resolve returns the upstream URL for the given request Host header, or nil if
-// no route matches.
+// no route matches. The port in the Host header must match the listen port; a
+// bare hostname (no port) is accepted only when the listen port is 443.
 func (m *OriginMapper) Resolve(host string) *url.URL {
 	if m == nil {
 		return nil
 	}
-	h, _, err := net.SplitHostPort(host)
+	h, p, err := net.SplitHostPort(host)
 	if err != nil {
 		h = host
+		if m.listenPort != "443" && m.listenPort != "0" {
+			return nil
+		}
+	} else if m.listenPort != "0" && p != m.listenPort {
+		return nil
 	}
 	return m.routes[strings.ToLower(h)]
+}
+
+// RouteAliases returns the alias hostnames registered in this mapper, suitable
+// for TLS SAN generation. The primary alias is first, followed by any extra
+// origin aliases.
+func (m *OriginMapper) RouteAliases() []string {
+	if m == nil {
+		return nil
+	}
+	out := make([]string, len(m.aliases))
+	copy(out, m.aliases)
+	return out
 }
 
 // Rewrite maps a local proxy URL to the corresponding upstream URL. For
@@ -220,6 +253,48 @@ func (m *OriginMapper) RewriteUpstreamURL(value string) string {
 		return u.String()
 	}
 	return value
+}
+
+// RewriteWebSocketURL maps an explicitly registered ws/wss upstream origin to
+// its TLS local alias. HTTP-equivalent schemes are used only for route lookup;
+// this does not authorize WebSocket URLs for HTTP or SRI resource fetching.
+func (m *OriginMapper) RewriteWebSocketURL(value string) string {
+	if m == nil {
+		return value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.User != nil || u.Opaque != "" {
+		return value
+	}
+	lookup := *u
+	switch strings.ToLower(u.Scheme) {
+	case "ws":
+		lookup.Scheme = "http"
+	case "wss":
+		lookup.Scheme = "https"
+	default:
+		return value
+	}
+	key := originKey(&lookup)
+	local, ok := m.upstreamToLocal[key]
+	if key == "" || !ok {
+		return value
+	}
+	alias, err := url.Parse(local)
+	if err != nil {
+		return value
+	}
+	// Keep the source suffix verbatim, including escaped path spelling, query
+	// order, and empty query/fragment markers. Only scheme and authority change.
+	authorityStart := strings.Index(value, "://") + 3
+	if authorityStart < 3 {
+		return value
+	}
+	suffix := ""
+	if end := strings.IndexAny(value[authorityStart:], "/?#"); end >= 0 {
+		suffix = value[authorityStart+end:]
+	}
+	return "wss://" + alias.Host + suffix
 }
 
 // RewriteResponseOrigin maps an upstream origin in a response header (such as

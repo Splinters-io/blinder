@@ -3,4 +3,5 @@
 *.har
 *.pem
 *.key
+*.test
 .DS_Store

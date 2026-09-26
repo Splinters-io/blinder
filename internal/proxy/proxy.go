@@ -73,7 +73,11 @@ type Server struct {
 }
 
 func New(cfg *config.Config) (*Server, error) {
-	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr)
+	var extraAliases []string
+	for _, u := range cfg.ExtraOrigins {
+		extraAliases = append(extraAliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
+	}
+	localTLS, err := blindertls.Prepare(cfg.CertDir, cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
 	if err != nil {
 		return nil, fmt.Errorf("local TLS: %w", err)
 	}
@@ -136,7 +140,10 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		seenAliases[alias] = extra.Host
 		extraRoutes = append(extraRoutes, rewriter.OriginRoute{Upstream: extra, Alias: alias})
 	}
-	origins := rewriter.NewOriginMapper(cfg.TargetURL, cfg.ListenAddr, cfg.AliasDomain, extraRoutes...)
+	origins, err := rewriter.NewOriginMapper(cfg.TargetURL, cfg.ListenAddr, cfg.AliasDomain, extraRoutes...)
+	if err != nil {
+		return nil, fmt.Errorf("origin mapper: %w", err)
+	}
 
 	upstreamTimeout := time.Duration(cfg.UpstreamTimeout) * time.Second
 

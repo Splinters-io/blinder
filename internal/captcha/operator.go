@@ -278,23 +278,20 @@ iframe { width: 100%%; height: 500px; border: 1px solid #ddd; border-radius: 4px
 		fmt.Fprintf(w, `<label>%s: <input name="%s" type="text"></label>`,
 			html.EscapeString(field), html.EscapeString(field))
 	}
-	if h.routeResources {
-		fmt.Fprint(w, operatorTokenBridge(ch.ID, opaqueFields))
-	}
-
 	fmt.Fprint(w, `<div class="actions"><button type="submit">Submit Solution</button></div>
-</form>
-</body></html>`)
+</form>`)
+	fmt.Fprint(w, operatorTokenBridge(ch.ID, opaqueFields))
+	fmt.Fprint(w, `</body></html>`)
 }
 
 func (h *OperatorHandler) completeChallenge(w http.ResponseWriter, r *http.Request, id string) {
 	if !h.queue.HasWaiter(id) {
-		http.Error(w, "no pending request for this challenge", http.StatusForbidden)
+		writeCompletionError(w, r, id, "no pending request for this challenge", http.StatusForbidden)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form data", http.StatusBadRequest)
+		writeCompletionError(w, r, id, "bad form data", http.StatusBadRequest)
 		return
 	}
 
@@ -306,21 +303,58 @@ func (h *OperatorHandler) completeChallenge(w http.ResponseWriter, r *http.Reque
 	}
 
 	if len(solution) == 0 {
-		http.Error(w, "no solution fields provided", http.StatusBadRequest)
+		writeCompletionError(w, r, id, "no solution fields provided", http.StatusBadRequest)
 		return
 	}
 
 	if !h.queue.Complete(id, solution) {
-		http.Error(w, "challenge not found or already completed", http.StatusNotFound)
+		writeCompletionError(w, r, id, "challenge not found or already completed", http.StatusNotFound)
 		return
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Accept")
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		writeCompletionPage(w, http.StatusOK, id, "")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "completed",
 		"id":     id,
 		"fields": len(solution),
 	})
+}
+
+func writeCompletionError(w http.ResponseWriter, r *http.Request, id, message string, status int) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Accept")
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		writeCompletionPage(w, status, id, message)
+		return
+	}
+	http.Error(w, message, status)
+}
+
+// A browser's authenticated native POST receives a receipt. API clients retain
+// the existing JSON success response and plain-text errors. This does not grant
+// cookie-only fetch/XHR access to the operator endpoints.
+func writeCompletionPage(w http.ResponseWriter, status int, id, message string) {
+	title := "Solution submitted"
+	if status != http.StatusOK {
+		title = "Submission failed"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, `<!doctype html><html><head><title>%s</title>
+<style>body{font-family:system-ui,sans-serif;max-width:600px;margin:3rem auto;padding:0 1rem}button,a{margin-right:1rem}</style>
+</head><body><h1>%s</h1>`, title, title)
+	if status == http.StatusOK {
+		fmt.Fprint(w, `<p role="status">The solution was sent to the waiting request. Return to the original page to check its result.</p><p>You can close this window.</p>`)
+	} else {
+		fmt.Fprintf(w, `<p role="alert">%s</p><p><button type="button" onclick="history.back()">Try again</button><a href="/__blinder/captcha/challenge/%s">Reopen challenge</a></p>`, html.EscapeString(message), html.EscapeString(url.PathEscape(id)))
+	}
+	fmt.Fprint(w, `<p><a href="/__blinder/captcha/">Challenge queue</a></p></body></html>`)
 }
 
 func (h *OperatorHandler) serveSolvePage(w http.ResponseWriter, r *http.Request, id string) {
@@ -360,55 +394,7 @@ func (h *OperatorHandler) serveSolvePage(w http.ResponseWriter, r *http.Request,
 		pageBody = rewriteCaptchaScriptHost(pageBody, hostParam)
 	}
 
-	var fieldsJSON []byte
-	fieldsJSON, _ = json.Marshal(opaqueFields)
-
-	submitScript := fmt.Sprintf(`<script>
-(function(){
-  var fields = %s;
-  var submitURL = '/__blinder/captcha/challenge/%s';
-  function trySend() {
-    var form = new FormData();
-    var found = false;
-    for (var i = 0; i < fields.length; i++) {
-      var el = document.querySelector('[name="'+fields[i]+'"]');
-      var ta = document.querySelector('textarea[name="'+fields[i]+'"]');
-      var val = '';
-      if (el) val = el.value;
-      if (ta) val = ta.value;
-      if (!val) {
-        var inp = document.querySelector('input[name="'+fields[i]+'"]');
-        if (inp) val = inp.value;
-      }
-      if (val) { form.append(fields[i], val); found = true; }
-    }
-    if (!found) return false;
-    fetch(submitURL, {method:'POST', body: new URLSearchParams(form)})
-      .then(function(r){ return r.json(); })
-      .then(function(j){
-        document.body.innerHTML = '<div style="text-align:center;padding:3rem;font-family:system-ui">'
-          + '<h2>Solution submitted</h2><p>You can close this window.</p></div>';
-      })
-      .catch(function(e){ console.error('submit failed', e); });
-    return true;
-  }
-  var observer = new MutationObserver(function(){
-    for (var i = 0; i < fields.length; i++) {
-      var el = document.querySelector('[name="'+fields[i]+'"]');
-      var ta = document.querySelector('textarea[name="'+fields[i]+'"]');
-      if ((el && el.value) || (ta && ta.value)) { trySend(); return; }
-    }
-  });
-  observer.observe(document.body, {childList:true, subtree:true, attributes:true, characterData:true});
-  setInterval(function(){
-    for (var i = 0; i < fields.length; i++) {
-      var el = document.querySelector('[name="'+fields[i]+'"]');
-      var ta = document.querySelector('textarea[name="'+fields[i]+'"]');
-      if ((el && el.value) || (ta && ta.value)) { trySend(); return; }
-    }
-  }, 500);
-})();
-</script>`, string(fieldsJSON), html.EscapeString(id))
+	submitScript := operatorSolveSubmission(id, opaqueFields)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	injected := bytes.Replace(pageBody, []byte("</body>"), []byte(submitScript+"</body>"), 1)
