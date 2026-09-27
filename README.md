@@ -51,7 +51,7 @@ Replacement content is part of correctness: neutral filler for display, reversib
 | **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
 | **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. |
 
-**Development release.** The tested workflow is single-target and multi-origin scanning. Full browser containment verification and complete anonymization of arbitrary input remain open; review [supported behavior and delivery gates](docs/capabilities.md) before connecting a sensitive target.
+**Development build; day-one acceptance is not complete.** The [delivery contract](docs/day-one-contract.md) fixes the requirements and evidence needed for sign-off. Current [supported behavior and delivery gates](docs/capabilities.md) record implementation progress without reducing that scope.
 
 ## Quick start
 

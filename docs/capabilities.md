@@ -1,5 +1,7 @@
 # Supported behavior and delivery gates
 
+**Day-one status: NOT READY.** The [delivery contract](day-one-contract.md) defines the required outcome and sign-off rules. This document records implementation progress and limitations; it cannot reduce that scope or turn an unverified requirement into a pass.
+
 This is the working-tree implementation status. The [27 September browser report](testing-results-2026-09-27-browser.md) records 64 passing behavior/CSP/SRI pairs at `d6c6b42`, followed by the current synthetic CAPTCHA completion and denial checks after isolated challenge origins and bounded dynamic provider routing were added. It distinguishes each tested revision from the serving preview and the uncompleted live Tor track. Earlier [body-size](testing-results-2026-09-26-body-size.md), [provider-origin](testing-results-2026-09-26-provider-origins.md), [external CSP/SRI](testing-results-2026-09-26-external-csp.md), [operator acceptance](testing-results-2026-09-26-acceptance.md) and [fidelity](testing-results-2026-09-26.md) reports retain their historical evidence.
 
 ## Supported workflow

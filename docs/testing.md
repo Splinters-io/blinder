@@ -1,5 +1,7 @@
 # Regression, functional testing and UAT
 
+The [day-one delivery contract](day-one-contract.md) fixes the required outcome, evidence and sign-off rules. Record PASS, FAIL or NOT RUN against its requirements; the procedures below do not waive a requirement when a test skips, a client is unavailable or a known limitation is documented.
+
 Use these as three separate gates. Package regressions check specific defect classes; functional tests exercise the actual CLI and network boundary; UAT verifies the selected browser/scanner workflow with an operator. Green CI alone is not UAT approval or a general anonymization guarantee.
 
 The [27 September browser report](testing-results-2026-09-27-browser.md) records the latest behavior/CSP/SRI comparison and the synthetic CAPTCHA completion and denial profiles. The earlier [provider-origin](testing-results-2026-09-26-provider-origins.md), [operator acceptance](testing-results-2026-09-26-acceptance.md), [post-commit review](testing-results-2026-09-26-postcommit.md) and [fidelity](testing-results-2026-09-26.md) reports preserve their versioned evidence. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
@@ -411,7 +413,7 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 - **Evidence:** verify imports into the intended HAR tool. Independent schema, synthetic semantic and Playwright importer/matcher checks pass; binary requests need the optional Playwright export adapter. Selected viewer UI, browser replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.
 - **Routing and scale:** complete the live Tor track above; complex multi-origin applications, long-running sessions, load, memory growth and all release platforms remain separate test work.
 
-Release acceptance requires the open functional failures to be fixed, the full functional command to pass, and the selected operator workflow to have evidence and explicit sign-off. Acceptance of Tor mode also requires the live Tor/onion track; do not substitute the local SOCKS fixture. Keep unsupported capabilities visible in the release scope.
+Release acceptance requires the open functional failures to be fixed, the full functional command to pass, and the integrated browser/scanner workflow to meet the [day-one contract](day-one-contract.md) with recorded evidence and explicit operator sign-off. The live Tor/onion track is required; do not substitute the local SOCKS fixture. Unsupported behaviour that contradicts the contract remains unfinished work. Only an explicit operator instruction can change scope.
 
 ### External CSP and SRI comparison
 

@@ -1,5 +1,7 @@
 # Blinder working requirements
 
+Read [the day-one delivery contract](docs/day-one-contract.md) before planning delivery work or claiming readiness. Its requirements apply to Codex, Claude and every contributor. Only an explicit operator instruction changes scope; passing suites, documented limitations and partial acceptance do not waive required behaviour or close release gates.
+
 Read [the content contract](docs/content-contract.md) before changing rewriting, masking or consumer-visible responses. This records the operator's delivery requirements and applies to all contributors, including Codex and Claude.
 
 - Treat replacement content as product behavior, not incidental copy. Generated page content must use neutral filler, never removal/status labels such as `REDACTED`, `[removed]`, `[image]` or `Blinder: title removed`.

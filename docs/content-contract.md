@@ -1,5 +1,7 @@
 # Content is part of correctness
 
+The [day-one delivery contract](day-one-contract.md) fixes the release requirements and evidence needed for sign-off. The limits described here must remain visible; documenting them does not waive a delivery requirement.
+
 Blinder must mask configured identity and ordinary display prose with care. A working reverse proxy is not sufficient if its replacement text damages the observable application or fills a page with notices about removal. This is a delivery requirement, not a cosmetic task to defer.
 
 ## Generated display content
