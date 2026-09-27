@@ -1,5 +1,5 @@
 // This controller runs only in the trusted operator wrapper. The challenge
-// remains inside an opaque iframe and can supply only its configured fields.
+// remains at its dedicated origin and can supply only its configured fields.
 const frame = document.querySelector('iframe');
 const form = document.querySelector('form.fields');
 if (!frame || !form) return;
@@ -40,7 +40,7 @@ form.addEventListener('submit', event => {
   submitNative();
 });
 window.addEventListener('message', event => {
-  if (submitting || event.source !== frame.contentWindow || !event.data ||
+  if (submitting || !c.origin || event.origin !== c.origin || event.source !== frame.contentWindow || !event.data ||
       event.data.type !== 'blinder-fields' || event.data.session !== c.session) return;
   let hasValue = false;
   for (const name of c.fields) {

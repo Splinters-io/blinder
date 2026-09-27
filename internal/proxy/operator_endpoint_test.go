@@ -12,6 +12,7 @@ import (
 
 	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/endpoint"
 )
 
 func TestOperatorHostnameReservedAndCoveredByTLS(t *testing.T) {
@@ -97,6 +98,57 @@ func TestOperatorHostNeverServesTargetOrTargetWorker(t *testing.T) {
 	s.ServeHTTP(w, request)
 	if w.Code != 200 || w.Body.String() != "target response" || upstreamCalls.Load() != 1 {
 		t.Fatal("operator isolation changed target service-worker behavior")
+	}
+}
+
+func TestChallengeNamespaceNeverFallsThroughToTarget(t *testing.T) {
+	var calls atomic.Int32
+	s := mappingReviewServer(t, "https://main.example", nil, func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return audit267SRIResponse("text/plain", "target"), nil
+	})
+	for _, host := range []string{endpoint.ChallengeSuffix, "unknown." + endpoint.ChallengeSuffix, "0123456789abcdef0123456789abcdef." + endpoint.ChallengeSuffix, "UNKNOWN." + strings.ToUpper(endpoint.ChallengeSuffix) + "."} {
+		for _, path := range []string{"/", "/worker.js", "/__blinder/captcha/", "/__blinder/captcha/login?token=ignored"} {
+			r := httptest.NewRequest("GET", "https://"+host+":18099"+path, nil)
+			r.RemoteAddr = "127.0.0.1:4555"
+			r.Header.Set("Authorization", "Bearer "+s.CaptchaOperatorToken())
+			w := httptest.NewRecorder()
+			s.server.Handler.ServeHTTP(w, r)
+			if w.Code < 400 || calls.Load() != 0 || len(w.Result().Cookies()) != 0 {
+				t.Fatalf("reserved challenge route reached target or operator: host=%s path=%s status=%d calls=%d", host, path, w.Code, calls.Load())
+			}
+		}
+	}
+	r := httptest.NewRequest("GET", "https://unknown."+endpoint.ChallengeSuffix+":18099/", nil)
+	r.RemoteAddr = "192.0.2.1:4555"
+	w := httptest.NewRecorder()
+	s.server.Handler.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatal("challenge origin allowed a non-loopback peer")
+	}
+}
+
+func TestChallengeNamespaceReservedInTargetRoutes(t *testing.T) {
+	for _, host := range []string{endpoint.ChallengeSuffix, "view." + endpoint.ChallengeSuffix, "VIEW." + strings.ToUpper(endpoint.ChallengeSuffix) + "."} {
+		for _, field := range []string{"target", "alias", "extra"} {
+			cfg, err := config.New("https://main.example", "127.0.0.1:18099", "alias.local", nil, true, false, false, "", "", 0, "", "", 30, 60)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch field {
+			case "target":
+				cfg.TargetURL.Host = host
+			case "alias":
+				cfg.AliasDomain = host
+			case "extra":
+				other := *cfg.TargetURL
+				other.Host = host
+				cfg.ExtraOrigins = append(cfg.ExtraOrigins, &other)
+			}
+			if _, err := NewWithCertificate(cfg, tls.Certificate{}); err == nil {
+				t.Errorf("challenge namespace accepted as %s: %s", field, host)
+			}
+		}
 	}
 }
 

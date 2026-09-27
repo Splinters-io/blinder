@@ -15,7 +15,7 @@ var resourceRuntime string
 //go:embed operator_completion.js
 var operatorCompletionRuntime string
 
-func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Request, session string) []byte {
+func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Request, session string, allowedFields ...[]string) []byte {
 	if base == nil {
 		return body
 	}
@@ -28,6 +28,9 @@ func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Requ
 	for _, p := range h.matcher.providers {
 		fields = append(fields, p.OpaqueFields...)
 	}
+	if len(allowedFields) > 0 {
+		fields = allowedFields[0]
+	}
 	var origins []string
 	if h.routeResources {
 		origins = h.matcher.RouteWithTargetOrigins()
@@ -36,7 +39,7 @@ func (h *OperatorHandler) injectRuntime(body []byte, base *url.URL, r *http.Requ
 	for _, route := range h.providerRoutes.Routes() {
 		aliases[route.Upstream.String()] = route.Local.String()
 	}
-	cfg, _ := json.Marshal(map[string]any{"base": base.String(), "endpoint": endpoint, "session": session, "origins": origins, "aliases": aliases, "fields": fields})
+	cfg, _ := json.Marshal(map[string]any{"base": base.String(), "endpoint": endpoint, "session": session, "origins": origins, "aliases": aliases, "fields": fields, "parentOrigin": h.operatorOrigin})
 	bootstrap := []byte("<script>;(function(cfg){" + resourceRuntime + "})(" + string(cfg) + ");</script>")
 	pos := 0
 	trim := bytes.TrimLeft(body, " \r\n\t")
@@ -60,10 +63,14 @@ func operatorSolveSubmission(id string, fields []string) string {
 	return operatorCompletionScript(id, fields, true)
 }
 
-func operatorCompletionScript(id string, fields []string, automatic bool) string {
+func operatorCompletionScript(id string, fields []string, automatic bool, expectedOrigin ...string) string {
 	if fields == nil {
 		fields = []string{}
 	}
-	data, _ := json.Marshal(map[string]any{"session": id, "fields": fields, "automatic": automatic})
+	origin := ""
+	if len(expectedOrigin) > 0 {
+		origin = expectedOrigin[0]
+	}
+	data, _ := json.Marshal(map[string]any{"session": id, "fields": fields, "automatic": automatic, "origin": origin})
 	return `<script>(function(c){` + operatorCompletionRuntime + `})(` + strings.TrimSpace(string(data)) + `);</script>`
 }

@@ -103,12 +103,13 @@ func TestOperatorControlResponsesSeparateOpenerAndPreventCaching(t *testing.T) {
 	}
 }
 
-func TestOperatorChallengeDocumentsStayInsideOpaqueSandbox(t *testing.T) {
+func TestOperatorChallengeDocumentsStayInsideSeparateOrigin(t *testing.T) {
 	const untrusted = `<body><script>window.untrustedChallenge=1</script></iframe><iframe sandbox="allow-scripts allow-same-origin" srcdoc="bad"></iframe><input name="h-captcha-response" value="fixture"></body>`
 	for _, route := range []string{"challenge", "solve", "page"} {
 		t.Run(route, func(t *testing.T) {
 			h, q, _, token := testOperatorSetup(t)
 			id := q.Submit("hcaptcha", "https://target.test/account", []byte(untrusted), "text/html")
+			completionWaiter(t, q, id)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, operatorRequest(http.MethodGet, "/__blinder/captcha/"+route+"/"+id, token, nil))
 			doc, err := html.Parse(strings.NewReader(w.Body.String()))
@@ -124,8 +125,14 @@ func TestOperatorChallengeDocumentsStayInsideOpaqueSandbox(t *testing.T) {
 					for _, a := range n.Attr {
 						attrs[a.Key] = a.Val
 					}
-					if attrs["sandbox"] != "allow-scripts allow-forms" || !strings.Contains(attrs["srcdoc"], untrusted) {
-						t.Errorf("challenge not preserved inside opaque srcdoc: %v", attrs)
+					if attrs["sandbox"] != "allow-scripts allow-forms allow-same-origin" || attrs["srcdoc"] != "" || !strings.HasPrefix(attrs["src"], "https://"+id+ChallengeHostSuffix+":8099"+challengeViewPath+"?") {
+						t.Errorf("challenge not isolated at its own origin: %v", attrs)
+					} else {
+						view := httptest.NewRecorder()
+						h.ServeChallengeHTTP(view, httptest.NewRequest(http.MethodGet, attrs["src"], nil))
+						if view.Code != http.StatusOK || !strings.Contains(view.Body.String(), untrusted) {
+							t.Errorf("challenge lost in isolated view: %d", view.Code)
+						}
 					}
 				}
 				if n.Type == html.ElementNode && n.Data == "script" && n.FirstChild != nil && strings.Contains(n.FirstChild.Data, "untrustedChallenge") {

@@ -52,7 +52,13 @@ func printCertificateStatusWithVerifier(out io.Writer, cert *blindertls.Material
 func printAdditionalCertificateEndpoints(out io.Writer, cert *blindertls.Material, guidance certificateGuidance, verify func(string) error) {
 	type browserEndpoint struct{ role, host string }
 	endpoints := []browserEndpoint{{"primary alias", guidance.alias}}
+	challengeExample := false
 	for _, alias := range guidance.extraAliases {
+		if alias == endpoint.ChallengeWildcard {
+			endpoints = append(endpoints, browserEndpoint{"CAPTCHA challenge example", endpoint.ChallengeExampleHost})
+			challengeExample = true
+			continue
+		}
 		endpoints = append(endpoints, browserEndpoint{"extra origin", alias})
 	}
 	if guidance.operator {
@@ -76,6 +82,9 @@ func printAdditionalCertificateEndpoints(out io.Writer, cert *blindertls.Materia
 	if checked > 0 {
 		fmt.Fprintf(out, "Preflight exit status and --trust-cert apply to %s only. Other browser hostnames above have independent trust results.\n", cert.Host)
 		fmt.Fprintln(out, "These are platform certificate checks; verify name resolution and trust in the actual browser/scanner separately.")
+	}
+	if challengeExample {
+		fmt.Fprintln(out, "CAPTCHA content uses a different hostname per challenge. The example check does not establish browser trust for every challenge hostname; verify the actual challenge URL when it opens.")
 	}
 }
 

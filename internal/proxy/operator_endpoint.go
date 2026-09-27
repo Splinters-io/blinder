@@ -15,7 +15,8 @@ import (
 
 func validateOperatorEndpoint(cfg *config.Config) error {
 	reserved := func(host string) bool {
-		return strings.EqualFold(strings.TrimSuffix(host, "."), endpoint.OperatorHost)
+		host = strings.ToLower(strings.TrimSuffix(host, "."))
+		return host == endpoint.OperatorHost || host == endpoint.ChallengeSuffix || strings.HasSuffix(host, "."+endpoint.ChallengeSuffix)
 	}
 	if reserved(cfg.AliasDomain) || reserved(cfg.TargetURL.Hostname()) {
 		return errors.New("the operator hostname cannot be used as a target or alias")
@@ -67,6 +68,16 @@ func (s *Server) routeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := url.Parse("https://" + r.Host)
+	if err == nil && captcha.HandlesChallengeHost(u.Hostname()) {
+		peer, _, peerErr := net.SplitHostPort(r.RemoteAddr)
+		ip := net.ParseIP(peer)
+		if peerErr != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "challenge access is local only", http.StatusForbidden)
+			return
+		}
+		s.captchaOperator.ServeChallengeHTTP(w, r)
+		return
+	}
 	operatorHost := err == nil && strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), endpoint.OperatorHost)
 	if operatorHost {
 		peer, _, peerErr := net.SplitHostPort(r.RemoteAddr)

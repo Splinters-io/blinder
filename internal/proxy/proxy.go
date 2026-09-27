@@ -18,6 +18,7 @@ import (
 	"github.com/Splinters-io/blinder/internal/cache"
 	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/endpoint"
 	"github.com/Splinters-io/blinder/internal/formedit"
 	"github.com/Splinters-io/blinder/internal/har"
 	"github.com/Splinters-io/blinder/internal/manifest"
@@ -76,6 +77,9 @@ type Server struct {
 
 func New(cfg *config.Config) (*Server, error) {
 	var extraAliases []string
+	if cfg.Captcha != nil && len(cfg.Captcha.Providers) > 0 {
+		extraAliases = append(extraAliases, endpoint.ChallengeWildcard)
+	}
 	for _, u := range cfg.ExtraOrigins {
 		extraAliases = append(extraAliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
 	}
@@ -865,6 +869,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			detection.FormAction,
 			detection.FormMethod,
 		)
+		s.captchaQueue.SetResponseHeaders(challengeID, resp.Header)
 		if len(detection.FormFields) > 0 {
 			s.captchaQueue.SetFormFields(challengeID, detection.FormFields)
 		}

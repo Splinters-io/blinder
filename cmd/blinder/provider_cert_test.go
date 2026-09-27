@@ -8,6 +8,7 @@ import (
 
 	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/endpoint"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
 )
 
@@ -26,8 +27,8 @@ captcha:
 	}
 	cfg := &config.Config{ListenAddr: "127.0.0.1:18099", AliasDomain: "target.local", Captcha: providerConfig}
 	aliases, err := certificateExtraAliases(cfg)
-	if err != nil || len(aliases) != 0 {
-		t.Fatalf("non-Tor certificate gained provider names: %v, %v", aliases, err)
+	if err != nil || !reflect.DeepEqual(aliases, []string{endpoint.ChallengeWildcard}) {
+		t.Fatalf("non-Tor certificate needs only isolated challenge names: %v, %v", aliases, err)
 	}
 	cfg.Tor = &config.TorConfig{SOCKSAddr: "127.0.0.1:9050"}
 	aliases, err = certificateExtraAliases(cfg)
@@ -35,7 +36,11 @@ captcha:
 		t.Fatal(err)
 	}
 	routes, err := captcha.NewProviderRoutes(providerConfig.Matcher, "https", cfg.ListenAddr)
-	if err != nil || !reflect.DeepEqual(aliases, routes.AliasHosts()) || len(aliases) != 2 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAliases := append([]string{endpoint.ChallengeWildcard}, routes.AliasHosts()...)
+	if !reflect.DeepEqual(aliases, wantAliases) || len(aliases) != 3 {
 		t.Fatalf("certificate names differ from routing: %v, %v", aliases, err)
 	}
 	material, err := blindertls.Prepare("", cfg.AliasDomain, cfg.ListenAddr, aliases...)
@@ -47,6 +52,9 @@ captcha:
 		t.Fatal(err)
 	}
 	for _, name := range aliases {
+		if name == endpoint.ChallengeWildcard {
+			name = endpoint.ChallengeExampleHost
+		}
 		if err := leaf.VerifyHostname(name); err != nil {
 			t.Fatalf("generated certificate misses provider route %s: %v", name, err)
 		}
@@ -63,5 +71,15 @@ captcha:
 	ephemeralAliases, err := certificateExtraAliases(cfg)
 	if err != nil || !reflect.DeepEqual(ephemeralAliases, aliases) {
 		t.Fatalf("certificate-only port-zero aliases differ: %v, %v", ephemeralAliases, err)
+	}
+}
+
+func TestChallengeCertificateNamespaceRequiresCaptchaConfiguration(t *testing.T) {
+	for _, captchaConfig := range []*captcha.Config{nil, {}} {
+		cfg := &config.Config{ListenAddr: "127.0.0.1:18099", AliasDomain: "target.local", Captcha: captchaConfig}
+		aliases, err := certificateExtraAliases(cfg)
+		if err != nil || len(aliases) != 0 {
+			t.Fatalf("unused CAPTCHA namespace entered certificate plan: %v, %v", aliases, err)
+		}
 	}
 }

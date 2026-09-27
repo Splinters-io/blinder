@@ -90,6 +90,35 @@ func TestCertificateEndpointChecksAreDistinctAndOperatorIsOptIn(t *testing.T) {
 	}
 }
 
+func TestChallengeCertificatePreflightChecksConcreteExample(t *testing.T) {
+	var checked []string
+	var out bytes.Buffer
+	printAdditionalCertificateEndpoints(&out, &blindertls.Material{Host: "127.0.0.1"}, certificateGuidance{
+		alias: "127.0.0.1", extraAliases: []string{endpoint.ChallengeWildcard}, operator: true,
+	}, func(host string) error {
+		checked = append(checked, host)
+		if host == endpoint.ChallengeExampleHost {
+			return errors.New("endpoint-specific challenge trust missing")
+		}
+		return nil
+	})
+	if !reflect.DeepEqual(checked, []string{endpoint.ChallengeExampleHost, endpoint.OperatorHost}) {
+		t.Fatalf("wildcard plan did not become a concrete endpoint check: %v", checked)
+	}
+	for _, want := range []string{
+		"Platform trust [CAPTCHA challenge example]: setup needed (" + endpoint.ChallengeExampleHost + ")",
+		"example check does not establish browser trust for every challenge hostname",
+		"verify the actual challenge URL when it opens",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in guidance:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), endpoint.ChallengeWildcard) {
+		t.Fatalf("wildcard SAN presented as a browser endpoint:\n%s", out.String())
+	}
+}
+
 func TestTrustRequiresExplicitYes(t *testing.T) {
 	for _, text := range []string{"", "\n", "y\n", "no\n", "YES\n"} {
 		if confirmTrust(strings.NewReader(text)) {

@@ -30,7 +30,7 @@ func TestProviderRestrictedBaseAndRefreshStayOnAlias(t *testing.T) {
 	if status != 200 || headers.Get("Content-Length") != fmt.Sprint(len(body)) {
 		t.Fatalf("status/length: %d %v", status, headers)
 	}
-	if strings.Contains(body, origin) || !strings.Contains(body, aliases[0].String()+"/") {
+	if providerAttributesContain(body, origin) || !providerAttributesContain(body, aliases[0].String()+"/") {
 		t.Fatalf("provider base/refresh escaped alias: %s", body)
 	}
 	z := html.NewTokenizer(strings.NewReader(body))
@@ -160,7 +160,7 @@ func TestProviderHTMLNegotiatesSupportedEncoding(t *testing.T) {
 	providerOrigin = provider.URL
 	_, _, client, aliases, _ := providerOriginFixture(t, target, []*httptest.Server{provider}, true)
 	status, headers, body := providerOriginDo(t, client, "GET", aliases[0].String()+"/v1/widget", "", http.Header{"Accept-Encoding": {"gzip, deflate, br, zstd"}})
-	if status != 200 || headers.Get("Content-Encoding") != "" || !strings.Contains(body, aliases[0].String()+"/v1/frame?x=1&amp;x=2") || strings.Contains(body, providerOrigin) {
+	if status != 200 || headers.Get("Content-Encoding") != "" || !providerAttributesContain(body, aliases[0].String()+"/v1/frame?x=1&x=2") || providerAttributesContain(body, providerOrigin) {
 		t.Fatalf("gzip HTML forwarding failed: %d %v %q", status, headers, body)
 	}
 }

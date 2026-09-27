@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"mime"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -16,15 +17,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Splinters-io/blinder/internal/endpoint"
 )
 
 const (
-	OperatorHost       = endpoint.OperatorHost
-	OperatorCookieName = "__Host-blinder-operator"
-	operatorCookieName = OperatorCookieName
+	OperatorHost          = endpoint.OperatorHost
+	OperatorCookieName    = "__Host-blinder-operator"
+	operatorCookieName    = OperatorCookieName
+	ChallengeHostSuffix   = ".blinder-challenge.localhost"
+	challengeViewPath     = "/__blinder/captcha/view"
+	challengeViewLifetime = 2 * time.Minute
+	maxChallengeViews     = maxPendingChallenges * 4
 )
+
+type challengeView struct {
+	id      string
+	expires time.Time
+}
 
 type OperatorHandler struct {
 	queue            *ChallengeQueue
@@ -37,12 +48,21 @@ type OperatorHandler struct {
 	resourceSessions map[string]*cookiejar.Jar
 	operatorOrigin   string
 	providerRoutes   *ProviderRoutes
-	providerHTML     func([]byte, *url.URL) []byte
+	providerHTML     func([]byte, *url.URL, http.Header) []byte
+	challengeHeaders func(http.Header, *url.URL) error
+	viewMu           sync.Mutex
+	views            map[[32]byte]challengeView
+}
+
+// SetChallengeHeaderRewriter configures URL translation for original response
+// policies. It receives a private header copy and must not grant new permissions.
+func (h *OperatorHandler) SetChallengeHeaderRewriter(rewrite func(http.Header, *url.URL) error) {
+	h.challengeHeaders = rewrite
 }
 
 // SetProviderRoutes configures the operator's resource references before use.
 // Control authentication remains exclusively on the operator origin.
-func (h *OperatorHandler) SetProviderRoutes(routes *ProviderRoutes, rewriteHTML func([]byte, *url.URL) []byte) {
+func (h *OperatorHandler) SetProviderRoutes(routes *ProviderRoutes, rewriteHTML func([]byte, *url.URL, http.Header) []byte) {
 	h.providerRoutes, h.providerHTML = routes, rewriteHTML
 }
 
@@ -72,6 +92,7 @@ func NewOperatorHandler(queue *ChallengeQueue, matcher *Matcher, transport http.
 		routeResources:   len(routeResources) > 0 && routeResources[0],
 		resourceTimeout:  30 * time.Second,
 		resourceSessions: make(map[string]*cookiejar.Jar),
+		views:            make(map[[32]byte]challengeView),
 	}, token
 }
 
@@ -290,8 +311,8 @@ func (h *OperatorHandler) showChallenge(w http.ResponseWriter, r *http.Request, 
 	h.showChallengeWrapper(w, r, id, false)
 }
 
-// Only this trusted wrapper runs at the operator origin. The original challenge
-// stays in an opaque sandbox, including when opened in its own solve window.
+// Only this trusted wrapper runs at the operator origin. Each original challenge
+// lives at its own origin, including when opened in a separate solve window.
 func (h *OperatorHandler) showChallengeWrapper(w http.ResponseWriter, r *http.Request, id string, automatic bool) {
 	ch, ok := h.queue.Get(id)
 	if !ok {
@@ -299,28 +320,25 @@ func (h *OperatorHandler) showChallengeWrapper(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	opaqueFields := []string{}
-	for _, p := range h.matcher.providers {
-		if p.Name == ch.ProviderName {
-			opaqueFields = p.OpaqueFields
-			break
+	viewURL, ok := h.mintChallengeView(id)
+	if !ok {
+		http.Error(w, "no active challenge view", http.StatusForbidden)
+		return
+	}
+	opaqueFields := h.challengeFields(ch.ProviderName)
+	viewOrigin := viewURL.Scheme + "://" + viewURL.Host
+	// This changes only the trusted wrapper's framing policy, never a target
+	// policy. The challenge origin is not a permitted operator script source.
+	policy := w.Header().Get("Content-Security-Policy")
+	var directives []string
+	for _, directive := range strings.Split(policy, ";") {
+		fields := strings.Fields(directive)
+		if len(fields) > 0 && fields[0] != "frame-src" {
+			directives = append(directives, strings.TrimSpace(directive))
 		}
 	}
-	pageBody := ch.PageBody
-	base, _ := url.Parse(ch.PageURL)
-	if base != nil {
-		pageBody = rewriteCaptchaScriptHost(pageBody, "host="+url.QueryEscape(base.Host))
-	}
-	if h.routeResources {
-		if h.providerHTML != nil {
-			pageBody = h.providerHTML(pageBody, base)
-		} else {
-			pageBody = h.matcher.RewriteProviderHTML(pageBody, base, id)
-		}
-	}
-	// The completion bridge is needed in both direct and Tor modes. Its network
-	// interception is disabled outside Tor mode; credentials never enter srcdoc.
-	pageBody = h.injectRuntime(pageBody, base, r, id)
+	directives = append(directives, "frame-src "+viewOrigin)
+	w.Header().Set("Content-Security-Policy", strings.Join(directives, "; "))
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html>
@@ -343,14 +361,14 @@ iframe { width: 100%%; height: 500px; border: 1px solid #ddd; border-radius: 4px
 <div>ID: %s</div>
 </div>
 <p>Complete the CAPTCHA below, or <a href="/__blinder/captcha/solve/%s" target="_blank" rel="noopener">open a separate solve window</a> (auto-submits on completion).</p>
-<iframe srcdoc="%s" sandbox="allow-scripts allow-forms"></iframe>
+<iframe src="%s" sandbox="allow-scripts allow-forms allow-same-origin" referrerpolicy="no-referrer"></iframe>
 <form method="POST" action="/__blinder/captcha/challenge/%s" class="fields">`,
 		html.EscapeString(ch.ProviderName),
 		html.EscapeString(ch.ProviderName),
 		html.EscapeString(ch.PageURL),
 		html.EscapeString(ch.ID),
 		html.EscapeString(ch.ID),
-		html.EscapeString(string(pageBody)),
+		html.EscapeString(viewURL.String()),
 		html.EscapeString(ch.ID))
 
 	for _, field := range opaqueFields {
@@ -359,8 +377,236 @@ iframe { width: 100%%; height: 500px; border: 1px solid #ddd; border-radius: 4px
 	}
 	fmt.Fprint(w, `<div class="actions"><button type="submit">Submit Solution</button></div>
 </form>`)
-	fmt.Fprint(w, operatorCompletionScript(ch.ID, opaqueFields, automatic))
+	fmt.Fprint(w, operatorCompletionScript(ch.ID, opaqueFields, automatic, viewOrigin))
 	fmt.Fprint(w, `</body></html>`)
+}
+
+// HandlesChallengeHost reserves the entire namespace, including malformed
+// labels, so an invalid view hostname cannot fall through to the target proxy.
+func HandlesChallengeHost(hostname string) bool {
+	hostname = strings.TrimSuffix(strings.ToLower(hostname), ".")
+	return hostname == strings.TrimPrefix(ChallengeHostSuffix, ".") || strings.HasSuffix(hostname, ChallengeHostSuffix)
+}
+
+func challengeIDFromHost(hostname string) string {
+	if !strings.HasSuffix(hostname, ChallengeHostSuffix) {
+		return ""
+	}
+	id := strings.TrimSuffix(hostname, ChallengeHostSuffix)
+	decoded, err := hex.DecodeString(id)
+	if err != nil || len(decoded) != 16 || id != strings.ToLower(id) {
+		return ""
+	}
+	return id
+}
+
+func (h *OperatorHandler) challengeOrigin(id string) *url.URL {
+	operator, err := url.Parse(h.operatorOrigin)
+	if err != nil || operator.Host == "" || challengeIDFromHost(id+ChallengeHostSuffix) == "" {
+		return nil
+	}
+	host := id + ChallengeHostSuffix
+	if operator.Port() != "" {
+		host += ":" + operator.Port()
+	}
+	return &url.URL{Scheme: operator.Scheme, Host: host}
+}
+
+func (h *OperatorHandler) challengeFields(provider string) []string {
+	for _, p := range h.matcher.providers {
+		if p.Name == provider {
+			return append([]string(nil), p.OpaqueFields...)
+		}
+	}
+	return nil
+}
+
+func (h *OperatorHandler) mintChallengeView(id string) (*url.URL, bool) {
+	u := h.challengeOrigin(id)
+	if u == nil {
+		return nil, false
+	}
+	if _, ok := h.queue.activeChallenge(id); !ok {
+		return nil, false
+	}
+	token := generateOperatorToken()
+	now := time.Now()
+	h.viewMu.Lock()
+	for key, view := range h.views {
+		if !now.Before(view.expires) {
+			delete(h.views, key)
+		}
+	}
+	if len(h.views) >= maxChallengeViews {
+		var oldest [32]byte
+		var expiry time.Time
+		for key, view := range h.views {
+			if expiry.IsZero() || view.expires.Before(expiry) {
+				oldest, expiry = key, view.expires
+			}
+		}
+		delete(h.views, oldest)
+	}
+	h.views[hashToken(token)] = challengeView{id: id, expires: now.Add(challengeViewLifetime)}
+	h.viewMu.Unlock()
+	u.Path = challengeViewPath
+	u.RawQuery = url.Values{"view": {token}}.Encode()
+	return u, true
+}
+
+// ChallengePageURL maps only a pending, actively waited challenge hostname.
+func (h *OperatorHandler) ChallengePageURL(hostname string) (*url.URL, bool) {
+	id := challengeIDFromHost(hostname)
+	ch, ok := h.queue.activeChallenge(id)
+	if !ok {
+		return nil, false
+	}
+	u, err := url.Parse(ch.PageURL)
+	return u, err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil
+}
+
+func (h *OperatorHandler) mapChallengeValue(value string, originOnly bool) string {
+	u, err := url.Parse(value)
+	if err != nil || u.User != nil || u.Fragment != "" || (originOnly && (u.Path != "" || u.RawQuery != "" || u.ForceQuery)) {
+		return value
+	}
+	expected := h.challengeOrigin(challengeIDFromHost(u.Hostname()))
+	if expected == nil || u.Scheme != expected.Scheme || u.Host != expected.Host {
+		return value
+	}
+	page, ok := h.ChallengePageURL(u.Hostname())
+	if !ok {
+		return value
+	}
+	if originOnly {
+		return page.Scheme + "://" + page.Host
+	}
+	// The view URL and its capability must never be forwarded upstream.
+	return page.String()
+}
+
+func (h *OperatorHandler) MapChallengeOrigin(value string) string {
+	return h.mapChallengeValue(value, true)
+}
+
+func (h *OperatorHandler) MapChallengeURL(value string) string {
+	return h.mapChallengeValue(value, false)
+}
+
+// ServeChallengeHTTP serves untrusted content only at a dedicated challenge
+// origin. It never accepts the operator bearer/cookie as view authorization.
+// The caller must additionally enforce the listener's loopback-client rule.
+func (h *OperatorHandler) ServeChallengeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	requestOrigin := &url.URL{Scheme: "http", Host: r.Host}
+	if r.TLS != nil {
+		requestOrigin.Scheme = "https"
+	}
+	id := challengeIDFromHost(requestOrigin.Hostname())
+	expected := h.challengeOrigin(id)
+	if expected == nil || r.Host != expected.Host || requestOrigin.Scheme != expected.Scheme ||
+		(r.URL.IsAbs() && (r.URL.Scheme != expected.Scheme || r.URL.Host != expected.Host)) ||
+		r.URL.EscapedPath() != challengeViewPath {
+		http.NotFound(w, r)
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(query) != 1 || len(query["view"]) != 1 || len(query.Get("view")) != 64 {
+		http.Error(w, "challenge view authorization required", http.StatusForbidden)
+		return
+	}
+	key := hashToken(query.Get("view"))
+	h.viewMu.Lock()
+	view, ok := h.views[key]
+	if ok && !time.Now().Before(view.expires) {
+		delete(h.views, key)
+		ok = false
+	}
+	h.viewMu.Unlock()
+	if !ok || view.id != id {
+		http.Error(w, "challenge view authorization required", http.StatusForbidden)
+		return
+	}
+	ch, ok := h.queue.activeChallenge(id)
+	if !ok {
+		http.Error(w, "challenge not active", http.StatusGone)
+		return
+	}
+	headers := ch.ResponseHeaders.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	base, _ := url.Parse(ch.PageURL)
+	if h.challengeHeaders != nil {
+		if err := h.challengeHeaders(headers, base); err != nil {
+			http.Error(w, "unsupported challenge response headers", http.StatusBadGateway)
+			return
+		}
+	}
+	// Original enforcement headers, including every CSP policy and XFO, remain.
+	// Hop-by-hop metadata, target cookies and validators for original bytes do
+	// not describe this private, instrumented document representation.
+	for _, connection := range headers.Values("Connection") {
+		for _, name := range strings.Split(connection, ",") {
+			headers.Del(strings.TrimSpace(name))
+		}
+	}
+	for _, name := range []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Set-Cookie", "Set-Cookie2", "Content-Length", "Content-Encoding", "ETag", "Last-Modified", "Content-MD5", "Digest", "Content-Digest", "Repr-Digest"} {
+		headers.Del(name)
+	}
+	for name, values := range headers {
+		w.Header()[name] = append([]string(nil), values...)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	contentType := ch.ContentType
+	if contentType == "" {
+		contentType = "text/html; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", contentType)
+	body := ch.PageBody
+	mediaType, mediaParams, mediaErr := mime.ParseMediaType(contentType)
+	charset := strings.ToLower(mediaParams["charset"])
+	canRewrite := mediaErr == nil && mediaType == "text/html" &&
+		(charset == "" || charset == "utf-8" || charset == "us-ascii") &&
+		utf8.Valid(body) && !strings.HasPrefix(string(body), "\xef\xbb\xbf")
+	if canRewrite {
+		if base != nil {
+			body = rewriteCaptchaScriptHost(body, "host="+url.QueryEscape(base.Host))
+		}
+		if h.routeResources {
+			if h.providerHTML != nil {
+				body = h.providerHTML(body, base, ch.ResponseHeaders.Clone())
+			} else {
+				body = h.matcher.RewriteProviderHTML(body, base, id)
+			}
+		}
+		// A bridge inserted ahead of meta CSP would evade that policy. Keep all
+		// documents with original policies uninstrumented until their exact
+		// execution permission can be replicated; never borrow a nonce/grant.
+		if !providerDocumentHasPolicy(ch.PageBody, ch.ResponseHeaders) {
+			body = h.injectRuntime(body, base, r, id, h.challengeFields(ch.ProviderName))
+		}
+	}
+	w.Header().Set("X-Blinder-View", "transformed")
+	w.Header().Set("X-Blinder-Original-Body-Bytes", strconv.Itoa(len(ch.PageBody)))
+	w.Header().Set("X-Blinder-Rewritten-Body-Bytes", strconv.Itoa(len(body)))
+	sizeMatch := "different"
+	if len(body) == len(ch.PageBody) {
+		sizeMatch = "exact"
+	}
+	w.Header().Set("X-Blinder-Body-Size-Match", sizeMatch)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
 }
 
 func (h *OperatorHandler) completeChallenge(w http.ResponseWriter, r *http.Request, id string) {

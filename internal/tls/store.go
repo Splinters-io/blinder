@@ -151,7 +151,7 @@ func prepare(dir, alias, listen string, now time.Time, extraNames ...string) (*M
 			action = "renewed"
 		}
 		for _, name := range certificateNames(alias, host, extraNames...) {
-			if leaf.VerifyHostname(name) != nil {
+			if !certificateCoversName(leaf, name) {
 				action = "reissued for endpoint names"
 			}
 		}
@@ -183,6 +183,26 @@ func prepare(dir, alias, listen string, now time.Time, extraNames ...string) (*M
 		}
 	}
 	return material(cert, filepath.Join(dir, "certificate.pem"), host, action), nil
+}
+
+// VerifyHostname expects a concrete endpoint. For a planned wildcard, require
+// that SAN explicitly and verify an example endpoint: a certificate for one
+// example hostname must not be mistaken for coverage of every challenge ID.
+func certificateCoversName(leaf *x509.Certificate, name string) bool {
+	if strings.HasPrefix(name, "*.") {
+		found := false
+		for _, san := range leaf.DNSNames {
+			if strings.EqualFold(san, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+		name = "00000000000000000000000000000000." + strings.TrimPrefix(name, "*.")
+	}
+	return leaf.VerifyHostname(name) == nil
 }
 
 func material(cert tls.Certificate, path, host, action string) *Material {

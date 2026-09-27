@@ -17,6 +17,7 @@ import (
 
 	"github.com/Splinters-io/blinder/internal/captcha"
 	"github.com/Splinters-io/blinder/internal/config"
+	"github.com/Splinters-io/blinder/internal/endpoint"
 	"github.com/Splinters-io/blinder/internal/proxy"
 	"github.com/Splinters-io/blinder/internal/scrub"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
@@ -355,10 +356,14 @@ running:
 // certificateExtraAliases is used once for default-store selection, certificate
 // preparation, endpoint advice and version-key storage. Provider aliases are
 // separate from target ExtraOrigins and are needed only when Tor routes them.
+// Isolated challenge origins are needed for CAPTCHA in either routing mode.
 func certificateExtraAliases(cfg *config.Config) ([]string, error) {
 	var aliases []string
 	for _, u := range cfg.ExtraOrigins {
 		aliases = append(aliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
+	}
+	if cfg.Captcha != nil && cfg.Captcha.Matcher != nil {
+		aliases = append(aliases, endpoint.ChallengeWildcard)
 	}
 	if cfg.UseTor() && cfg.Captcha != nil && cfg.Captcha.Matcher != nil {
 		listen := cfg.ListenAddr

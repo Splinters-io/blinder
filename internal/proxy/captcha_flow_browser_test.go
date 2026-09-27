@@ -74,12 +74,32 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 	if os.Getenv("BLINDER_REVIEW_BROWSER") != "1" {
 		t.Skip("requires local browser")
 	}
+	direct := os.Getenv("BLINDER_REVIEW_CAPTCHA_DIRECT") == "1"
+	// Third-party Lax cookies are a denial control, not a valid completion
+	// precondition. The positive provider uses an opaque response token and no
+	// cookie; target retry cookies remain required in both modes.
+	laxCookie := os.Getenv("BLINDER_REVIEW_CAPTCHA_PROFILE") == "lax"
+	type directResult struct {
+		Type  string `json:"type"`
+		Token string `json:"token"`
+		Error string `json:"error"`
+	}
+	type isolationResult struct {
+		ParentDenied        bool   `json:"parentDenied"`
+		ParentError         string `json:"parentError"`
+		OperatorFetchDenied bool   `json:"operatorFetchDenied"`
+		FetchError          string `json:"fetchError"`
+	}
+	directDone := make(chan directResult, 1)
 	var mu sync.Mutex
 	var requests []string
 	var providerRequests []captchaFlowRequest
 	var relayRequests []captchaFlowRelayRequest
 	var retry map[string]string
 	var challengeID, operatorURL string
+	var challengeOperatorOrigin string
+	var isolationProbeStatus int
+	var isolationProbeCount int
 	var resultStatus int
 	var resultBody, resultError string
 	var completed bool
@@ -93,15 +113,18 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 		providerObserved := append([]captchaFlowRequest(nil), providerRequests...)
 		relayObserved := append([]captchaFlowRelayRequest(nil), relayRequests...)
 		challengeObserved := challengeID
+		probeStatus, probeCount := isolationProbeStatus, isolationProbeCount
 		retryObserved := make(map[string]string, len(retry))
 		for k, v := range retry {
 			retryObserved[k] = v
 		}
 		mu.Unlock()
 		evidence := map[string]any{
+			"profile":   map[bool]string{true: "cross-site Lax cookie denial", false: "stateless opaque-token completion"}[laxCookie],
 			"completed": completed, "passed": !t.Failed() && completed, "termination": termination,
 			"status": resultStatus, "body": resultBody, "error": resultError,
 			"operatorURL": operatorURL, "challengeID": challengeObserved, "retry": retryObserved,
+			"isolationProbeStatus": probeStatus, "isolationProbeCount": probeCount,
 			"providerRequests": observed, "providerObservations": providerObserved,
 			"relayRequests": relayObserved, "socksDestinations": socksDestinations(),
 			"transport": "synthetic local SOCKS; HTTP localhost browser endpoints; no live Tor or TLS trust acceptance",
@@ -111,7 +134,13 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 			t.Errorf("encode browser evidence: %v", err)
 			return
 		}
-		if err := os.WriteFile("/private/tmp/blinder-flow-browser-result.json", encoded, 0600); err != nil {
+		resultPath := "/private/tmp/blinder-flow-browser-result.json"
+		if direct {
+			evidence["transport"] = "direct browser reference; same original target/provider origins and cookie policy; no proxy or SOCKS"
+			encoded, _ = json.MarshalIndent(evidence, "", "  ")
+			resultPath = "/private/tmp/blinder-flow-direct-browser-result.json"
+		}
+		if err := os.WriteFile(resultPath, encoded, 0600); err != nil {
 			t.Errorf("write browser evidence: %v", err)
 		}
 		t.Log(string(encoded))
@@ -128,7 +157,9 @@ func TestCaptchaFlowBrowser(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/widget/start":
-			http.SetCookie(w, &http.Cookie{Name: "provider_session", Value: "fixture-session", Path: "/widget/", HttpOnly: true})
+			if laxCookie {
+				http.SetCookie(w, &http.Cookie{Name: "provider_session", Value: "fixture-session", Path: "/widget/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+			}
 			http.Redirect(w, r, "frame?stage=one", 302)
 		case "/widget/frame":
 			w.Header().Set("Content-Type", "text/html")
@@ -155,7 +186,7 @@ if(!result.ok)throw Error(method+' '+result.status);
 await new Promise((resolve,reject)=>{const x=new XMLHttpRequest();x.open('GET','status');x.withCredentials=true;x.onload=()=>x.status===200?resolve():reject(Error('XHR '+x.status));x.onerror=reject;x.send()});
 await inner;document.body.insertAdjacentHTML('beforeend','<p>Provider APIs and nested frame passed</p>');
 parent.postMessage({type:'fixture-token',token:data.token},'*');
-}catch(e){document.body.insertAdjacentHTML('beforeend','<pre>FIXTURE ERROR: '+String(e)+'</pre>')}})();`, origin)
+}catch(e){document.body.insertAdjacentHTML('beforeend','<pre>FIXTURE ERROR: '+String(e)+'</pre>');parent.postMessage({type:'fixture-error',error:String(e)},'*')}})();`, origin)
 		case "/widget/dynamic.js":
 			w.Header().Set("Content-Type", "application/javascript")
 			io.WriteString(w, "window.fixtureDynamic=true;")
@@ -165,7 +196,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		case "/widget/verify":
 			b, _ := io.ReadAll(r.Body)
 			cookie, err := r.Cookie("provider_session")
-			if r.Method != "POST" || string(b) != `{"answer":"synthetic"}` || err != nil || cookie.Value != "fixture-session" || len(r.URL.Query()["mode"]) != 2 {
+			if r.Method != "POST" || string(b) != `{"answer":"synthetic"}` || (laxCookie && (err != nil || cookie.Value != "fixture-session")) || len(r.URL.Query()["mode"]) != 2 {
 				http.Error(w, "provider POST/session failed", 400)
 				return
 			}
@@ -173,7 +204,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 			json.NewEncoder(w).Encode(map[string]string{"token": captchaFlowSolution})
 		case "/widget/status":
 			cookie, err := r.Cookie("provider_session")
-			if err != nil || cookie.Value != "fixture-session" {
+			if laxCookie && (err != nil || cookie.Value != "fixture-session") {
 				http.Error(w, "provider XHR session lost", 400)
 				return
 			}
@@ -183,7 +214,7 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 				method := strings.TrimPrefix(r.URL.Path, "/widget/method/")
 				var body struct{ Method string }
 				cookie, err := r.Cookie("provider_session")
-				if json.NewDecoder(r.Body).Decode(&body) != nil || body.Method != method || r.Method != method || err != nil || cookie.Value != "fixture-session" {
+				if json.NewDecoder(r.Body).Decode(&body) != nil || body.Method != method || r.Method != method || (laxCookie && (err != nil || cookie.Value != "fixture-session")) {
 					http.Error(w, "custom method/body/session changed", 400)
 					return
 				}
@@ -198,6 +229,26 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	pu.Host = "localhost:" + pu.Port()
 	providerOrigin = pu.String()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if direct && r.URL.Path == "/review-direct" {
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Cache-Control", "no-store")
+			origin, _ := json.Marshal(providerOrigin)
+			fmt.Fprintf(w, `<!doctype html><title>Direct CAPTCHA reference</title><h1>Direct provider reference</h1><p>Original target/provider origins and cookie policy; no Blinder rewriting.</p><iframe id="provider" src="%s/widget/start" style="width:90%%;height:500px"></iframe><pre id="result">Waiting for provider</pre><script>addEventListener('message',async e=>{if(e.origin!==%s||e.source!==document.getElementById('provider').contentWindow||!e.data||!['fixture-token','fixture-error'].includes(e.data.type))return;document.getElementById('result').textContent=JSON.stringify(e.data);await fetch('/review-direct-result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(e.data)})});</script>`, providerOrigin, origin)
+			return
+		}
+		if direct && r.URL.Path == "/review-direct-result" && r.Method == http.MethodPost {
+			var result directResult
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&result); err != nil {
+				http.Error(w, "invalid fixture result", http.StatusBadRequest)
+				return
+			}
+			select {
+			case directDone <- result:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.URL.Path != "/protected" {
 			http.NotFound(w, r)
 			return
@@ -207,16 +258,34 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 			w.Header().Set("Content-Type", "text/html")
 			http.SetCookie(w, &http.Cookie{Name: "challenge_stage", Value: "two", Path: "/"})
 			w.WriteHeader(403)
-			fmt.Fprintf(w, `<!doctype html><p>Verify you are human — synthetic fixture only</p><form action="/protected" method="POST"><input type="hidden" name="csrf" value="fresh"></form><iframe id="provider" src="%s/widget/start"></iframe><script>addEventListener('message',e=>{if(e.source!==document.getElementById('provider').contentWindow||!e.data||e.data.type!=='fixture-token')return;const field=document.createElement('input');field.type='hidden';field.name='fixture-response';field.value=e.data.token;document.body.appendChild(field);const p=document.createElement('p');p.textContent='Synthetic provider completed';document.body.appendChild(p)});</script>`, providerOrigin)
+			mu.Lock()
+			operatorOriginJSON, _ := json.Marshal(challengeOperatorOrigin)
+			mu.Unlock()
+			fmt.Fprintf(w, `<!doctype html><p>Verify you are human — synthetic fixture only</p><form action="/protected" method="POST"><input type="hidden" name="csrf" value="fresh"></form><iframe id="provider" src="%s/widget/start"></iframe><script>addEventListener('message',async e=>{
+if(e.source!==document.getElementById('provider').contentWindow||!e.data)return;
+if(e.data.type==='fixture-error'){parent.postMessage(e.data,'*');return;}
+if(e.data.type!=='fixture-token')return;
+const isolation={parentDenied:false,parentError:'',operatorFetchDenied:false,fetchError:''};
+try{void parent.document.body}catch(error){isolation.parentDenied=error.name==='SecurityError';isolation.parentError=error.name;}
+try{const response=await fetch(%s+'/__blinder/captcha/',{credentials:'include'});await response.text();}
+catch(error){isolation.operatorFetchDenied=error.name==='TypeError';isolation.fetchError=error.name;}
+const telemetry=document.createElement('input');telemetry.type='hidden';telemetry.name='fixture-isolation';telemetry.value=JSON.stringify(isolation);document.body.appendChild(telemetry);
+if(!isolation.parentDenied||!isolation.operatorFetchDenied){const failure=document.createElement('pre');failure.textContent='ISOLATION FAILURE: '+JSON.stringify(isolation);document.body.appendChild(failure);return;}
+const field=document.createElement('input');field.type='hidden';field.name='fixture-response';field.value=e.data.token;document.body.appendChild(field);const p=document.createElement('p');p.textContent='Synthetic provider and operator isolation completed';document.body.appendChild(p)});</script>`, providerOrigin, operatorOriginJSON)
 			return
 		}
 		a, _ := r.Cookie("target_session")
 		b, _ := r.Cookie("challenge_stage")
 		mu.Lock()
-		retry = map[string]string{"method": r.Method, "username": r.Form.Get("username"), "csrf": r.Form.Get("csrf"), "token": r.Form.Get("fixture-response"), "cookies": r.Header.Get("Cookie")}
+		retry = map[string]string{"method": r.Method, "username": r.Form.Get("username"), "csrf": r.Form.Get("csrf"), "token": r.Form.Get("fixture-response"), "isolation": r.Form.Get("fixture-isolation"), "cookies": r.Header.Get("Cookie")}
 		mu.Unlock()
 		if r.Form.Get("fixture-response") != captchaFlowSolution {
 			http.Error(w, "invalid synthetic solution", http.StatusForbidden)
+			return
+		}
+		var isolation isolationResult
+		if json.Unmarshal([]byte(r.Form.Get("fixture-isolation")), &isolation) != nil || !isolation.ParentDenied || isolation.ParentError != "SecurityError" || !isolation.OperatorFetchDenied || isolation.FetchError != "TypeError" {
+			http.Error(w, "operator isolation was not demonstrated", http.StatusForbidden)
 			return
 		}
 		if r.Method != "POST" || r.Form.Get("username") != "fixture-user" || r.Form.Get("csrf") != "fresh" || a == nil || a.Value != "one" || b == nil || b.Value != "two" {
@@ -226,10 +295,32 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		io.WriteString(w, "Original request resumed")
 	}))
 	defer upstream.Close()
+	if direct {
+		operatorURL = upstream.URL + "/review-direct"
+		if err := os.WriteFile("/private/tmp/blinder-flow-direct-browser-url.txt", []byte(operatorURL), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("direct reference URL: %s", operatorURL)
+		select {
+		case result := <-directDone:
+			completed = true
+			termination = "direct provider returned browser result"
+			resultBody, resultError = result.Token, result.Error
+			if laxCookie && (result.Type != "fixture-error" || result.Error != "Error: POST 400") {
+				t.Errorf("direct Lax denial changed: %+v", result)
+			} else if !laxCookie && (result.Type != "fixture-token" || result.Token != captchaFlowSolution) {
+				t.Errorf("direct reference did not complete provider APIs: %+v", result)
+			}
+		case <-time.After(150 * time.Second):
+			termination = "direct browser deadline exceeded"
+			t.Fatal("direct browser reference did not finish")
+		}
+		return
+	}
 	tu, _ := url.Parse(upstream.URL)
 	socks, seen := captchaRoutingSOCKS(t, map[string]bool{tu.Host: true, pu.Host: true})
 	socksDestinations = seen
-	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      opaque_fields: [fixture-response]\n", providerOrigin))
+	capcfg := captchaDeliveryConfig(t, fmt.Sprintf("version: 1\ncaptcha:\n  custom:\n    - name: synthetic\n      resource_origins: [%s]\n      opaque_fields: [fixture-response, fixture-isolation]\n", providerOrigin))
 	mux := http.NewServeMux()
 	server := httptest.NewUnstartedServer(mux)
 	defer server.Close()
@@ -272,6 +363,20 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		t.Fatal(err)
 	}
 	cleanup := make(chan struct{}, 1)
+	if laxCookie {
+		mux.HandleFunc("/review-provider-result", func(w http.ResponseWriter, r *http.Request) {
+			var result directResult
+			if r.Method != http.MethodPost || json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&result) != nil {
+				http.Error(w, "invalid fixture result", http.StatusBadRequest)
+				return
+			}
+			select {
+			case directDone <- result:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
 	mux.HandleFunc("/review-bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		token, _ := json.Marshal("Bearer " + s.CaptchaOperatorToken())
@@ -289,13 +394,50 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		}
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		activeID := challengeID
+		operatorOrigin := challengeOperatorOrigin
+		mu.Unlock()
+		viewOrigin := "http://" + activeID + captcha.ChallengeHostSuffix + ":" + strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port)
+		if r.Host == strings.TrimPrefix(operatorOrigin, "http://") && r.URL.Path == "/__blinder/captcha/" && r.Header.Get("Origin") == viewOrigin {
+			recorded := httptest.NewRecorder()
+			s.server.Handler.ServeHTTP(recorded, r)
+			mu.Lock()
+			isolationProbeCount++
+			isolationProbeStatus = recorded.Code
+			mu.Unlock()
+			for key, values := range recorded.Header() {
+				w.Header()[key] = values
+			}
+			w.WriteHeader(recorded.Code)
+			w.Write(recorded.Body.Bytes())
+			return
+		}
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/__blinder/captcha/challenge/") {
 			_, cookieErr := r.Cookie(captcha.OperatorCookieName)
 			t.Logf("operator completion request: origin=%q dest=%q cookie=%t", r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Dest"), cookieErr == nil)
 		}
+		if laxCookie && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/__blinder/captcha/challenge/") {
+			// Test-only observation of the visible child error; it grants no
+			// provider access and never submits a solution or changes its value.
+			recorded := httptest.NewRecorder()
+			s.server.Handler.ServeHTTP(recorded, r)
+			for key, values := range recorded.Header() {
+				w.Header()[key] = values
+			}
+			w.Header().Del("Content-Length")
+			w.WriteHeader(recorded.Code)
+			w.Write(recorded.Body.Bytes())
+			io.WriteString(w, `<script>addEventListener('message',async e=>{const frame=document.querySelector('iframe');if(!frame||e.source!==frame.contentWindow||e.origin!==new URL(frame.src).origin||!e.data||e.data.type!=='fixture-error')return;const p=document.createElement('pre');p.textContent='Observed provider denial: '+e.data.error;document.body.appendChild(p);await fetch('/review-provider-result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(e.data)})});</script>`)
+			return
+		}
 		s.server.Handler.ServeHTTP(w, r)
 	})
-	if err := s.captchaOperator.SetOperatorOrigin("http://" + captcha.OperatorHost + ":" + strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port)); err != nil {
+	configuredOperatorOrigin := "http://" + captcha.OperatorHost + ":" + strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port)
+	mu.Lock()
+	challengeOperatorOrigin = configuredOperatorOrigin
+	mu.Unlock()
+	if err := s.captchaOperator.SetOperatorOrigin(configuredOperatorOrigin); err != nil {
 		t.Fatal(err)
 	}
 	server.Start()
@@ -335,6 +477,48 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 	}
 	termination = "waiting for browser completion"
 	select {
+	case got := <-directDone:
+		completed = true
+		termination = "provider denial observed without completion"
+		resultError = got.Error
+		if !laxCookie || got.Type != "fixture-error" || got.Error != "Error: POST 400" {
+			t.Errorf("proxied denial differs from direct HTTP error: %+v", got)
+		}
+		mu.Lock()
+		observed := append([]captchaFlowRequest(nil), providerRequests...)
+		relayed := append([]captchaFlowRelayRequest(nil), relayRequests...)
+		mu.Unlock()
+		counts := make(map[string]int)
+		for _, row := range observed {
+			encoded, _ := json.Marshal(row)
+			counts[string(encoded)]++
+			if row.PreflightMethod != "" || row.ProviderSession != "" || row.Authorization || row.OperatorCredential || row.TargetCredential {
+				t.Errorf("denial request changed controls or exported credentials: %+v", row)
+			}
+		}
+		deniedPOST := false
+		for _, row := range relayed {
+			encoded, _ := json.Marshal(row.Request)
+			counts[string(encoded)]--
+			if row.Request.Method == "POST" && row.Request.URI == "/widget/verify?mode=one&mode=two" {
+				deniedPOST = row.Status == http.StatusBadRequest && row.Error == ""
+			}
+		}
+		if !deniedPOST {
+			t.Error("provider's HTTP 400 POST denial did not traverse relay")
+		}
+		for row, count := range counts {
+			if count != 0 {
+				t.Errorf("provider request bypassed relay or changed: %s (difference %d)", row, count)
+			}
+		}
+		select {
+		case <-cleanup:
+		case <-time.After(25 * time.Second):
+			t.Log("cleanup navigation not received")
+		}
+		cancel()
+		<-done
 	case got := <-done:
 		completed = true
 		termination = "original request returned"
@@ -347,12 +531,18 @@ parent.postMessage({type:'fixture-token',token:data.token},'*');
 		providerObserved := append([]captchaFlowRequest(nil), providerRequests...)
 		relayObserved := append([]captchaFlowRelayRequest(nil), relayRequests...)
 		retriedToken := retry["token"]
+		isolationTelemetry := retry["isolation"]
+		probeStatus, probeCount := isolationProbeStatus, isolationProbeCount
 		mu.Unlock()
 		if got.err != nil || got.status != 200 || got.body != "Original request resumed" {
 			t.Errorf("end-to-end flow failed: %v status=%d body=%q", got.err, got.status, got.body)
 		}
 		if retriedToken != captchaFlowSolution {
 			t.Errorf("upstream retry did not receive the exact synthetic provider solution: got %q", retriedToken)
+		}
+		var isolation isolationResult
+		if json.Unmarshal([]byte(isolationTelemetry), &isolation) != nil || !isolation.ParentDenied || isolation.ParentError != "SecurityError" || !isolation.OperatorFetchDenied || isolation.FetchError != "TypeError" || probeCount != 1 || probeStatus != http.StatusForbidden {
+			t.Errorf("raw challenge did not demonstrate operator isolation: telemetry=%q, probe requests=%d status=%d", isolationTelemetry, probeCount, probeStatus)
 		}
 		for _, want := range []string{"GET /widget/start", "GET /widget/frame?stage=one", "GET /widget/api.js?render=explicit&onload=ready", "GET /widget/dynamic.js", "GET /widget/inner", "POST /widget/verify?mode=one&mode=two", "GET /widget/status", "PUT /widget/method/PUT", "PATCH /widget/method/PATCH", "DELETE /widget/method/DELETE", "OPTIONS /widget/method/OPTIONS", "PROPFIND /widget/method/PROPFIND", "vendor.sync /widget/method/vendor.sync"} {
 			found := false

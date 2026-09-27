@@ -146,6 +146,9 @@ func New(
 	if strings.EqualFold(strings.TrimSuffix(alias, "."), endpoint.OperatorHost) {
 		return nil, errors.New("alias is reserved for the local operator interface")
 	}
+	if endpoint.IsChallengeHost(alias) {
+		return nil, errors.New("alias is reserved for isolated CAPTCHA challenge content")
+	}
 
 	tokensCopy := make([]string, len(tokens))
 	copy(tokensCopy, tokens)

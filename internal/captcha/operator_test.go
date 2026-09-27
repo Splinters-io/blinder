@@ -81,6 +81,7 @@ func TestOperatorShowChallenge(t *testing.T) {
 	h, q, _, token := testOperatorSetup(t)
 
 	id := q.Submit("hcaptcha", "https://example.com/login", []byte("<html>captcha</html>"), "text/html")
+	completionWaiter(t, q, id)
 
 	r := operatorRequest("GET", "/__blinder/captcha/challenge/"+id, token, nil)
 	w := httptest.NewRecorder()
@@ -168,6 +169,7 @@ func TestOperatorServeChallengePage(t *testing.T) {
 
 	pageBody := []byte("<html><body>please solve captcha</body></html>")
 	id := q.Submit("hcaptcha", "https://example.com/login", pageBody, "text/html; charset=utf-8")
+	completionWaiter(t, q, id)
 
 	r := operatorRequest("GET", "/__blinder/captcha/page/"+id, token, nil)
 	w := httptest.NewRecorder()
@@ -176,8 +178,8 @@ func TestOperatorServeChallengePage(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status=%d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), `sandbox="allow-scripts allow-forms"`) || !strings.Contains(w.Body.String(), "please solve captcha") || strings.Contains(w.Body.String(), string(pageBody)) {
-		t.Fatalf("challenge page is not an opaque wrapper")
+	if !strings.Contains(w.Body.String(), `sandbox="allow-scripts allow-forms allow-same-origin"`) || strings.Contains(w.Body.String(), "please solve captcha") || strings.Contains(w.Body.String(), "srcdoc=") {
+		t.Fatalf("challenge page is not an isolated-origin wrapper")
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Fatalf("wrong content type: %s", ct)

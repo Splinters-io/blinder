@@ -51,7 +51,7 @@ function setup(automatic, value = '') {
   const setInterval = callback => { const timer = {callback, active: true}; state.timers.push(timer); return timer; };
   const clearInterval = timer => { if (timer) timer.active = false; };
   new Function('c', 'document', 'window', 'MutationObserver', 'HTMLFormElement', 'setInterval', 'clearInterval', source)(
-    {session: 'fixture-session', fields: ['fixture-response'], automatic}, document, window, Observer, Form, setInterval, clearInterval);
+    {session: 'fixture-session', fields: ['fixture-response'], automatic, origin: 'https://fixture.blinder-challenge.localhost'}, document, window, Observer, Form, setInterval, clearInterval);
   const fire = (target, name, event = {}) => {
     event.preventDefault = () => { event.prevented = true; };
     for (const fn of target.events[name] || []) fn(event);
@@ -65,7 +65,7 @@ function setup(automatic, value = '') {
 
 {
   const h = setup(false);
-  const message = {source: h.frame.contentWindow, data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
+  const message = {source: h.frame.contentWindow, origin: 'https://fixture.blinder-challenge.localhost', data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
   h.windowEvent('message', {...message, source: {}});
   assert.equal(h.field.value, '', 'untrusted frame filled the form');
   h.windowEvent('message', message);
@@ -88,10 +88,15 @@ function setup(automatic, value = '') {
 
 {
   const h = setup(true);
-  const message = {source: h.frame.contentWindow, data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
+  const message = {source: h.frame.contentWindow, origin: 'https://fixture.blinder-challenge.localhost', data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
   assert.equal(h.state.submissions.length, 0);
   h.windowEvent('message', {...message, source: {}});
+  h.windowEvent('message', {...message, origin: 'null'});
+  h.windowEvent('message', {...message, origin: 'https://other.blinder-challenge.localhost'});
+  h.windowEvent('message', {...message, origin: 'https://fixture.blinder-challenge.localhost:8099'});
   h.windowEvent('message', {...message, data: {...message.data, session: 'other-session'}});
+  h.windowEvent('message', {...message, data: {...message.data, fields: {'unconfigured-response': 'solved'}}});
+  assert.equal(h.field.value, '', 'foreign origin/session/unconfigured fields modified the trusted form');
   assert.equal(h.state.submissions.length, 0, 'untrusted window/session submitted automatically');
   h.windowEvent('message', message);
   assert.equal(h.state.submissions.length, 1);
@@ -115,7 +120,7 @@ function setup(automatic, value = '') {
 
 {
   const h = setup(true);
-  const message = {source: h.frame.contentWindow, data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
+  const message = {source: h.frame.contentWindow, origin: 'https://fixture.blinder-challenge.localhost', data: {type: 'blinder-fields', session: 'fixture-session', fields: {'fixture-response': 'solved'}}};
   h.state.throwNext = true;
   h.windowEvent('message', message);
   assert.match(h.status().textContent, /could not start/);

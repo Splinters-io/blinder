@@ -95,7 +95,7 @@ function publishFields() {
     if ((cfg.fields || []).includes(element.name) && element.value && element.value.length <= 65536) fields[element.name]=element.value;
   }
   const serialized=JSON.stringify(fields);
-  if(serialized!==lastFields){lastFields=serialized;window.parent.postMessage({type:'blinder-fields',session:cfg.session,fields},'*');}
+  if(serialized!==lastFields&&cfg.parentOrigin){lastFields=serialized;window.parent.postMessage({type:'blinder-fields',session:cfg.session,fields},cfg.parentOrigin);}
 }
 document.addEventListener('input',publishFields);
 document.addEventListener('change',publishFields);

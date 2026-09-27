@@ -126,6 +126,7 @@ func TestOperatorCompletionAPIKeepsJSONAndFetchAuthBoundary(t *testing.T) {
 func TestOperatorCompletionPagesUseNativeSubmissionWithoutCredentials(t *testing.T) {
 	h, q, _, token := testOperatorSetup(t)
 	id := q.Submit("hcaptcha", "https://example.com/login", []byte(`<html><body><input name="h-captcha-response"></body></html>`), "text/html")
+	completionWaiter(t, q, id)
 	for _, path := range []string{"/challenge/", "/solve/"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, operatorRequest(http.MethodGet, "/__blinder/captcha"+path+id, token, nil))

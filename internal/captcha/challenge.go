@@ -4,22 +4,24 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"net/http"
 	"sync"
 	"time"
 )
 
 type Challenge struct {
-	ID           string
-	ProviderName string
-	PageURL      string
-	PageBody     []byte
-	ContentType  string
-	FormAction   string
-	FormMethod   string
-	FormFields   map[string]string
-	CreatedAt    time.Time
-	CompletedAt  time.Time
-	Solution     map[string]string
+	ID              string
+	ProviderName    string
+	PageURL         string
+	PageBody        []byte
+	ContentType     string
+	ResponseHeaders http.Header
+	FormAction      string
+	FormMethod      string
+	FormFields      map[string]string
+	CreatedAt       time.Time
+	CompletedAt     time.Time
+	Solution        map[string]string
 }
 
 type completionSignal struct {
@@ -124,6 +126,30 @@ func (q *ChallengeQueue) SetFormFields(id string, fields map[string]string) {
 	ch.FormFields = cp
 }
 
+// SetResponseHeaders retains the original policies for the isolated operator
+// view. Neither callers nor returned Challenge snapshots can mutate them.
+func (q *ChallengeQueue) SetResponseHeaders(id string, headers http.Header) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if ch, ok := q.pending[id]; ok {
+		ch.ResponseHeaders = headers.Clone()
+	}
+}
+
+func (q *ChallengeQueue) activeChallenge(id string) (*Challenge, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	ch, ok := q.pending[id]
+	if !ok || !q.waiters[id] {
+		return nil, false
+	}
+	if q.isExpired(ch) {
+		q.removePendingLocked(id)
+		return nil, false
+	}
+	return copyChallenge(ch), true
+}
+
 func (q *ChallengeQueue) Pending() []*Challenge {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -179,16 +205,17 @@ func (q *ChallengeQueue) Complete(id string, solution map[string]string) bool {
 	}
 
 	completed := &Challenge{
-		ID:           ch.ID,
-		ProviderName: ch.ProviderName,
-		PageURL:      ch.PageURL,
-		ContentType:  ch.ContentType,
-		FormAction:   ch.FormAction,
-		FormMethod:   ch.FormMethod,
-		FormFields:   fieldsCopy,
-		CreatedAt:    ch.CreatedAt,
-		CompletedAt:  time.Now(),
-		Solution:     solCopy,
+		ID:              ch.ID,
+		ProviderName:    ch.ProviderName,
+		PageURL:         ch.PageURL,
+		ContentType:     ch.ContentType,
+		ResponseHeaders: ch.ResponseHeaders.Clone(),
+		FormAction:      ch.FormAction,
+		FormMethod:      ch.FormMethod,
+		FormFields:      fieldsCopy,
+		CreatedAt:       ch.CreatedAt,
+		CompletedAt:     time.Now(),
+		Solution:        solCopy,
 	}
 
 	delete(q.pending, id)
@@ -319,6 +346,10 @@ func (q *ChallengeQueue) expireLocked() {
 func copyChallenge(ch *Challenge) *Challenge {
 	cp := *ch
 	cp.PageBody = append([]byte(nil), ch.PageBody...)
+	cp.ResponseHeaders = ch.ResponseHeaders.Clone()
+	if ch.FormFields != nil {
+		cp.FormFields = copySolution(ch.FormFields)
+	}
 	if ch.Solution != nil {
 		cp.Solution = copySolution(ch.Solution)
 	}

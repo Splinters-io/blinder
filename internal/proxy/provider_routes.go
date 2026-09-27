@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,15 +19,19 @@ import (
 // Configure before serving. Provider origins deliberately never enter the
 // target route table, cookie-restoration gate, response cache or SRI pipeline.
 func (s *Server) configureProviderRoutes(scheme string) error {
-	if !s.cfg.UseTor() || s.cfg.Captcha == nil {
+	if s.cfg.Captcha == nil {
 		return nil
 	}
 	if _, port, _ := net.SplitHostPort(s.cfg.ListenAddr); port == "0" {
 		return nil
 	}
-	routes, err := captcha.NewProviderRoutes(s.captchaMatcher, scheme, s.cfg.ListenAddr)
-	if err != nil {
-		return err
+	var routes *captcha.ProviderRoutes
+	if s.cfg.UseTor() {
+		var err error
+		routes, err = captcha.NewProviderRoutes(s.captchaMatcher, scheme, s.cfg.ListenAddr)
+		if err != nil {
+			return err
+		}
 	}
 	policyOrigins := make(map[string]string)
 	for _, route := range routes.Routes() {
@@ -42,12 +47,14 @@ func (s *Server) configureProviderRoutes(scheme string) error {
 	s.origins = s.origins.WithLocalScheme(scheme).WithPolicyOrigins(policyOrigins)
 	mapTargetURL := func(value string, upstream bool) string {
 		if upstream {
+			value = s.captchaOperator.MapChallengeURL(value)
 			return s.origins.Rewrite(value, false)
 		}
 		return s.origins.RewriteUpstreamURL(value)
 	}
 	mapTargetOrigin := func(value string, upstream bool) string {
 		if upstream {
+			value = s.captchaOperator.MapChallengeOrigin(value)
 			return s.origins.Rewrite(value, true)
 		}
 		return s.origins.RewriteResponseOrigin(value, "")
@@ -94,9 +101,44 @@ func (s *Server) configureProviderRoutes(scheme string) error {
 		}
 		return raw, false
 	}
-	s.captchaOperator.SetProviderRoutes(routes, func(body []byte, base *url.URL) []byte {
-		return rewriter.RewriteOpaqueHTML(body, base, nil, mapDocumentURL, func(policy string) string { return mapPolicy(policy, base) })
+	s.captchaOperator.SetChallengeHeaderRewriter(func(headers http.Header, base *url.URL) error {
+		if err := rewriteChallengeHeaders(headers, base, func(raw string, base *url.URL) (string, bool) {
+			u, err := url.Parse(raw)
+			if err != nil || u.User != nil || u.Opaque != "" || base == nil {
+				return raw, false
+			}
+			u = base.ResolveReference(u)
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return raw, false
+			}
+			if mapped, ok := routes.RewriteURL(u.String(), nil); ok {
+				return mapped, true
+			}
+			if s.origins.IsKnownFullOrigin(u) {
+				return s.origins.RewriteUpstreamURL(u.String()), true
+			}
+			if s.captchaMatcher.IsProviderResource(u) && (!s.cfg.UseTor() || !s.captchaMatcher.ShouldRouteResource(u)) {
+				return u.String(), true
+			}
+			return raw, false
+		}); err != nil {
+			return err
+		}
+		for name, values := range headers {
+			if strings.EqualFold(name, "Content-Security-Policy") || strings.EqualFold(name, "Content-Security-Policy-Report-Only") {
+				for i, value := range values {
+					values[i] = mapPolicy(value, base)
+				}
+			}
+		}
+		return nil
 	})
+	s.captchaOperator.SetProviderRoutes(routes, func(body []byte, base *url.URL, headers http.Header) []byte {
+		return rewriter.RewriteOpaqueHTML(body, base, headers.Values("Content-Security-Policy"), mapDocumentURL, func(policy string) string { return mapPolicy(policy, base) })
+	})
+	if !s.cfg.UseTor() {
+		return nil
+	}
 	s.providerHandler = captcha.NewProviderHandler(captcha.ProviderRelayConfig{
 		Routes: routes, Transport: s.transport, Timeout: time.Duration(s.cfg.UpstreamTimeout) * time.Second,
 		OperatorToken: s.captchaOperatorToken, MapTargetOrigin: mapTargetOrigin, MapTargetURL: mapTargetURL,
@@ -131,10 +173,14 @@ func (s *Server) configureProviderRoutes(scheme string) error {
 				return mapDocumentURL(raw, effectiveBase)
 			}
 			result := rewriter.RewriteOpaqueHTML(decoded, base, headers.Values("Content-Security-Policy"), mapURL, func(policy string) string { return mapPolicy(policy, base) })
+			result = captcha.InjectProviderRoutingRuntime(result, base, routes, headers)
 			if bytes.Equal(decoded, result) {
 				return body, nil
 			}
 			headers.Del("Content-Encoding")
+			headers.Set("X-Blinder-View", "transformed")
+			headers.Set("X-Blinder-Original-Body-Bytes", strconv.Itoa(len(decoded)))
+			headers.Set("X-Blinder-Rewritten-Body-Bytes", strconv.Itoa(len(result)))
 			return result, nil
 		},
 	})
