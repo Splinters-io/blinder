@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 580" width="880" role="img" aria-labelledby="arch-title arch-desc">
+<title id="arch-title">Blinder architecture</title>
+<desc id="arch-desc">How Blinder separates identity from behavior in web application security testing.</desc>
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .bg { fill: #ffffff; }
+  .header-bg { fill: #111210; }
+  .header-text { fill: #eeeae0; font-size: 15px; font-weight: 700; letter-spacing: 0.5px; }
+  .header-sub { fill: #aaa99f; font-size: 11px; letter-spacing: 1.5px; }
+  .box { fill: #ffffff; stroke: #d0d7de; }
+  .box-accent { fill: #ffffff; stroke: #f26522; stroke-width: 2; }
+  .box-title { fill: #1f2328; font-size: 13px; font-weight: 700; }
+  .box-desc { fill: #57606a; font-size: 11px; }
+  .box-check { fill: #1a7f37; font-size: 11px; }
+  .section-title { fill: #1f2328; font-size: 12px; font-weight: 700; letter-spacing: 1px; }
+  .col-stripped { fill: #fff5f0; stroke: #f7c6a5; }
+  .col-preserved { fill: #f0fff4; stroke: #a7f3d0; }
+  .col-title-s { fill: #bc4c00; font-size: 12px; font-weight: 700; }
+  .col-title-p { fill: #116329; font-size: 12px; font-weight: 700; }
+  .bullet-s { fill: #953800; font-size: 11.5px; }
+  .bullet-p { fill: #116329; font-size: 11.5px; }
+  .arrow { stroke: #57606a; stroke-width: 1.5; fill: none; }
+  .arrow-label { fill: #57606a; font-size: 10px; text-anchor: middle; }
+  .pipe-box { fill: #f6f8fa; stroke: #d0d7de; }
+  .pipe-title { fill: #0969da; font-size: 11px; font-weight: 700; }
+  .pipe-desc { fill: #57606a; font-size: 9.5px; }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #0d1117; }
+    .header-bg { fill: #161b22; }
+    .box { fill: #161b22; stroke: #30363d; }
+    .box-accent { fill: #161b22; stroke: #f26522; }
+    .box-title { fill: #e6edf3; }
+    .box-desc { fill: #8b949e; }
+    .box-check { fill: #7ee2a8; }
+    .section-title { fill: #e6edf3; }
+    .col-stripped { fill: #1c1108; stroke: #6e3a11; }
+    .col-preserved { fill: #081c10; stroke: #196c2e; }
+    .col-title-s { fill: #f7c6a5; }
+    .col-title-p { fill: #7ee2a8; }
+    .bullet-s { fill: #f7c6a5; }
+    .bullet-p { fill: #7ee2a8; }
+    .arrow { stroke: #8b949e; }
+    .arrow-label { fill: #8b949e; }
+    .pipe-box { fill: #161b22; stroke: #30363d; }
+    .pipe-title { fill: #58a6ff; }
+    .pipe-desc { fill: #8b949e; }
+  }
+</style>
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1.5 L9 5 L0 8.5" fill="none" stroke="#57606a" stroke-width="1.5"/></marker>
+  <marker id="arb" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 1.5 L1 5 L10 8.5" fill="none" stroke="#57606a" stroke-width="1.5"/></marker>
+  <marker id="arr-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1.5 L9 5 L0 8.5" fill="none" stroke="#8b949e" stroke-width="1.5"/></marker>
+  <marker id="arb-d" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 1.5 L1 5 L10 8.5" fill="none" stroke="#8b949e" stroke-width="1.5"/></marker>
+</defs>
+
+<!-- Background -->
+<rect class="bg" width="880" height="580" rx="8"/>
+
+<!-- Header -->
+<rect class="header-bg" width="880" height="46" rx="8"/>
+<rect class="header-bg" x="0" y="8" width="880" height="38"/>
+<text x="440" y="24" text-anchor="middle" class="header-text">HOW BLINDER PROCESSES CONTENT</text>
+<text x="440" y="38" text-anchor="middle" class="header-sub">STRIP IDENTITY · PRESERVE BEHAVIOR · MAP REVERSIBLY</text>
+
+<!-- Flow section -->
+<!-- Box 1: Scanner -->
+<rect class="box" x="20" y="62" width="246" height="104" rx="6"/>
+<text x="143" y="84" text-anchor="middle" class="box-title">AI Scanner / Browser</text>
+<text x="143" y="102" text-anchor="middle" class="box-desc">sees: https://127.0.0.1:8099</text>
+<text x="143" y="118" text-anchor="middle" class="box-desc">no brand, no domain to judge</text>
+<text x="143" y="134" text-anchor="middle" class="box-desc">content: neutral prose</text>
+<text x="143" y="150" text-anchor="middle" class="box-check">behavioral signals: intact ✓</text>
+
+<!-- Arrow 1 -->
+<line class="arrow" x1="266" y1="114" x2="313" y2="114" marker-start="url(#arb)" marker-end="url(#arr)"/>
+<text x="290" y="106" class="arrow-label">HTTPS</text>
+
+<!-- Box 2: Blinder (accent border) -->
+<rect class="box-accent" x="317" y="62" width="246" height="104" rx="6"/>
+<text x="440" y="84" text-anchor="middle" class="box-title">BLINDER</text>
+<text x="440" y="102" text-anchor="middle" class="box-desc">rewrites identity tokens</text>
+<text x="440" y="118" text-anchor="middle" class="box-desc">preserves application behavior</text>
+<text x="440" y="134" text-anchor="middle" class="box-desc">reversible functional mappings</text>
+<text x="440" y="150" text-anchor="middle" class="box-desc">recomputes SRI &amp; CSP hashes</text>
+
+<!-- Arrow 2 -->
+<line class="arrow" x1="563" y1="114" x2="610" y2="114" marker-start="url(#arb)" marker-end="url(#arr)"/>
+<text x="587" y="106" class="arrow-label">HTTPS/Tor</text>
+
+<!-- Box 3: Target -->
+<rect class="box" x="614" y="62" width="246" height="104" rx="6"/>
+<text x="737" y="84" text-anchor="middle" class="box-title">Target Application</text>
+<text x="737" y="102" text-anchor="middle" class="box-desc">real domain &amp; brand</text>
+<text x="737" y="118" text-anchor="middle" class="box-desc">real organization identity</text>
+<text x="737" y="134" text-anchor="middle" class="box-desc">real content &amp; prose</text>
+<text x="737" y="150" text-anchor="middle" class="box-desc">real application behavior</text>
+
+<!-- Two-column section -->
+<!-- Stripped column -->
+<rect class="col-stripped" x="20" y="186" width="418" height="194" rx="6"/>
+<text x="36" y="208" class="col-title-s">IDENTITY REMOVED</text>
+<text x="36" y="232" class="bullet-s">●  Target domain names → localhost aliases</text>
+<text x="36" y="254" class="bullet-s">●  Brand &amp; organization names → neutral filler</text>
+<text x="36" y="276" class="bullet-s">●  Email addresses → aliased addresses</text>
+<text x="36" y="298" class="bullet-s">●  Public IP addresses → reserved-range aliases</text>
+<text x="36" y="320" class="bullet-s">●  Cookie names &amp; values → reversible mappings</text>
+<text x="36" y="342" class="bullet-s">●  Display prose &amp; titles → session-stable verse</text>
+<text x="36" y="364" class="bullet-s">●  Image pixels &amp; EXIF metadata → format-aware blanks</text>
+
+<!-- Preserved column -->
+<rect class="col-preserved" x="442" y="186" width="418" height="194" rx="6"/>
+<text x="458" y="208" class="col-title-p">BEHAVIOR PRESERVED</text>
+<text x="458" y="232" class="bullet-p">●  HTTP status codes &amp; error responses</text>
+<text x="458" y="254" class="bullet-p">●  Injection output — SQLi, XSS, SSTI reflections</text>
+<text x="458" y="276" class="bullet-p">●  File inclusion content — LFI / RFI responses</text>
+<text x="458" y="298" class="bullet-p">●  Security headers — CSP, CORS, HSTS</text>
+<text x="458" y="320" class="bullet-p">●  Form actions, CSRF tokens &amp; redirect chains</text>
+<text x="458" y="342" class="bullet-p">●  SRI integrity hashes — verified &amp; recomputed</text>
+<text x="458" y="364" class="bullet-p">●  Stack traces, paths &amp; diagnostic strings</text>
+
+<!-- Content pipeline section -->
+<text x="20" y="406" class="section-title">CONTENT PIPELINE</text>
+
+<!-- Row 1 -->
+<rect class="pipe-box" x="20" y="416" width="204" height="52" rx="5"/>
+<text x="122" y="436" text-anchor="middle" class="pipe-title">HTML</text>
+<text x="122" y="452" text-anchor="middle" class="pipe-desc">Tokenizer · entity-aware · attribute scrub</text>
+
+<rect class="pipe-box" x="232" y="416" width="204" height="52" rx="5"/>
+<text x="334" y="436" text-anchor="middle" class="pipe-title">JavaScript</text>
+<text x="334" y="452" text-anchor="middle" class="pipe-desc">AST-aware · regex-literal-safe · URL routing</text>
+
+<rect class="pipe-box" x="444" y="416" width="204" height="52" rx="5"/>
+<text x="546" y="436" text-anchor="middle" class="pipe-title">CSS</text>
+<text x="546" y="452" text-anchor="middle" class="pipe-desc">url() rewriting · property values</text>
+
+<rect class="pipe-box" x="656" y="416" width="204" height="52" rx="5"/>
+<text x="758" y="436" text-anchor="middle" class="pipe-title">JSON</text>
+<text x="758" y="452" text-anchor="middle" class="pipe-desc">Key/value scrubbing · structure intact</text>
+
+<!-- Row 2 -->
+<rect class="pipe-box" x="20" y="476" width="204" height="52" rx="5"/>
+<text x="122" y="496" text-anchor="middle" class="pipe-title">Images</text>
+<text x="122" y="512" text-anchor="middle" class="pipe-desc">JPEG · PNG · GIF · WebP · size-aware</text>
+
+<rect class="pipe-box" x="232" y="476" width="204" height="52" rx="5"/>
+<text x="334" y="496" text-anchor="middle" class="pipe-title">WebSocket</text>
+<text x="334" y="512" text-anchor="middle" class="pipe-desc">Frame-level text scrubbing</text>
+
+<rect class="pipe-box" x="444" y="476" width="204" height="52" rx="5"/>
+<text x="546" y="496" text-anchor="middle" class="pipe-title">Headers</text>
+<text x="546" y="512" text-anchor="middle" class="pipe-desc">Cookies · CORS · CSP · SRI · Set-Cookie</text>
+
+<rect class="pipe-box" x="656" y="476" width="204" height="52" rx="5"/>
+<text x="758" y="496" text-anchor="middle" class="pipe-title">Binary</text>
+<text x="758" y="512" text-anchor="middle" class="pipe-desc">Length-preserving · metadata stripped</text>
+
+<!-- Infrastructure bar -->
+<text x="20" y="552" class="section-title">INFRASTRUCTURE</text>
+<text x="150" y="552" class="box-desc">Local HTTPS</text>
+<text x="270" y="552" class="box-desc">·   Multi-origin routing</text>
+<text x="440" y="552" class="box-desc">·   Tor / SOCKS5</text>
+<text x="580" y="552" class="box-desc">·   CAPTCHA relay</text>
+<text x="720" y="552" class="box-desc">·   HAR evidence capture</text>
+
+</svg>

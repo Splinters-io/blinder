@@ -8,6 +8,8 @@
 </p>
 
 <p align="center">
+  <a href="#the-problem">The problem</a> &nbsp; / &nbsp;
+  <a href="#how-blinder-works">How it works</a> &nbsp; / &nbsp;
   <a href="#quick-start">Quick start</a> &nbsp; / &nbsp;
   <a href="#certificates">Certificates</a> &nbsp; / &nbsp;
   <a href="#tor">Tor</a> &nbsp; / &nbsp;
@@ -18,25 +20,44 @@
 
 ---
 
-## Why
+## The problem
 
-LLM-driven security tools decide what to test based on what they see. When an AI agent sees the real target -- its domain, its brand, its organisation name -- it forms opinions. It may refuse to probe a well-known service, soften its findings, or decline to generate a proof-of-concept because of who the target is rather than what the target does.
+Security testing is a behavioral discipline. A SQL injection is a SQL injection regardless of whose database it reaches. A broken access control is broken whether the application belongs to a startup or a household name. A file inclusion reads from the server no matter what logo sits in the header.
 
-Blinder removes that decision. To the downstream AI, the target looks like a locally hosted application at `https://127.0.0.1:8099`. There is no brand to recognise, no domain to have an opinion about. The AI focuses on the application's behavior: its injection points, its broken access controls, its reflected input. An application vulnerable to XSS still reflects attacker-controlled markup through Blinder. A SQL injection still produces diagnostic errors. A CSRF still lacks its token. The delivery requirement is to preserve the observable evidence of vulnerabilities while masking identity and ordinary prose. That requires direct/proxy comparisons of both successful and failed operations; matching page structure or byte length alone is insufficient. [Current signal-preservation checks](docs/testing-results-2026-09-26-content-signals.md) record verified behavior and concrete remaining defects.
+AI-assisted security tools don't work that way. They see the target -- its domain, its brand, its organization -- and they form opinions. They soften findings for well-known services. They refuse to generate proof-of-concept payloads based on *who* the target is. They decline to test paths they associate with a particular vendor. The AI is making decisions that belong to the operator, and it's making them based on context rather than behavior.
+
+This is the wrong axis. Good application security focuses on what the application *does*: how it handles input, what controls it enforces, what it reflects back, how it fails. Identity should be irrelevant to that analysis. But today, every AI-assisted tool has the target's full identity wired into every decision it makes -- what to test, how hard to push, whether to report.
+
+There should be a cleaner way to approach this. Blinder is a starting point: a practical tool, but also a position that testing should be separated from context. The operator authorizes the scope. The tool evaluates behavior. Those are different responsibilities and they shouldn't collapse into one.
+
+### Behavior is sometimes content
+
+Stripping identity doesn't mean stripping content. That's where most naive approaches break. Many vulnerability classes are observable *only* as changes in response content:
+
+| Vulnerability | What changes in the response |
+| :--- | :--- |
+| **SQL injection** | Database errors, table structures, query results in the body |
+| **Local/remote file inclusion** | File contents -- config files, source code, `/etc/passwd` |
+| **Cross-site scripting** | Reflected attacker input rendered back into the page |
+| **Server-side template injection** | Evaluated expressions returned as computed results |
+| **Information disclosure** | Stack traces, internal paths, version strings in error pages |
+| **Broken access control** | Data the session shouldn't be authorized to reach |
+
+If a proxy stripped this content, it would hide the evidence of the very vulnerabilities the tester is looking for. The requirement is surgical: remove *identity* while preserving *behavioral signals*. A page that belongs to no one but behaves exactly as the original does -- including when it behaves badly.
+
+## How Blinder works
+
+Blinder is a local HTTPS reverse proxy that sits between the AI scanner (or browser) and the target. It rewrites identity -- domains, brands, organization names, emails, IP addresses -- while preserving the application's functional behavior: its errors, its reflections, its security controls, its status codes, its content structure.
+
+To the downstream AI, the target is an anonymous locally hosted application at `https://127.0.0.1:8099`. No brand to recognize. No domain to form an opinion about. The AI tests what the application *does*, not who it *is*.
 
 This is content-blind scanning: the operator controls who the target is; the AI focuses on what it does.
 
-Replacement content is part of correctness: neutral filler for display, reversible values for application data, and preserved diagnostics and control behavior. Generated removal notices do not belong in pages. The [content contract](docs/content-contract.md) records the implementation and acceptance requirements.
+Replacement content is part of correctness: neutral filler for display, reversible values for application data, and preserved diagnostics and control behavior. Generated removal notices don't belong in pages. The [content contract](docs/content-contract.md) records the delivery requirements.
 
-```text
- AI scanner / browser ── HTTPS ── Blinder ── direct or Tor ── Target
-                                    │
-                         looks like localhost    real identity
-                         no brand, no domain     stays here
-                                    │
-                                    ├── Scrubbed content → AI sees technical surface only
-                                    └── Original evidence → operator keeps full fidelity
-```
+<p align="center">
+  <img src="docs/assets/blinder-architecture.svg" alt="Blinder architecture: how identity is separated from behavior across content types" width="100%">
+</p>
 
 ## What it does
 
@@ -49,7 +70,7 @@ Replacement content is part of correctness: neutral filler for display, reversib
 | **CAPTCHA relay** | Operator-facing challenge queue and separate provider origins. Tor-routed resources keep provider cookies, CSP and CORS separate from the target and operator. |
 | **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
 | **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
-| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. |
+| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. [Signal-preservation checks](docs/testing-results-2026-09-26-content-signals.md) record verified behavior and remaining defects. |
 
 **Development build; day-one acceptance is not complete.** The [delivery contract](docs/day-one-contract.md) fixes the requirements and evidence needed for sign-off. Current [supported behavior and delivery gates](docs/capabilities.md) record implementation progress without reducing that scope.
 
