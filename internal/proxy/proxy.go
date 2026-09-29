@@ -860,6 +860,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	s.stats.Bytes.Add(int64(len(body)))
 
+	upstreamMethod := r.Method
+	upstreamCredReq := r
+
 	if detection := s.captchaMatcher.DetectChallenge(body, resp.Header.Get("Content-Type"), resp.StatusCode); detection.IsCaptcha {
 		challengeID := s.captchaQueue.Submit(
 			detection.ProviderName,
@@ -960,13 +963,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 						}
 						body = retryRespBody
 						resp = retryResp
+						upstreamURL = retryURL
+						upstreamMethod = retryMethod
+						upstreamCredReq = retryReq
 					}
 				}
 			}
 		}
 	}
 
-	if r.Method == http.MethodGet && s.sriPipeline != nil {
+	if upstreamMethod == http.MethodGet && s.sriPipeline != nil {
 		if sriBodyVersion != "" {
 			sriKey := sri.CacheKeyForAuthority(upstreamURL, r, r.Host) + "\x01" + sriBodyVersion
 			if !s.sriCache.HasDigest(sriKey) {
@@ -1000,8 +1006,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Extension methods may mutate state too. Only methods with known safe
 	// semantics are exempt from invalidation (RFC 9111, section 4.4).
-	unsafeMethod := r.Method != http.MethodGet && r.Method != http.MethodHead &&
-		r.Method != http.MethodOptions && r.Method != http.MethodTrace
+	unsafeMethod := upstreamMethod != http.MethodGet && upstreamMethod != http.MethodHead &&
+		upstreamMethod != http.MethodOptions && upstreamMethod != http.MethodTrace
 	if unsafeMethod &&
 		resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		s.responseCache.InvalidateURL(upstreamURL)
@@ -1025,15 +1031,18 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	path := r.URL.Path
+	upstreamPath := r.URL.Path
+	if parsed, err := url.Parse(upstreamURL); err == nil && parsed.Path != "" {
+		upstreamPath = parsed.Path
+	}
 
 	docURL := &url.URL{
 		Scheme: upstream.Scheme,
 		Host:   upstream.Host,
-		Path:   r.URL.Path,
+		Path:   upstreamPath,
 	}
 	originalBodyTag := gate.ContentTag(body)
-	result := rewriter.RewriteBody(body, contentType, path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
+	result := rewriter.RewriteBody(body, contentType, upstreamPath, gate, s.cfg.Paranoid, rewriter.RewriteOpts{
 		CSPPolicies:     resp.Header.Values("Content-Security-Policy"),
 		StatusCode:      resp.StatusCode,
 		Origins:         requestOrigins,
@@ -1053,7 +1062,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// A version can pin collision-disambiguating whitespace as well as the
 	// original body digest. Regenerate that representation after no-store or
 	// cache eviction; the original bytes were authenticated above.
-	if r.Method == http.MethodGet && sriBodyVersion != "" {
+	if upstreamMethod == http.MethodGet && sriBodyVersion != "" {
 		result.Body = sri.ApplyBodyVersion(body, result.Body, sriBodyVersion)
 	}
 	s.stats.Scrubbed.Add(1)
@@ -1078,7 +1087,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Store in response cache: only GET 200 responses.
 	// HEAD must not populate the cache (empty body would corrupt GETs).
 	// HTML with SRI processing is excluded (integrity hashes couple HTML to SRI cache lifetime).
-	if r.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
+	if upstreamMethod == http.MethodGet && resp.StatusCode == http.StatusOK {
 		dirs := cache.ParseDirectives(resp.Header.Get("Cache-Control"))
 		if dirs.NoStore || dirs.Private {
 			s.responseCache.InvalidateURL(upstreamURL)
@@ -1087,15 +1096,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		sriActive := s.sriPipeline != nil && isHTML
 		varyFields := cache.ParseVary(resp.Header.Get("Vary"))
 		if !sriActive && (len(varyFields) == 0 || varyFields[0] != "*") && !dirs.NoStore && !dirs.Private {
-			credHash := responseCacheCredentialHash(r)
+			credHash := responseCacheCredentialHash(upstreamCredReq)
 
 			storedHeaders := outHeaders.Clone()
 			storedHeaders.Del("Access-Control-Allow-Origin")
 
-			variantKey := cache.Key(upstreamURL, credHash, r, varyFields)
+			variantKey := cache.Key(upstreamURL, credHash, upstreamCredReq, varyFields)
 
 			if len(varyFields) > 0 {
-				baseKey := cache.Key(upstreamURL, credHash, r, nil)
+				baseKey := cache.Key(upstreamURL, credHash, upstreamCredReq, nil)
 				s.responseCache.Store(baseKey, cache.Entry{
 					VarySentinel: true,
 					VaryFields:   append([]string(nil), varyFields...),
@@ -1117,7 +1126,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				UpstreamLastModified: resp.Header.Get("Last-Modified"),
 				UpstreamACAO:         resp.Header.Get("Access-Control-Allow-Origin"),
 				VaryFields:           varyFields,
-				VaryValues:           cache.CaptureVaryValues(r, varyFields),
+				VaryValues:           cache.CaptureVaryValues(upstreamCredReq, varyFields),
 				Directives:           dirs,
 				InitialAge:           cache.ParseAge(resp.Header.Get("Age")),
 				StoredAt:             time.Now(),
@@ -1143,7 +1152,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			meta.ChunkTypes[i] = gate.Scrub(chunk, "metadata:chunk")
 		}
 		w.Header().Set("X-Blinder-Meta", meta.TechnicalJSON())
-		s.manifest.RecordIdentity(path, result.Metadata)
+		s.manifest.RecordIdentity(upstreamPath, result.Metadata)
 	}
 
 	status = resp.StatusCode
