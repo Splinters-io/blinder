@@ -141,7 +141,7 @@ func New(
 	}
 
 	if alias == "" {
-		alias = "target-001.local"
+		alias = "target-001.localhost"
 	}
 	if strings.EqualFold(strings.TrimSuffix(alias, "."), endpoint.OperatorHost) {
 		return nil, errors.New("alias is reserved for the local operator interface")

@@ -116,7 +116,7 @@ func TestNew_Defaults(t *testing.T) {
 	if cfg.ListenAddr != "127.0.0.1:8099" {
 		t.Errorf("expected default listen addr, got %s", cfg.ListenAddr)
 	}
-	if cfg.AliasDomain != "target-001.local" {
+	if cfg.AliasDomain != "target-001.localhost" {
 		t.Errorf("expected default alias, got %s", cfg.AliasDomain)
 	}
 	if cfg.UpstreamTimeout != 30 {

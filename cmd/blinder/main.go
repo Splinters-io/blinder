@@ -150,10 +150,13 @@ func run() int {
 		listen = "127.0.0.1:8099"
 	}
 	if alias == "" {
-		alias = "target-001.local"
+		alias = "target-001.localhost"
 	}
 	if torAddr == "" {
 		torAddr = "127.0.0.1:9050"
+	}
+	if runtime.GOOS == "darwin" && strings.HasSuffix(alias, ".local") {
+		log.Printf("[warn] alias %q uses .local which is reserved for mDNS on macOS and will time out; use .localhost instead", alias)
 	}
 
 	if showVersion {
