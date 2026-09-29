@@ -73,6 +73,70 @@ func TestResourceRoutingDoesNotInventUnknownOriginRoutes(t *testing.T) {
 	}
 }
 
+func TestResourceURLPathFilenameNotTreatedAsDomain(t *testing.T) {
+	gate, origins := resourceRouteFixture(t)
+	for _, tc := range []struct {
+		name, value, wantPath string
+	}{
+		{
+			"webp_extension",
+			"https://target.example.com:8443/uploads/Hero-Image.webp",
+			"/uploads/Hero-Image.webp",
+		},
+		{
+			"png_extension",
+			"https://target.example.com:8443/uploads/Overview-Card.png",
+			"/uploads/Overview-Card.png",
+		},
+		{
+			"identity_token_in_filename",
+			"https://target.example.com:8443/uploads/AcmeCorp-Hero.webp",
+			"/uploads/",
+		},
+		{
+			"no_domain_scrub_in_path",
+			"https://target.example.com:8443/uploads/Fancy-Product.svg",
+			"/uploads/Fancy-Product.svg",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scrubResourceURL(tc.value, gate, "test", origins)
+			if !strings.Contains(got, tc.wantPath) {
+				t.Errorf("filename corrupted in path:\n  input: %s\n  got:   %s\n  want path containing: %s", tc.value, got, tc.wantPath)
+			}
+			if strings.Contains(got, "target.example.com") {
+				t.Errorf("target domain leaked: %s", got)
+			}
+		})
+	}
+}
+
+func TestResourceURLPathFilenameRoundTrips(t *testing.T) {
+	gate, origins := resourceRouteFixture(t)
+	for _, tc := range []struct {
+		name, value, wantFilename string
+	}{
+		{
+			"mixed_case_webp",
+			"https://target.example.com:8443/uploads/Hero-Image.webp",
+			"Hero-Image.webp",
+		},
+		{
+			"identity_plus_ext",
+			"https://target.example.com:8443/uploads/AcmeCorp-Platform.webp",
+			"AcmeCorp-Platform.webp",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scrubbed := scrubResourceURL(tc.value, gate, "test", origins)
+			restored := gate.RestoreBody(scrubbed)
+			if !strings.Contains(restored, tc.wantFilename) {
+				t.Errorf("filename did not round-trip:\n  scrubbed: %s\n  restored: %s\n  want: %s", scrubbed, restored, tc.wantFilename)
+			}
+		})
+	}
+}
+
 func TestCSSResourceURLRetainsSyntaxWhitespace(t *testing.T) {
 	for _, whitespace := range []string{"  ", "\t", "\r\n", "\f"} {
 		gate, origins := resourceRouteFixture(t)

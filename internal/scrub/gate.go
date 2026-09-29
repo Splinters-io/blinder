@@ -306,6 +306,67 @@ func (g *Gate) Scrub(input string, context string) string {
 	return result
 }
 
+// ScrubNoDomains applies all Scrub transformations except the catch-all domain
+// regex. Target-domain patterns and identity tokens are still replaced. Use
+// this for URL path segments where filename.ext patterns are false positives
+// for the domain regex (e.g. "Hero-Image.webp" looks like a domain to domainRe
+// but is actually a filename whose case and bytes must survive round-tripping).
+func (g *Gate) ScrubNoDomains(input string, context string) string {
+	result := g.escapeMarkers(input)
+
+	for i, pattern := range g.domainPatterns {
+		if pattern == nil {
+			continue
+		}
+		domain := g.targetDomains[i]
+		result = pattern.ReplaceAllStringFunc(result, func(string) string {
+			g.recordLeak(context, "target_domain", domain)
+			return g.aliasDomainAndRecord(domain)
+		})
+	}
+
+	result = g.scrubIdentityTokens(result, context)
+
+	result = emailRe.ReplaceAllStringFunc(result, func(email string) string {
+		parts := strings.SplitN(email, "@", 2)
+		if len(parts) != 2 {
+			return email
+		}
+		domain := parts[1]
+		if IsSafeDomain(domain) {
+			return email
+		}
+		g.recordLeak(context, "email", email)
+		return g.aliasEmail(email, domain)
+	})
+
+	result = ipv4Re.ReplaceAllStringFunc(result, func(ipStr string) string {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return ipStr
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return ipStr
+		}
+		g.recordLeak(context, "public_ipv4", ipStr)
+		return g.aliasIPv4(ipStr)
+	})
+
+	result = ipv6Re.ReplaceAllStringFunc(result, func(ipStr string) string {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return ipStr
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return ipStr
+		}
+		g.recordLeak(context, "public_ipv6", ipStr)
+		return g.aliasIPv6(ipStr)
+	})
+
+	return result
+}
+
 // scrubIdentityTokens applies configured patterns only to source text. Each
 // replacement and literal escape sequence stays opaque to subsequent patterns,
 // even when a configured identity is "v", a hex digit, or part of the nonce.

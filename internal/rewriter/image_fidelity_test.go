@@ -136,7 +136,7 @@ func TestRasterMaskPreservesGIFAnimationGeometry(t *testing.T) {
 	if err := gif.EncodeAll(&b, fixture); err != nil {
 		t.Fatal(err)
 	}
-	got, err := gif.DecodeAll(bytes.NewReader(rewriteImage(b.Bytes(), newTestGate(), "test")))
+	got, err := gif.DecodeAll(bytes.NewReader(rewriteImage(b.Bytes(), newTestGate(), "test").body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestRasterMaskLimitsDecompression(t *testing.T) {
 	}
 	oversize := append([]byte(nil), transparentGIF...)
 	binary.LittleEndian.PutUint16(oversize[6:8], maxImageDimension+1)
-	out := rewriteImage(oversize, newTestGate(), "test")
+	out := rewriteImage(oversize, newTestGate(), "test").body
 	if len(out) != len(oversize) || !bytes.Equal(out, make([]byte, len(out))) {
 		t.Fatal("over-budget image was decoded or retained")
 	}
@@ -170,7 +170,7 @@ func TestRasterMaskLimitsDecompression(t *testing.T) {
 	if boundedGIF(b.Bytes()) {
 		t.Fatal("GIF exceeded frame budget")
 	}
-	out = rewriteImage(b.Bytes(), newTestGate(), "test")
+	out = rewriteImage(b.Bytes(), newTestGate(), "test").body
 	if _, err := gif.DecodeAll(bytes.NewReader(out)); err == nil {
 		t.Fatal("over-budget animation replaced by successful image")
 	}
@@ -267,7 +267,7 @@ func TestRasterJPEGKeepsOnlyEXIFOrientation(t *testing.T) {
 		binary.BigEndian.PutUint16(segment[2:], uint16(len(payload)+2))
 		segment = append(segment, payload...)
 		original := append(append(append([]byte(nil), body[:2]...), segment...), body[2:]...)
-		masked := rewriteImage(original, newTestGate(), "test")
+		masked := rewriteImage(original, newTestGate(), "test").body
 		if bytes.Contains(masked, []byte("private device")) || bytes.Contains(masked, []byte("AcmeCorp")) {
 			t.Fatal("EXIF identity retained")
 		}
@@ -292,8 +292,65 @@ func TestRasterAPNGIsExplicitlyUnsupported(t *testing.T) {
 	if !hasPNGChunk(withAnimation, "acTL") {
 		t.Fatal("missing animation marker")
 	}
-	masked := rewriteImage(withAnimation, newTestGate(), "test")
+	masked := rewriteImage(withAnimation, newTestGate(), "test").body
 	if len(masked) != len(withAnimation) || !bytes.Equal(masked, make([]byte, len(masked))) {
 		t.Fatal("unsupported animation silently converted to a valid still image")
+	}
+}
+
+func makeWebPLossy(w, h int) []byte {
+	// Minimal lossy WebP: RIFF + VP8 chunk with keyframe header.
+	vp8Data := make([]byte, 10)
+	vp8Data[3] = 0x9D
+	vp8Data[4] = 0x01
+	vp8Data[5] = 0x2A
+	binary.LittleEndian.PutUint16(vp8Data[6:8], uint16(w))
+	binary.LittleEndian.PutUint16(vp8Data[8:10], uint16(h))
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	size := make([]byte, 4)
+	binary.LittleEndian.PutUint32(size, uint32(12+len(vp8Data)))
+	buf.Write(size)
+	buf.WriteString("WEBPVP8 ")
+	binary.LittleEndian.PutUint32(size, uint32(len(vp8Data)))
+	buf.Write(size)
+	buf.Write(vp8Data)
+	return buf.Bytes()
+}
+
+func TestWebPDimensions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		body   []byte
+		wantW  int
+		wantH  int
+		wantOK bool
+	}{
+		{"lossy_320x240", makeWebPLossy(320, 240), 320, 240, true},
+		{"lossy_1x1", makeWebPLossy(1, 1), 1, 1, true},
+		{"too_short", []byte("RIFF"), 0, 0, false},
+		{"not_webp", []byte("RIFF\x00\x00\x00\x00NOT "), 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, h, ok := webpDimensions(tc.body)
+			if ok != tc.wantOK || w != tc.wantW || h != tc.wantH {
+				t.Errorf("webpDimensions = (%d, %d, %v), want (%d, %d, %v)", w, h, ok, tc.wantW, tc.wantH, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestWebPRewriteProducesValidPNG(t *testing.T) {
+	body := makeWebPLossy(100, 50)
+	result := rewriteImage(body, newTestGate(), "test")
+	if result.contentType != "image/png" {
+		t.Errorf("expected content type image/png, got %q", result.contentType)
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(result.body))
+	if err != nil {
+		t.Fatalf("PNG decode failed: %v", err)
+	}
+	if cfg.Width != 100 || cfg.Height != 50 {
+		t.Errorf("dimensions = %dx%d, want 100x50", cfg.Width, cfg.Height)
 	}
 }

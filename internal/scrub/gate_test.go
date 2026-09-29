@@ -362,3 +362,66 @@ func TestIsSafeDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestGate_ScrubNoDomains_PreservesFilenames(t *testing.T) {
+	g := NewGate([]string{"example.com"}, []string{"Acme"}, "target-001.local")
+	for _, tc := range []struct {
+		name, input, mustContain string
+	}{
+		{
+			"webp_extension",
+			"/uploads/Hero-Image.webp",
+			"Hero-Image.webp",
+		},
+		{
+			"png_mixed_case",
+			"/uploads/Overview-Card.png",
+			"Overview-Card.png",
+		},
+		{
+			"svg_extension",
+			"/uploads/Product-Feature.svg",
+			"Product-Feature.svg",
+		},
+		{
+			"still_scrubs_identity_tokens",
+			"/uploads/Acme-Hero.webp",
+			"-Hero.webp",
+		},
+		{
+			"still_scrubs_target_domains",
+			"/api/check?host=example.com",
+			"target-001.local",
+		},
+		{
+			"still_scrubs_public_ips",
+			"/api?server=93.184.216.34",
+			"203.0.113.1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := g.ScrubNoDomains(tc.input, "test")
+			if !strings.Contains(result, tc.mustContain) {
+				t.Errorf("ScrubNoDomains(%q) = %q, want containing %q", tc.input, result, tc.mustContain)
+			}
+		})
+	}
+}
+
+func TestGate_ScrubNoDomains_DoesNotMatchFilenameAsDomain(t *testing.T) {
+	g := NewGate(nil, nil, "target-001.local")
+	input := "/uploads/Savant-Card-BG.webp"
+	result := g.ScrubNoDomains(input, "test")
+	if result != input {
+		t.Errorf("ScrubNoDomains should not touch filename:\n  input:  %s\n  output: %s", input, result)
+	}
+}
+
+func TestGate_Scrub_DoesMatchFilenameAsDomain(t *testing.T) {
+	g := NewGate(nil, nil, "target-001.local")
+	input := "/uploads/Savant-Card-BG.webp"
+	result := g.Scrub(input, "test")
+	if result == input {
+		t.Error("Scrub should match filename as domain (domainRe)")
+	}
+}

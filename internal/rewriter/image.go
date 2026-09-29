@@ -66,32 +66,46 @@ func rewriteImageDataURL(value string, gate *scrub.Gate) (string, bool) {
 	if mediaType == "image/svg+xml" {
 		body = NullBytes(len(body))
 	} else {
-		body = rewriteImage(body, gate, "body:image:data")
+		img := rewriteImage(body, gate, "body:image:data")
+		body = img.body
+		if img.contentType != "" {
+			mediaType = img.contentType
+		}
 	}
 	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(body), true
 }
 
+type imageResult struct {
+	body        []byte
+	contentType string // Non-empty when the output format differs from the input.
+}
+
 // rewriteImage masks pixels and embedded metadata without turning invalid
-// image data into a successful load. JPEG, PNG and GIF are supported. Other
-// binary image formats fail closed; that is a documented fidelity limitation.
-func rewriteImage(body []byte, gate *scrub.Gate, location string) []byte {
+// image data into a successful load. JPEG, PNG, GIF and WebP are supported.
+// Unsupported binary formats produce a valid PNG at the detected dimensions
+// when the raw header can be parsed; otherwise they fail closed.
+func rewriteImage(body []byte, gate *scrub.Gate, location string) imageResult {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil || !boundedImageSize(cfg.Width, cfg.Height) {
-		return failedImageBody(body, gate, location)
+	if err != nil {
+		if w, h, ok := webpDimensions(body); ok && boundedImageSize(w, h) {
+			return rewriteWebP(body, w, h, gate)
+		}
+		return imageResult{body: failedImageBody(body, gate, location)}
+	}
+	if !boundedImageSize(cfg.Width, cfg.Height) {
+		return imageResult{body: failedImageBody(body, gate, location)}
 	}
 	tag, _ := hex.DecodeString(gate.ContentTag(body))
 	var out bytes.Buffer
 	switch format {
 	case "gif":
 		if !boundedGIF(body) {
-			return failedImageBody(body, gate, location)
+			return imageResult{body: failedImageBody(body, gate, location)}
 		}
 		original, err := gif.DecodeAll(bytes.NewReader(body))
 		if err != nil {
-			return failedImageBody(body, gate, location)
+			return imageResult{body: failedImageBody(body, gate, location)}
 		}
-		// Preserve animation timing, disposal and frame rectangles, but do not
-		// carry original pixels, palettes, comments or application metadata.
 		palette := color.Palette{color.RGBA{tag[0], tag[1], tag[2], 255}}
 		masked := &gif.GIF{Delay: original.Delay, LoopCount: original.LoopCount, Disposal: original.Disposal,
 			Config: image.Config{ColorModel: palette, Width: cfg.Width, Height: cfg.Height}}
@@ -100,18 +114,14 @@ func rewriteImage(body []byte, gate *scrub.Gate, location string) []byte {
 		}
 		err = gif.EncodeAll(&out, masked)
 		if err != nil {
-			return failedImageBody(body, gate, location)
+			return imageResult{body: failedImageBody(body, gate, location)}
 		}
 	case "png", "jpeg":
-		// The standard PNG decoder only validates the default APNG image;
-		// treating that as a static success would silently discard animation.
 		if format == "png" && hasPNGChunk(body, "acTL") {
-			return NullBytes(len(body))
+			return imageResult{body: NullBytes(len(body))}
 		}
-		// DecodeConfig alone accepts many truncated/corrupt files. Validate
-		// the complete pixel stream before emitting a decodable replacement.
 		if _, _, err = image.Decode(bytes.NewReader(body)); err != nil {
-			return failedImageBody(body, gate, location)
+			return imageResult{body: failedImageBody(body, gate, location)}
 		}
 		masked := neutralImage{image.Rect(0, 0, cfg.Width, cfg.Height), color.RGBA{tag[0], tag[1], tag[2], 255}}
 		if format == "png" {
@@ -120,16 +130,78 @@ func rewriteImage(body []byte, gate *scrub.Gate, location string) []byte {
 			err = jpeg.Encode(&out, masked, &jpeg.Options{Quality: 75})
 		}
 		if err != nil {
-			return failedImageBody(body, gate, location)
+			return imageResult{body: failedImageBody(body, gate, location)}
 		}
 	default:
-		return failedImageBody(body, gate, location)
+		return imageResult{body: failedImageBody(body, gate, location)}
 	}
 	encoded := out.Bytes()
 	if format == "jpeg" {
 		encoded = preserveJPEGOrientation(encoded, body)
 	}
-	return padImage(encoded, format, len(body), tag)
+	return imageResult{body: padImage(encoded, format, len(body), tag)}
+}
+
+// rewriteWebP creates a solid-color PNG replacement for a WebP image. Go's
+// standard library cannot encode WebP, so the output format changes; the
+// caller sets the content-type header accordingly.
+func rewriteWebP(body []byte, w, h int, gate *scrub.Gate) imageResult {
+	tag, _ := hex.DecodeString(gate.ContentTag(body))
+	masked := neutralImage{image.Rect(0, 0, w, h), color.RGBA{tag[0], tag[1], tag[2], 255}}
+	var out bytes.Buffer
+	if err := png.Encode(&out, masked); err != nil {
+		return imageResult{body: NullBytes(len(body))}
+	}
+	return imageResult{body: padImage(out.Bytes(), "png", len(body), tag), contentType: "image/png"}
+}
+
+// webpDimensions extracts canvas width and height from a WebP RIFF container.
+// Returns (0, 0, false) for non-WebP or corrupt headers.
+func webpDimensions(body []byte) (int, int, bool) {
+	if len(body) < 16 || string(body[:4]) != "RIFF" || string(body[8:12]) != "WEBP" {
+		return 0, 0, false
+	}
+	chunk := string(body[12:16])
+	switch chunk {
+	case "VP8 ":
+		// Lossy: 10-byte frame header after the chunk header.
+		if len(body) < 30 {
+			return 0, 0, false
+		}
+		chunkLen := int(binary.LittleEndian.Uint32(body[16:20]))
+		if chunkLen < 10 || 20+chunkLen > len(body) {
+			return 0, 0, false
+		}
+		data := body[20:]
+		if data[3] != 0x9D || data[4] != 0x01 || data[5] != 0x2A {
+			return 0, 0, false
+		}
+		w := int(binary.LittleEndian.Uint16(data[6:8])) & 0x3FFF
+		h := int(binary.LittleEndian.Uint16(data[8:10])) & 0x3FFF
+		return w, h, w > 0 && h > 0
+	case "VP8L":
+		// Lossless: 5-byte header after the chunk header.
+		if len(body) < 25 {
+			return 0, 0, false
+		}
+		data := body[21:]
+		if body[20] != 0x2F {
+			return 0, 0, false
+		}
+		bits := binary.LittleEndian.Uint32(data[:4])
+		w := int(bits&0x3FFF) + 1
+		h := int((bits>>14)&0x3FFF) + 1
+		return w, h, true
+	case "VP8X":
+		// Extended: explicit canvas size in the VP8X header.
+		if len(body) < 30 {
+			return 0, 0, false
+		}
+		w := (int(body[24]) | int(body[25])<<8 | int(body[26])<<16) + 1
+		h := (int(body[27]) | int(body[28])<<8 | int(body[29])<<16) + 1
+		return w, h, w > 0 && h > 0
+	}
+	return 0, 0, false
 }
 
 func hasPNGChunk(body []byte, kind string) bool {

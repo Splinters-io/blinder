@@ -35,7 +35,7 @@ func scrubResourceURL(value string, gate *scrub.Gate, context string, origins *O
 	start += 3
 	if end := strings.IndexAny(mapped[start:], "/?#"); end >= 0 {
 		boundary := start + end
-		return mapped[:boundary] + gate.Scrub(mapped[boundary:], context)
+		return mapped[:boundary] + gate.ScrubNoDomains(mapped[boundary:], context)
 	}
 	return mapped
 }
