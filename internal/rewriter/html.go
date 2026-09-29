@@ -126,7 +126,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 				fallthrough
 			default:
 				text := string(z.Text())
-				if paranoid && !inDiagnosticElement(diagnosticElements) {
+				if paranoid && !inDiagnosticElement(diagnosticElements) && !textHasDiagnosticSignal(text) {
 					if strings.TrimSpace(text) != "" {
 						left, right := proseContentBounds(string(raw))
 						contentTag := gate.ContentTag(raw)
