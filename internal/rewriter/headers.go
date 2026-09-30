@@ -378,7 +378,7 @@ func rewriteCSPPolicy(policy string, gate *scrub.Gate, originMapper *OriginMappe
 				// helper protects generated local authorities and keeps path
 				// restrictions. Wildcard and scheme-less sources do not name an
 				// exact origin, so retain their existing generic scrubbing.
-				scrubbed = append(scrubbed, scrubResourceURL(token, gate, "csp", originMapper))
+				scrubbed = append(scrubbed, scrubCSPSourceURL(token, gate, originMapper))
 			}
 		}
 

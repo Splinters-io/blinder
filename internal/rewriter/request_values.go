@@ -16,7 +16,7 @@ func RestoreResourceValue(value string, gate *scrub.Gate, origins *OriginMapper)
 	protectAuthority := mapped != value
 	if !protectAuthority && origins != nil {
 		if u, err := url.Parse(value); err == nil && u.Host != "" && u.Scheme != "" {
-			_, protectAuthority = origins.routes[strings.ToLower(u.Hostname())]
+			protectAuthority = origins.IsRoutedHostname(u.Hostname())
 		}
 	}
 	if protectAuthority {
