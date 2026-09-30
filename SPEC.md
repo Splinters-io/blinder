@@ -4,7 +4,6 @@ Standalone content-blind reverse proxy for exposure-protected security scanning.
 
 **Version:** 2.0 (Go rewrite)
 **Status:** Draft
-**Author:** carroll@splinters.io
 **Date:** 2026-09-23
 
 **Implementation status:** This is a draft design, including goals that are not

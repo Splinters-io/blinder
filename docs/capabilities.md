@@ -1,12 +1,12 @@
 # Supported behavior and delivery gates
 
-**Day-one status: NOT READY.** The [delivery contract](day-one-contract.md) defines the required outcome and sign-off rules. This document records implementation progress and limitations; it cannot reduce that scope or turn an unverified requirement into a pass.
+This document records implementation progress and known limitations.
 
 This is the working-tree implementation status. Browser acceptance recorded 64 passing behavior/CSP/SRI pairs at `d6c6b42`, followed by synthetic CAPTCHA completion and denial checks after isolated challenge origins and bounded dynamic provider routing were added.
 
 ## Supported workflow
 
-The [content contract](content-contract.md) is a delivery requirement for generated prose, functional values and diagnostic preservation. It also requires verifying the serving revision when investigating a browser report.
+Generated prose, functional values and diagnostic preservation are delivery requirements. Verifying the serving revision when investigating a browser report is part of correctness.
 
 The behavior-preservation checkpoint covers image, JavaScript-navigation and malformed-source changes. The expanded 15-pair Chrome comparison passed at `d6c6b42`, including the corrected decoded-CSP-hash case.
 
@@ -132,4 +132,4 @@ These are implementation work and acceptance criteria, not waived requirements.
 | Security-control fidelity | When SRI processing is enabled, original digests are verified per reference and integrity is recomputed for the rewritten resource; invalid script/link references are omitted. External references retain their original SRI. Versioned resources bind the issued reference to its upstream origin and credentials. Downstream cache validators describe rewritten bytes; upstream validators are used for revalidation, with request variants and credentials isolated. CORS ACAO translates to the actual requesting origin. CSP inline hash/nonce translation, meta scope, policy intersection and report-only behavior pass the paired Chrome fixture. External CSP/SRI reference translation, original-policy prefetch checks, algorithm cache order and source-identity collisions pass 29 additional Chrome pairs. Broader source-expression mapping and the remaining fidelity cases still require implementation and acceptance. |
 | Operator acceptance | The current local Chrome synthetic flow completes through isolated challenge/provider origins and preserves the original target session/CSRF; a paired Lax-cookie case preserves the provider's denial. Keep broader popup/service-worker and provider control results versioned separately. CSP-restricted challenges, selected real-provider/scanner workflows, actual trust for target/operator/challenge/provider hostnames, live Tor exit and authorized onion-service requests still need acceptance on the supported OS matrix. |
 
-Complete anonymization is not an established property of the current implementation. Keep that distinction explicit when connecting a sensitive target to an untrusted consumer. Use the [proxy engineering review](proxy-engineering-review.md) for the proposed routing and fidelity design, and the [UAT checklist](testing.md) to record acceptance evidence.
+Complete anonymization is not an established property of the current implementation. Keep that distinction explicit when connecting a sensitive target to an untrusted consumer. Use the [UAT checklist](testing.md) to record acceptance evidence.

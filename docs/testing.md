@@ -1,6 +1,6 @@
 # Regression, functional testing and UAT
 
-The [day-one delivery contract](day-one-contract.md) fixes the required outcome, evidence and sign-off rules. Record PASS, FAIL or NOT RUN against its requirements; the procedures below do not waive a requirement when a test skips, a client is unavailable or a known limitation is documented.
+Record PASS, FAIL or NOT RUN against each requirement; the procedures below do not waive a requirement when a test skips, a client is unavailable or a known limitation is documented.
 
 Use these as three separate gates. Package regressions check specific defect classes; functional tests exercise the actual CLI and network boundary; UAT verifies the selected browser/scanner workflow with an operator. Green CI alone is not UAT approval or a general anonymization guarantee.
 
@@ -29,11 +29,11 @@ For CSP, run the ordinary regressions with `go test -race -count=1 ./internal/re
 
 ```sh
 BLINDER_REVIEW_BROWSER=1 \
-BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-acceptance-certs \
+BLINDER_REVIEW_CERT_DIR=$TMPDIR/blinder-acceptance-certs \
 go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestControlFidelityBrowser$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-csp-browser-url.txt` within 180 seconds. The fixture runs the direct baseline, navigates to Blinder, and compares execution, computed style and policy-violation events. It records `/private/tmp/blinder-csp-browser-result.json`. Both stages use local synthetic targets; the command does not install trust or bypass certificate warnings. Coverage and remaining CSP fidelity work are tracked in the delivery gates.
+Open the URL in `$TMPDIR/blinder-csp-browser-url.txt` within 180 seconds. The fixture runs the direct baseline, navigates to Blinder, and compares execution, computed style and policy-violation events. It records `$TMPDIR/blinder-csp-browser-result.json`. Both stages use local synthetic targets; the command does not install trust or bypass certificate warnings. Coverage and remaining CSP fidelity work are tracked in the delivery gates.
 
 For image, JavaScript-navigation and malformed-source regressions:
 
@@ -48,11 +48,11 @@ Run the paired browser comparison with an existing certificate trusted for `127.
 
 ```sh
 BLINDER_REVIEW_BROWSER=1 \
-BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-acceptance-certs \
+BLINDER_REVIEW_CERT_DIR=$TMPDIR/blinder-acceptance-certs \
 go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestBehaviorFidelityBrowser$' -v
 ```
 
-Open `/private/tmp/blinder-behavior-browser-url.txt` in the chosen browser within 180 seconds. The fixture automatically runs direct and proxied stages and records `/private/tmp/blinder-behavior-browser-result.json`. Compare explicit permitted/blocked JavaScript execution and CSP events, image load/error events and natural dimensions, malformed comment execution boundaries, and actual upstream image requests. The separate wire test checks incomplete trailing source that the browser omits from its DOM. A disconnected browser or timed-out stage remains incomplete acceptance; neither an opt-in skip nor equality between two unexpected failures counts as a pass. See the behavior checkpoint for the exact state of the current rerun.
+Open `$TMPDIR/blinder-behavior-browser-url.txt` in the chosen browser within 180 seconds. The fixture automatically runs direct and proxied stages and records `$TMPDIR/blinder-behavior-browser-result.json`. Compare explicit permitted/blocked JavaScript execution and CSP events, image load/error events and natural dimensions, malformed comment execution boundaries, and actual upstream image requests. The separate wire test checks incomplete trailing source that the browser omits from its DOM. A disconnected browser or timed-out stage remains incomplete acceptance; neither an opt-in skip nor equality between two unexpected failures counts as a pass. See the behavior checkpoint for the exact state of the current rerun.
 
 Run `go test -race -count=1 ./internal/jsonedit` and `go test -race -count=1 ./internal/proxy -run '^TestJSONFidelity'` for JSON source fidelity. Real HTTP fixtures compare direct and proxied request/response bytes, including duplicate keys, whitespace/order, string escapes, large integers, exponent spellings and negative zero. They verify minimal alias edits and nested CAPTCHA opacity scoped to the configured submission path. Malformed error fixtures retain HTTP 500, SQL-style diagnostics and original broken grammar while redacting escaped identities. Ambiguous escapes and cross-fragment residual identities still exercise the `null` fallback.
 
@@ -65,7 +65,7 @@ For repeatable browser containment UAT, prepare a separate certificate store wit
 ```sh
 ./blinder --preflight --listen 127.0.0.1:18199 --alias localhost \
   --extra-origin https://127.0.0.1:18181 \
-  --cert-dir /private/tmp/blinder-containment-certs
+  --cert-dir $TMPDIR/blinder-containment-certs
 ```
 
 Review its fingerprint and verify browser trust for `127.0.0.1` and `host-a9950799.localhost`, the two hostnames used by this fixture. `localhost` remains the configured primary alias and a certificate SAN; this browser entry uses the IP. On macOS, multiple hostname constraints belong in one trust operation: repeated single-host installations replace that certificate's existing trust settings. The system command supports repeated `-s` arguments in one invocation. [Apple implementation](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/trusted_cert_add.c). After explicit operator approval, the scoped command is:
@@ -74,20 +74,20 @@ Review its fingerprint and verify browser trust for `127.0.0.1` and `host-a99507
 /usr/bin/security add-trusted-cert -r trustRoot -p ssl \
   -s 127.0.0.1 -s host-a9950799.localhost \
   -k "$HOME/Library/Keychains/login.keychain-db" \
-  /private/tmp/blinder-containment-certs/certificate.pem
+  $TMPDIR/blinder-containment-certs/certificate.pem
 ```
 
 Then run:
 
 ```sh
 BLINDER_REVIEW_BROWSER=1 \
-BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-containment-certs \
+BLINDER_REVIEW_CERT_DIR=$TMPDIR/blinder-containment-certs \
 BLINDER_REVIEW_PROXY_LISTEN=127.0.0.1:18199 \
 BLINDER_REVIEW_EXTRA_LISTEN=127.0.0.1:18181 \
 go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestTargetContainmentBrowser$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-containment-browser-url.txt` within 180 seconds. The fixture automatically records the script, CSS, fetch, WebSocket, submitted-URL round trip and extra-origin results in `/private/tmp/blinder-containment-browser-result.json`. Its recording SOCKS relay and separate direct canaries use only local servers. The command does not generate certificates or install trust; each browser hostname must pass certificate verification. Explicit listener addresses require loopback IPs and nonzero ports; occupied ports fail without falling back. Omitting the two listener variables retains random ports, and ordinary wire tests always use their own random ports.
+Open the URL in `$TMPDIR/blinder-containment-browser-url.txt` within 180 seconds. The fixture automatically records the script, CSS, fetch, WebSocket, submitted-URL round trip and extra-origin results in `$TMPDIR/blinder-containment-browser-result.json`. Its recording SOCKS relay and separate direct canaries use only local servers. The command does not generate certificates or install trust; each browser hostname must pass certificate verification. Explicit listener addresses require loopback IPs and nonzero ports; occupied ports fail without falling back. Omitting the two listener variables retains random ports, and ordinary wire tests always use their own random ports.
 
 Run `go test -race -count=1 ./internal/formedit` and `go test -race -count=1 ./internal/proxy -run '^TestFormFidelity'` for form/query source fidelity. Exact upstream bytes, duplicates, pair ordering, percent-escape spelling, bare keys and opaque CAPTCHA values are compared with direct requests, including malformed percent escapes. Only ampersands are treated as separators; unchanged literal semicolons are retained.
 
@@ -128,7 +128,7 @@ For a local browser form/diagnostic check:
 BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 130s ./internal/proxy -run '^TestResponseFidelityBrowser$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-response-browser-url.txt`, check the ordinary paragraph has become verse, click **Validate**, and confirm that the page displays `E_EMAIL`, the validation message and the Unicode input `café`, while its configured identity uses its reversible alias. The fixture verifies that textarea and option values reach upstream as `AcmeCorp & café`, not filler. The upstream response must remain 422. Then navigate to `/review-cleanup` on the fixture origin to finish. The local browser run matched the complete form page at **432 original → 432 rewritten → 432 emitted bytes**. The error response retained its diagnostic text with **277 → 285 → 285 bytes**; error content was not shortened to force a match. This does not establish wider site compatibility or universal content anonymisation.
+Open the URL in `$TMPDIR/blinder-response-browser-url.txt`, check the ordinary paragraph has become verse, click **Validate**, and confirm that the page displays `E_EMAIL`, the validation message and the Unicode input `café`, while its configured identity uses its reversible alias. The fixture verifies that textarea and option values reach upstream as `AcmeCorp & café`, not filler. The upstream response must remain 422. Then navigate to `/review-cleanup` on the fixture origin to finish. The local browser run matched the complete form page at **432 original → 432 rewritten → 432 emitted bytes**. The error response retained its diagnostic text with **277 → 285 → 285 bytes**; error content was not shortened to force a match. This does not establish wider site compatibility or universal content anonymisation.
 
 The current `TestCaptchaFlowBrowser` positive profile passed in Chrome through isolated challenge/provider origins: all 13 provider requests matched relay observations, operator submission displayed **Solution submitted**, and the original POST resumed with its exact token, target session and refreshed CSRF. The direct baseline also passed 13 provider requests. A separate cross-site Lax-cookie profile preserved the direct provider's visible POST 400 denial through Blinder. See the [repeatable commands](#captcha-browser-acceptance); these local synthetic results do not establish live-provider or Tor acceptance.
 
@@ -208,7 +208,7 @@ For the current direct-versus-proxy browser comparison:
 BLINDER_PROVIDER_BROWSER=1 go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestProviderOriginBrowserControlPairs$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-provider-browser-url.txt` in Chrome within 180 seconds. The fixture runs seven direct cases, then their proxied counterparts: script allow/deny, a readable HTTP 500 response through CORS, denied preflight, denied ACAO, isolated provider frame and denied provider script. It records `/private/tmp/blinder-provider-browser-report.json`, comparing browser outcomes and actual provider requests through the recording SOCKS transport. A connection count alone is insufficient: the denied cases must retain their missing resource requests. The 26 September Chrome comparison passed all seven pairs (14 case observations), including the original HTTP 500 diagnostic body; subsequent runs belong to their recorded source revision. The initial extension-method restoration failure is retained separately from the passing rerun.
+Open the URL in `$TMPDIR/blinder-provider-browser-url.txt` in Chrome within 180 seconds. The fixture runs seven direct cases, then their proxied counterparts: script allow/deny, a readable HTTP 500 response through CORS, denied preflight, denied ACAO, isolated provider frame and denied provider script. It records `$TMPDIR/blinder-provider-browser-report.json`, comparing browser outcomes and actual provider requests through the recording SOCKS transport. A connection count alone is insufficient: the denied cases must retain their missing resource requests. The 26 September Chrome comparison passed all seven pairs (14 case observations), including the original HTTP 500 diagnostic body; subsequent runs belong to their recorded source revision. The initial extension-method restoration failure is retained separately from the passing rerun.
 
 Provider HTML keeps original script/style bytes and SRI metadata. A bounded helper handles dynamic fetch, XHR, URL setters and `setAttribute` only when no enforcing/report-only header or meta policy prevents instrumentation; BOM, invalid UTF-8 and unsupported explicit charset also skip it. Raw challenge content now uses an expiring capability on its own `<id>.blinder-challenge.localhost` origin, separate from operator authentication, and applies the same policy/encoding safeguards to its completion bridge. Neither helper is a global browser containment mechanism: parser-created URLs, workers, imports and other APIs need separate coverage. Raw challenge CSP `'self'` can also disagree with target assets moved to a different local origin; preserving its headers does not prove control fidelity. No trust is installed by these HTTP fixtures.
 
@@ -218,7 +218,7 @@ For authenticated popup and service-worker isolation:
 BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 150s ./internal/proxy -run '^TestCaptchaSessionBrowserOperatorIsolation$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-captcha-browser-url.txt`. The fixture first verifies a cookie-authenticated operator document, then opens the target page and activates its service worker. When enabled, click **Run popup isolation check**. A real popup must reach the authenticated operator endpoint; blocking the popup does not count as isolation. The test requires denied target access to operator DOM/fetch/frame content, denied operator worker registration, no operator cookie on target requests, and no operator navigation interception by the active target worker. It automatically unregisters the worker, clears the cookie on the operator origin and finishes. Results are written to `/private/tmp/blinder-captcha-browser-result.json`.
+Open the URL in `$TMPDIR/blinder-captcha-browser-url.txt`. The fixture first verifies a cookie-authenticated operator document, then opens the target page and activates its service worker. When enabled, click **Run popup isolation check**. A real popup must reach the authenticated operator endpoint; blocking the popup does not count as isolation. The test requires denied target access to operator DOM/fetch/frame content, denied operator worker registration, no operator cookie on target requests, and no operator navigation interception by the active target worker. It automatically unregisters the worker, clears the cookie on the operator origin and finishes. Results are written to `$TMPDIR/blinder-captcha-browser-result.json`.
 
 The current Chrome run passed these checks with an active target service worker and an authenticated popup whose opener was severed. This is separate evidence from synthetic challenge completion and from trust setup.
 
@@ -228,9 +228,9 @@ Run the current synthetic operator-completion profile against isolated provider 
 BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 190s ./internal/proxy -run '^TestCaptchaFlowBrowser$' -v
 ```
 
-Open the fresh URL in `/private/tmp/blinder-flow-browser-url.txt` in the selected browser. The bootstrap authenticates the operator and opens the challenge. Wait for the synthetic provider to finish and populate the solution field, then click **Submit Solution** once. Do not paste a token manually. Require the **Solution submitted** receipt, then visit `/review-cleanup` on the same operator origin within 25 seconds to clear the fixture's authentication cookie.
+Open the fresh URL in `$TMPDIR/blinder-flow-browser-url.txt` in the selected browser. The bootstrap authenticates the operator and opens the challenge. Wait for the synthetic provider to finish and populate the solution field, then click **Submit Solution** once. Do not paste a token manually. Require the **Solution submitted** receipt, then visit `/review-cleanup` on the same operator origin within 25 seconds to clear the fixture's authentication cookie.
 
-The result is recorded in `/private/tmp/blinder-flow-browser-result.json`, including failed and timed-out attempts. Acceptance requires provider redirects, scripts, frames, POST/fetch and XHR, PUT/PATCH/DELETE/OPTIONS, PROPFIND and `vendor.sync`; every observed provider request must match a relay request and its expected status, with no target/operator credentials exported. Browser-added preflights are recorded separately from the fixture's explicit OPTIONS operation and cannot count as completed API calls. The original request must resume with the exact `synthetic-valid-solution` token, original username, refreshed CSRF and target cookies. Dynamic absolute provider URLs remain in the fixture, so a browser-direct fetch cannot be concealed by changing them to relative references. Sandbox-origin and cookie behavior must pass in the selected browser; do not loosen its controls to make the fixture pass. This uses HTTP `.localhost` endpoints and a local SOCKS relay, without certificate installation; it does not establish provider-alias HTTPS trust, real-provider human completion or live Tor acceptance.
+The result is recorded in `$TMPDIR/blinder-flow-browser-result.json`, including failed and timed-out attempts. Acceptance requires provider redirects, scripts, frames, POST/fetch and XHR, PUT/PATCH/DELETE/OPTIONS, PROPFIND and `vendor.sync`; every observed provider request must match a relay request and its expected status, with no target/operator credentials exported. Browser-added preflights are recorded separately from the fixture's explicit OPTIONS operation and cannot count as completed API calls. The original request must resume with the exact `synthetic-valid-solution` token, original username, refreshed CSRF and target cookies. Dynamic absolute provider URLs remain in the fixture, so a browser-direct fetch cannot be concealed by changing them to relative references. Sandbox-origin and cookie behavior must pass in the selected browser; do not loosen its controls to make the fixture pass. This uses HTTP `.localhost` endpoints and a local SOCKS relay, without certificate installation; it does not establish provider-alias HTTPS trust, real-provider human completion or live Tor acceptance.
 
 The positive provider is stateless and returns an opaque solution token; target session cookies remain required. Run its direct browser reference separately:
 
@@ -239,7 +239,7 @@ BLINDER_REVIEW_BROWSER=1 BLINDER_REVIEW_CAPTCHA_DIRECT=1 \
 go test -race -count=1 -timeout 190s ./internal/proxy -run '^TestCaptchaFlowBrowser$' -v
 ```
 
-Open `/private/tmp/blinder-flow-direct-browser-url.txt`; its result is written to `/private/tmp/blinder-flow-direct-browser-result.json`. The direct mode finishes after the provider returns its result and has no operator login or submission step. Preserve each JSON result before starting another run because later attempts replace these files.
+Open `$TMPDIR/blinder-flow-direct-browser-url.txt`; its result is written to `$TMPDIR/blinder-flow-direct-browser-result.json`. The direct mode finishes after the provider returns its result and has no operator login or submission step. Preserve each JSON result before starting another run because later attempts replace these files.
 
 For the cross-site Lax-cookie denial profile, add `BLINDER_REVIEW_CAPTCHA_PROFILE=lax` to each command, first with direct mode and then without it. Both should display `Error: POST 400`, with six provider requests; the proxy must relay all six without adding an `Origin: null` preflight. Do not submit a solution on this profile. Chrome passed these paired denial checks without changing browser cookie settings. A provider cookie being withheld is the expected security-control outcome here, not a completion failure to bypass.
 
@@ -409,8 +409,8 @@ An onion address in a SOCKS5 CONNECT request demonstrates remote destination han
 - **Evidence:** verify imports into the intended HAR tool. Independent schema, synthetic semantic and Playwright importer/matcher checks pass; binary requests need the optional Playwright export adapter. Selected viewer UI, browser replay and WebSocket frame capture remain separate acceptance work; handshake evidence is covered by local regressions.
 - **Routing and scale:** complete the live Tor track above; complex multi-origin applications, long-running sessions, load, memory growth and all release platforms remain separate test work.
 
-Release acceptance requires the open functional failures to be fixed, the full functional command to pass, and the integrated browser/scanner workflow to meet the [day-one contract](day-one-contract.md) with recorded evidence and explicit operator sign-off. The live Tor/onion track is required; do not substitute the local SOCKS fixture. Unsupported behaviour that contradicts the contract remains unfinished work. Only an explicit operator instruction can change scope.
+Release acceptance requires the open functional failures to be fixed, the full functional command to pass, and the integrated browser/scanner workflow to pass with recorded evidence. The live Tor/onion track is required; do not substitute the local SOCKS fixture.
 
 ### External CSP and SRI comparison
 
-Run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -run '^TestExternalControlFidelityBrowser$' -v ./internal/proxy` and open the local HTTPS URL written to `/private/tmp/blinder-external-csp-browser-url.txt` in the already trusted Chrome profile. The fixture runs the direct baseline followed by Blinder and verifies execution, policy violations, resource errors and upstream request counts. It writes `/private/tmp/blinder-external-csp-browser-result.json`. Do not replace a browser trust failure with a certificate bypass or count an opt-in skip as a pass.
+Run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -run '^TestExternalControlFidelityBrowser$' -v ./internal/proxy` and open the local HTTPS URL written to `$TMPDIR/blinder-external-csp-browser-url.txt` in the already trusted Chrome profile. The fixture runs the direct baseline followed by Blinder and verifies execution, policy violations, resource errors and upstream request counts. It writes `$TMPDIR/blinder-external-csp-browser-result.json`. Do not replace a browser trust failure with a certificate bypass or count an opt-in skip as a pass.
