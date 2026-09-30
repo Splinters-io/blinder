@@ -232,7 +232,7 @@ func run() int {
 	}
 
 	if !ephemeral && cfg.CertDir == "" {
-		cfg.CertDir, err = blindertls.DefaultDir(cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
+		cfg.CertDir, err = blindertls.CADir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1
@@ -265,7 +265,7 @@ func run() int {
 	// resource references. Keep a separate random signing key in the endpoint store.
 	cfg.VersionKeyDir = cfg.CertDir
 	if cfg.VersionKeyDir == "" {
-		cfg.VersionKeyDir, err = blindertls.DefaultDir(cfg.AliasDomain, cfg.ListenAddr, extraAliases...)
+		cfg.VersionKeyDir, err = blindertls.CADir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "version key setup failed: %v\n", err)
 			return 1

@@ -30,10 +30,16 @@ func printCertificateStatus(out io.Writer, cert *blindertls.Material, guidance c
 
 func printCertificateStatusWithVerifier(out io.Writer, cert *blindertls.Material, guidance certificateGuidance, verify func(string) error) error {
 	fmt.Fprintf(out, "Detected OS: %s\n", guidance.platform.name())
-	fmt.Fprintf(out, "Local certificate: %s\nEndpoint host: %s\nSHA-256: %s\nExpires: %s\n",
-		cert.Action, cert.Host, cert.Fingerprint, cert.Certificate.Leaf.NotAfter.Format(time.RFC3339))
+	if cert.CACertificate.Leaf != nil {
+		fmt.Fprintf(out, "Local CA: %s\nCA fingerprint: %s\nCA expires: %s\n",
+			cert.Action, cert.Fingerprint, cert.CACertificate.Leaf.NotAfter.Format(time.RFC3339))
+	} else {
+		fmt.Fprintf(out, "Local certificate: %s\nSHA-256: %s\nExpires: %s\n",
+			cert.Action, cert.Fingerprint, cert.Certificate.Leaf.NotAfter.Format(time.RFC3339))
+	}
+	fmt.Fprintf(out, "Endpoint host: %s\n", cert.Host)
 	if cert.PublicPath != "" {
-		fmt.Fprintf(out, "Public certificate: %s\n", cert.PublicPath)
+		fmt.Fprintf(out, "CA certificate: %s\n", cert.PublicPath)
 	}
 	err := verify(cert.Host)
 	if err == nil {
@@ -79,7 +85,9 @@ func printAdditionalCertificateEndpoints(out io.Writer, cert *blindertls.Materia
 		}
 		fmt.Fprintf(out, "Platform trust [%s]: %s (%s)\n", candidate.role, status, candidate.host)
 	}
-	if checked > 0 {
+	if cert.CACertificate.Leaf != nil && checked > 0 {
+		fmt.Fprintln(out, "With the local CA trusted, all hostnames above should be covered automatically.")
+	} else if checked > 0 {
 		fmt.Fprintf(out, "Preflight exit status and --trust-cert apply to %s only. Other browser hostnames above have independent trust results.\n", cert.Host)
 		fmt.Fprintln(out, "These are platform certificate checks; verify name resolution and trust in the actual browser/scanner separately.")
 	}
@@ -90,23 +98,33 @@ func printAdditionalCertificateEndpoints(out io.Writer, cert *blindertls.Materia
 
 func printCertificateAdvice(out io.Writer, cert *blindertls.Material, guidance certificateGuidance, needsTrust bool) {
 	if cert.PublicPath == "" {
-		fmt.Fprintln(out, "Ephemeral certificate: trust changes on restart. Rerun without --ephemeral-cert for persistent client setup.")
+		fmt.Fprintln(out, "Ephemeral certificate: trust changes on restart. Rerun without --ephemeral-cert for persistent CA setup.")
 		return
 	}
 	if needsTrust {
 		switch guidance.platform.goos {
 		case "darwin":
-			fmt.Fprintln(out, "Next step: review the fingerprint, then request trust in your macOS login Keychain:")
-			fmt.Fprintln(out, "  "+guidance.setupCommand(cert, "--trust-cert"))
-			fmt.Fprintln(out, "This trusts this server certificate for SSL to the displayed host. It requires confirmation; it does not install a signing CA.")
+			if cert.CACertificate.Leaf != nil {
+				fmt.Fprintln(out, "Next step: review the CA fingerprint, then install the Blinder local CA in your macOS login Keychain:")
+				fmt.Fprintln(out, "  "+guidance.setupCommand(cert, "--trust-cert"))
+				fmt.Fprintln(out, "This trusts the local CA for SSL. All current and future Blinder endpoints are covered; you only need to do this once.")
+			} else {
+				fmt.Fprintln(out, "Next step: review the fingerprint, then request trust in your macOS login Keychain:")
+				fmt.Fprintln(out, "  "+guidance.setupCommand(cert, "--trust-cert"))
+				fmt.Fprintln(out, "This trusts this server certificate for SSL to the displayed host. It requires confirmation; it does not install a signing CA.")
+			}
 		case "linux":
-			fmt.Fprintf(out, "Recommended on %s: configure trust for the browser/scanner you will use. For curl, use the public certificate with --cacert below.\n", guidance.platform.name())
+			fmt.Fprintf(out, "Recommended on %s: configure trust for the browser/scanner you will use. For curl, use the CA certificate with --cacert below.\n", guidance.platform.name())
 			if guidance.platform.debianFamily() {
-				fmt.Fprintln(out, "Ubuntu/Debian's system-wide update-ca-certificates procedure is for CA trust. Blinder exports a server certificate, so use client-specific trust first.")
+				if cert.CACertificate.Leaf != nil {
+					fmt.Fprintln(out, "Ubuntu/Debian: copy the CA certificate to /usr/local/share/ca-certificates/ and run update-ca-certificates for system-wide trust.")
+				} else {
+					fmt.Fprintln(out, "Ubuntu/Debian's system-wide update-ca-certificates procedure is for CA trust. Blinder exports a server certificate, so use client-specific trust first.")
+				}
 			}
 			fmt.Fprintln(out, "--trust-cert does not install Linux trust or invoke sudo.")
 		default:
-			fmt.Fprintln(out, "Configure the selected client's server-certificate trust or certificate-file option using the public certificate above.")
+			fmt.Fprintln(out, "Configure the selected client's certificate trust using the CA certificate above.")
 		}
 	}
 	if guidance.platform.goos == "darwin" || guidance.platform.goos == "linux" {
@@ -118,9 +136,17 @@ func printCertificateAdvice(out io.Writer, cert *blindertls.Material, guidance c
 			fmt.Fprintln(out, "This checks curl's explicit certificate trust; it does not install platform or browser trust.")
 		}
 	}
-	fmt.Fprintln(out, "Browser/scanner: verify the fingerprint and use that client's server-certificate trust flow. Do not import this leaf certificate as an issuing CA. Client support varies.")
+	if cert.CACertificate.Leaf != nil {
+		fmt.Fprintln(out, "The local CA covers all Blinder hostnames. Adding extra origins or changing aliases does not require re-trusting.")
+	} else {
+		fmt.Fprintln(out, "Browser/scanner: verify the fingerprint and use that client's server-certificate trust flow. Do not import this leaf certificate as an issuing CA. Client support varies.")
+	}
 	fmt.Fprintln(out, "Client-specific trust can work while --preflight still exits 2. After changing platform trust, rerun --preflight in a new process.")
-	fmt.Fprintln(out, "Use certificate.pem for client setup; identity.pem contains the private key. Trust belongs on the client machine, which may differ from this OS.")
+	if cert.CACertificate.Leaf != nil {
+		fmt.Fprintln(out, "Use ca-certificate.pem for client setup; ca-identity.pem contains the private key.")
+	} else {
+		fmt.Fprintln(out, "Use certificate.pem for client setup; identity.pem contains the private key. Trust belongs on the client machine, which may differ from this OS.")
+	}
 }
 
 func (g certificateGuidance) setupCommand(cert *blindertls.Material, action string) string {
@@ -145,7 +171,11 @@ func requestCertificateTrust(cert *blindertls.Material, trustErr error, input io
 		fmt.Fprintf(output, "Automatic trust installation is unavailable on %s. Follow the client-specific advice above; trust settings were not changed.\n", guidance.platform.name())
 		return 2
 	}
-	fmt.Fprintf(output, "Trust this server certificate for SSL to %s in your macOS user Keychain?\nThis does not install a signing CA. macOS may request approval. Type 'yes' to proceed: ", cert.Host)
+	if cert.CACertificate.Leaf != nil {
+		fmt.Fprintf(output, "Trust the Blinder local CA for SSL in your macOS user Keychain?\nThis covers all current and future Blinder endpoints. macOS may request approval. Type 'yes' to proceed: ")
+	} else {
+		fmt.Fprintf(output, "Trust this server certificate for SSL to %s in your macOS user Keychain?\nThis does not install a signing CA. macOS may request approval. Type 'yes' to proceed: ", cert.Host)
+	}
 	if !confirmTrust(input) {
 		fmt.Fprintln(output, "Trust installation declined. Certificate files are ready; trust settings were not changed.")
 		return 2
@@ -160,7 +190,11 @@ func requestCertificateTrust(cert *blindertls.Material, trustErr error, input io
 		fmt.Fprintln(output, "Installation completed, but platform verification still fails. Rerun --preflight in a new process and check the selected client's trust store.")
 		return 2
 	}
-	fmt.Fprintf(output, "Platform trust: ready for %s. Certificate retained for the next start; verify the selected browser/scanner and other hostnames separately.\n", cert.Host)
+	if cert.CACertificate.Leaf != nil {
+		fmt.Fprintln(output, "Platform trust: Blinder local CA is now trusted. All endpoints are covered; this is a one-time setup.")
+	} else {
+		fmt.Fprintf(output, "Platform trust: ready for %s. Certificate retained for the next start; verify the selected browser/scanner and other hostnames separately.\n", cert.Host)
+	}
 	return 0
 }
 

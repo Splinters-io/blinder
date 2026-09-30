@@ -107,7 +107,7 @@ type HARConfig struct {
 Reverse proxy core using `net/http/httputil.ReverseProxy` with a custom `Transport`.
 
 Responsibilities:
-- TLS termination (self-signed cert for alias domain)
+- TLS termination (local CA with session leaf certificates)
 - Request rewriting (alias domain → real target in Host, Referer, Origin)
 - Upstream fetch (direct HTTPS or via SOCKS5 for Tor)
 - Response capture (pre-scrub, for HAR)
@@ -263,13 +263,13 @@ Self-signed certificate generation for the alias domain. Uses Go's `crypto/x509`
 
 SAN entries: alias domain, `localhost`, `127.0.0.1`, `::1`, and the listen host. Wildcard listen addresses use their loopback counterpart for the displayed client endpoint.
 
-CLI startup defaults to a persistent certificate under the platform's user configuration directory, keyed by alias/listen host; `--cert-dir` overrides this location. A private `identity.pem` atomically stores the certificate/key pair, while `certificate.pem` exports only the public certificate. Store directories require mode 0700, private identities require mode 0600, and concurrent preparation is serialized with a file lock on supported macOS/Linux platforms. Missing public exports are repaired from the canonical identity. Corrupt private identities and unsafe file paths fail with an actionable error rather than discarding existing keys.
+CLI startup defaults to a persistent local CA under the platform's user configuration directory (`<config>/blinder/ca/`); `--cert-dir` overrides this location. A private `ca-identity.pem` atomically stores the CA certificate/key pair, while `ca-certificate.pem` exports only the public CA certificate. Store directories require mode 0700, private identities require mode 0600, and concurrent CA preparation is serialized with a file lock on supported macOS/Linux platforms. Missing public exports are repaired from the canonical CA identity. Corrupt CA identities and unsafe file paths fail with an actionable error rather than discarding existing keys. Each session generates a leaf certificate in memory, signed by the CA, with SANs for the current alias, extra origins and endpoint hostnames.
 
-Persistent certificates last 90 days and are renewed at startup with seven days or less remaining. Endpoint-name changes also cause reissue. Previous public certificates are retained as `previous-<fingerprint>.pem` for removal of old trust. Reuse preserves the fingerprint across restarts; renewal or reissue changes it and requires a new trust step. `--ephemeral-cert` retains a 24-hour memory-only mode.
+The CA persists for 90 days and is renewed at startup with seven days or less remaining. Previous CA public certificates are retained as `previous-ca-<fingerprint>.pem` for removal of old trust. CA reuse preserves the fingerprint across restarts; renewal changes it and requires a one-time trust step. Adding or removing extra origins, changing the alias or reconfiguring endpoints only affects the session leaf certificate -- the CA and its trust relationship are unchanged. `--ephemeral-cert` retains a 24-hour memory-only self-signed leaf mode with no CA.
 
-`--preflight` prepares the certificate and checks platform verification for the displayed endpoint, returning 0 for ready, 2 for trust setup needed, or 1 for setup failure. It does not test listener availability, upstream connectivity or Tor bootstrap. On macOS, `--trust-cert` requests explicit approval to trust only this server certificate for SSL to the displayed host in the current user's login Keychain; no signing CA or admin trust store is installed. Other platforms/clients use their own public-certificate import or CA-file option. Successful platform verification does not prove that clients with separate stores trust the certificate.
+`--preflight` prepares the CA and checks platform verification for the displayed endpoint, returning 0 for ready, 2 for trust setup needed, or 1 for setup failure. It does not test listener availability, upstream connectivity or Tor bootstrap. On macOS, `--trust-cert` requests explicit approval to trust the local CA for SSL in the current user's login Keychain; the CA is MaxPathLen 0 and signs only end-entity certificates. Other platforms/clients use their own CA-certificate import or CA-file option. Successful platform verification does not prove that clients with separate stores trust the CA.
 
-Certificate status includes OS-specific advice. macOS receives an explicitly quoted trust command carrying the current certificate directory, alias and listen address. Linux distribution detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, or `/usr/lib/os-release` if the first file is missing, without executing either file. Ubuntu/Debian receives client-specific trust guidance and explains why a system-wide root-CA workflow is not the default for Blinder's leaf certificate; unknown Linux receives generic guidance. macOS/Linux also receives a `curl --cacert` verification command for the actual endpoint. Client-specific trust does not alter the platform-check exit status. OS detection identifies the running environment and cannot verify a remote browser's trust store. See the [certificate guide](docs/testing.md#certificate-advice-by-os).
+Certificate status includes OS-specific advice. macOS receives an explicitly quoted trust command carrying the current CA directory, alias and listen address. Linux distribution detection reads `ID`, `VERSION_ID` and `ID_LIKE` from `/etc/os-release`, or `/usr/lib/os-release` if the first file is missing, without executing either file. Ubuntu/Debian receives CA trust guidance for system-wide trust via `update-ca-certificates`; unknown Linux receives generic guidance. macOS/Linux also receives a `curl --cacert` verification command for the actual endpoint. Client-specific trust does not alter the platform-check exit status. OS detection identifies the running environment and cannot verify a remote browser's trust store. See the [certificate guide](docs/testing.md#certificate-advice-by-os).
 
 ## 6. CLI Interface
 
@@ -422,7 +422,7 @@ HAR files contain the **real** target data — URLs, headers, cookies and captur
 
 ### 9.3 Cryptography (ASVS V6)
 
-- **TLS for client-facing:** self-signed ECDSA P-256 server certificate. SHA-256 signature. Valid for 90 days in persistent mode or 24 hours in ephemeral mode; SAN includes alias domain, localhost, loopback IPs and listen host. This is a server identity, not a signing CA.
+- **TLS for client-facing:** local ECDSA P-256 CA (MaxPathLen 0, 90-day lifetime) signs session leaf certificates. Leaf SANs include alias domain, localhost, loopback IPs, listen host, extra-origin aliases and CAPTCHA hostnames. Trust the CA once; adding origins or changing aliases does not require re-trusting. `--ephemeral-cert` falls back to a 24-hour self-signed leaf with no CA.
 - **TLS for upstream:** uses Go's default TLS 1.2+ configuration. `--no-verify-tls` disables verification of the target's HTTPS certificate and logs a warning. It does not establish browser trust in Blinder's local certificate. Tor or an `.onion` hostname alone does not require this override; HTTPS target verification remains enabled by default, including through Tor.
 - **Domain hashing:** SHA-256 truncated to 8 hex characters (32 bits). This is for aliasing consistency, not security — collision within a single session is acceptable (same alias for two different domains would reduce information, not leak it).
 
@@ -666,7 +666,7 @@ For in-process use (when RAPTOR wants to start/stop blinder programmatically), a
 
 1. **HTTP/2?** Go's reverse proxy supports HTTP/2 out of the box, but HAR 1.2 doesn't model HTTP/2 streams well. Start with HTTP/1.1 for HAR compatibility; HTTP/2 to upstream is fine.
 
-2. **Certificate pinning?** If the scanner does cert pinning (unlikely for blinder's use case), the self-signed cert will fail. Not a priority — document the workaround (--insecure on the scanner side).
+2. **Certificate pinning?** If the scanner does cert pinning (unlikely for blinder's use case), the local CA-signed cert will fail. Not a priority — document the workaround (--insecure on the scanner side).
 
 3. **Response streaming vs. buffering?** Full-body buffering is needed for HTML parsing and scrubbing. For responses over 50MB, stream with line-by-line domain scrubbing only. This means very large HTML pages (>50MB) get weaker scrubbing — acceptable tradeoff.
 

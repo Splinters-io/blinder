@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"time"
@@ -16,6 +17,90 @@ import (
 func GenerateSelfSigned(aliasDomain string, extraNames ...string) (tls.Certificate, error) {
 	cert, _, err := generate(aliasDomain, "127.0.0.1", time.Now(), 24*time.Hour, extraNames...)
 	return cert, err
+}
+
+func generateCA(now time.Time, lifetime time.Duration) (tls.Certificate, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization: []string{"Blinder Local CA"},
+			CommonName:   "Blinder Local CA",
+		},
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.Add(lifetime),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err == nil {
+		cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	}
+	return cert, append(certPEM, keyPEM...), err
+}
+
+func generateLeaf(ca tls.Certificate, aliasDomain, host string, now time.Time, lifetime time.Duration, extraNames ...string) (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization: []string{"Blinder Proxy"},
+			CommonName:   aliasDomain,
+		},
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.Add(lifetime),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	for _, name := range certificateNames(aliasDomain, host, extraNames...) {
+		if ip := net.ParseIP(name); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, name)
+		}
+	}
+	caKey, ok := ca.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return tls.Certificate{}, errors.New("CA private key is not ECDSA")
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.Leaf, &key.PublicKey, caKey)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	leaf := tls.Certificate{
+		Certificate: [][]byte{certDER, ca.Certificate[0]},
+		PrivateKey:  key,
+	}
+	leaf.Leaf, err = x509.ParseCertificate(certDER)
+	return leaf, err
 }
 
 func generate(aliasDomain, host string, now time.Time, lifetime time.Duration, extraNames ...string) (tls.Certificate, []byte, error) {

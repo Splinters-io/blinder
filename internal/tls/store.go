@@ -23,11 +23,12 @@ const renewBefore = 7 * 24 * time.Hour
 
 // Material is prepared once, then used for both preflight and the listener.
 type Material struct {
-	Certificate tls.Certificate
-	PublicPath  string
-	Fingerprint string
-	Host        string
-	Action      string
+	Certificate   tls.Certificate
+	CACertificate tls.Certificate
+	PublicPath    string
+	Fingerprint   string
+	Host          string
+	Action        string
 }
 
 func EndpointHost(listen string) (string, error) {
@@ -57,6 +58,19 @@ func certificateNames(alias, host string, extra ...string) []string {
 	return names
 }
 
+// CADir returns a stable directory for the local CA, independent of alias,
+// listen address, or extra-origin configuration. Trust the CA once; all
+// future leaf certificates are automatically trusted regardless of SANs.
+func CADir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("locate CA directory: use --cert-dir: %w", err)
+	}
+	return filepath.Join(base, "blinder", "ca"), nil
+}
+
+// DefaultDir returns a per-configuration directory for non-certificate state
+// such as the version-signing key.
 func DefaultDir(alias, listen string, extraNames ...string) (string, error) {
 	host, err := EndpointHost(listen)
 	if err != nil {
@@ -74,9 +88,9 @@ func DefaultDir(alias, listen string, extraNames ...string) (string, error) {
 	return filepath.Join(base, "blinder", "certs", hex.EncodeToString(key[:12])), nil
 }
 
-// Prepare creates a private store, reuses a valid identity, and renews it near
-// expiry. A corrupt identity fails explicitly; it is never silently discarded.
-// The combined PEM is the canonical atomic record; the public PEM is repairable.
+// Prepare loads or creates a local CA in dir and generates an in-memory leaf
+// certificate signed by that CA for the given endpoint names. When dir is
+// empty, it generates an ephemeral self-signed leaf with no CA.
 func Prepare(dir, alias, listen string, extraNames ...string) (*Material, error) {
 	return prepare(dir, alias, listen, time.Now(), extraNames...)
 }
@@ -91,98 +105,113 @@ func prepare(dir, alias, listen string, now time.Time, extraNames ...string) (*M
 		if err != nil {
 			return nil, err
 		}
-		return material(cert, "", host, "ephemeral"), nil
+		return ephemeralMaterial(cert, host), nil
 	}
-	dir, err = filepath.Abs(dir)
+
+	ca, caAction, err := prepareCA(dir, now)
 	if err != nil {
 		return nil, err
 	}
+
+	leaf, err := generateLeaf(ca, alias, host, now, 24*time.Hour, extraNames...)
+	if err != nil {
+		return nil, err
+	}
+
+	caPublicPath := filepath.Join(dir, "ca-certificate.pem")
+	return caMaterial(leaf, ca, caPublicPath, host, caAction), nil
+}
+
+func prepareCA(dir string, now time.Time) (tls.Certificate, string, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, fmt.Errorf("create certificate directory: %w", err)
+		return tls.Certificate{}, "", fmt.Errorf("create CA directory: %w", err)
 	}
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("certificate directory must be a real directory: %s", dir)
+		return tls.Certificate{}, "", fmt.Errorf("CA directory must be a real directory: %s", dir)
 	}
 	if info.Mode().Perm()&0077 != 0 {
-		return nil, fmt.Errorf("certificate directory must be private (mode 0700): %s", dir)
+		return tls.Certificate{}, "", fmt.Errorf("CA directory must be private (mode 0700): %s", dir)
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, err
+		return tls.Certificate{}, "", err
 	}
 	defer root.Close()
 	unlock, err := lockStore(root)
 	if err != nil {
-		return nil, err
+		return tls.Certificate{}, "", err
 	}
 	defer unlock()
-	data, err := readRegular(root, "identity.pem")
-	var cert tls.Certificate
+
+	data, err := readRegular(root, "ca-identity.pem")
+	var ca tls.Certificate
 	action := "reused"
 	if errors.Is(err, os.ErrNotExist) {
 		action = "created"
 	} else if err != nil {
-		return nil, err
+		return tls.Certificate{}, "", err
 	} else {
-		info, err := root.Stat("identity.pem")
+		info, err := root.Stat("ca-identity.pem")
 		if err != nil {
-			return nil, err
+			return tls.Certificate{}, "", err
 		}
 		if info.Mode().Perm()&0077 != 0 {
-			return nil, errors.New("identity.pem contains a private key and must have mode 0600")
+			return tls.Certificate{}, "", errors.New("ca-identity.pem contains a private key and must have mode 0600")
 		}
-		cert, err = tls.X509KeyPair(data, data)
+		ca, err = tls.X509KeyPair(data, data)
 		if err != nil {
-			return nil, fmt.Errorf("invalid identity.pem; restore a valid backup or choose a new --cert-dir: %w", err)
+			return tls.Certificate{}, "", fmt.Errorf("invalid ca-identity.pem; restore a valid backup or choose a new --cert-dir: %w", err)
 		}
-		cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+		ca.Leaf, err = x509.ParseCertificate(ca.Certificate[0])
 		if err != nil {
-			return nil, err
+			return tls.Certificate{}, "", err
 		}
-		leaf := cert.Leaf
-		if leaf.IsCA || leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) != nil {
-			return nil, errors.New("identity.pem must contain a self-signed server certificate, not a CA")
+		if !ca.Leaf.IsCA {
+			return tls.Certificate{}, "", errors.New("ca-identity.pem must contain a CA certificate")
 		}
-		if now.Before(leaf.NotBefore) {
-			return nil, errors.New("stored certificate is not valid yet; check the system clock")
+		if now.Before(ca.Leaf.NotBefore) {
+			return tls.Certificate{}, "", errors.New("stored CA is not valid yet; check the system clock")
 		}
-		if !now.Add(renewBefore).Before(leaf.NotAfter) {
+		if !now.Add(renewBefore).Before(ca.Leaf.NotAfter) {
 			action = "renewed"
 		}
-		for _, name := range certificateNames(alias, host, extraNames...) {
-			if !certificateCoversName(leaf, name) {
-				action = "reissued for endpoint names"
-			}
-		}
 	}
+
 	if action != "reused" {
-		if len(cert.Certificate) > 0 {
-			old := material(cert, "", host, "")
-			// Retain the previous public certificate for removal of old trust.
-			if err := atomicWrite(root, "previous-"+old.Fingerprint+".pem", publicPEM(cert)); err != nil {
-				return nil, err
+		if len(ca.Certificate) > 0 {
+			sum := sha256.Sum256(ca.Certificate[0])
+			oldFP := hex.EncodeToString(sum[:])
+			if err := atomicWrite(root, "previous-ca-"+oldFP+".pem", publicPEM(ca)); err != nil {
+				return tls.Certificate{}, "", err
 			}
 		}
-		cert, data, err = generate(alias, host, now, persistentLifetime, extraNames...)
+		var caData []byte
+		ca, caData, err = generateCA(now, persistentLifetime)
 		if err != nil {
-			return nil, err
+			return tls.Certificate{}, "", err
 		}
-		if err := atomicWrite(root, "identity.pem", data); err != nil {
-			return nil, err
+		if err := atomicWrite(root, "ca-identity.pem", caData); err != nil {
+			return tls.Certificate{}, "", err
 		}
 	}
-	public := publicPEM(cert)
-	existing, err := readRegular(root, "certificate.pem")
+
+	public := publicPEM(ca)
+	existing, err := readRegular(root, "ca-certificate.pem")
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+		return tls.Certificate{}, "", err
 	}
 	if !bytes.Equal(existing, public) {
-		if err := atomicWrite(root, "certificate.pem", public); err != nil {
-			return nil, err
+		if err := atomicWrite(root, "ca-certificate.pem", public); err != nil {
+			return tls.Certificate{}, "", err
 		}
 	}
-	return material(cert, filepath.Join(dir, "certificate.pem"), host, action), nil
+
+	return ca, action, nil
 }
 
 // VerifyHostname expects a concrete endpoint. For a planned wildcard, require
@@ -205,9 +234,27 @@ func certificateCoversName(leaf *x509.Certificate, name string) bool {
 	return leaf.VerifyHostname(name) == nil
 }
 
-func material(cert tls.Certificate, path, host, action string) *Material {
+func ephemeralMaterial(cert tls.Certificate, host string) *Material {
 	sum := sha256.Sum256(cert.Certificate[0])
-	return &Material{cert, path, hex.EncodeToString(sum[:]), host, action}
+	return &Material{
+		Certificate: cert,
+		PublicPath:  "",
+		Fingerprint: hex.EncodeToString(sum[:]),
+		Host:        host,
+		Action:      "ephemeral",
+	}
+}
+
+func caMaterial(leaf, ca tls.Certificate, caPublicPath, host, action string) *Material {
+	sum := sha256.Sum256(ca.Certificate[0])
+	return &Material{
+		Certificate:   leaf,
+		CACertificate: ca,
+		PublicPath:    caPublicPath,
+		Fingerprint:   hex.EncodeToString(sum[:]),
+		Host:          host,
+		Action:        action,
+	}
 }
 
 func publicPEM(cert tls.Certificate) []byte {

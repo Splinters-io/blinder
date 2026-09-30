@@ -29,13 +29,13 @@ func TestCertificatePreflightAndVerifiedRestart(t *testing.T) {
 	if !strings.Contains(string(out), "Detected OS: ") || !strings.Contains(string(out), "curl --cacert") || !strings.Contains(string(out), "--preflight still exits 2") {
 		t.Fatalf("preflight is missing OS/client guidance: %s", out)
 	}
-	public, err := os.ReadFile(filepath.Join(dir, "certificate.pem"))
+	public, err := os.ReadFile(filepath.Join(dir, "ca-certificate.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(public) {
-		t.Fatal("missing public certificate")
+		t.Fatal("missing CA certificate")
 	}
 	upstream := httptest.NewServer(fixture.Handler())
 	defer upstream.Close()
@@ -51,7 +51,7 @@ func TestCertificatePreflightAndVerifiedRestart(t *testing.T) {
 		}
 		if i == 0 {
 			if curl, err := exec.LookPath("curl"); err == nil {
-				curlOut, err := exec.Command(curl, "--noproxy", "*", "--max-time", "5", "--fail", "--silent", "--show-error", "--cacert", filepath.Join(dir, "certificate.pem"), p.baseURL+"/api").CombinedOutput()
+				curlOut, err := exec.Command(curl, "--noproxy", "*", "--max-time", "5", "--fail", "--silent", "--show-error", "--cacert", filepath.Join(dir, "ca-certificate.pem"), p.baseURL+"/api").CombinedOutput()
 				if err != nil || !strings.Contains(string(curlOut), "9007199254740993") {
 					t.Fatalf("documented curl certificate verification failed: %v\n%s", err, curlOut)
 				}
@@ -60,7 +60,7 @@ func TestCertificatePreflightAndVerifiedRestart(t *testing.T) {
 			}
 		}
 		for _, line := range strings.Split(p.logs(), "\n") {
-			if strings.HasPrefix(line, "SHA-256: ") {
+			if strings.HasPrefix(line, "CA fingerprint: ") || strings.HasPrefix(line, "SHA-256: ") {
 				if fingerprint != "" && fingerprint != line {
 					t.Fatal("fingerprint changed on restart")
 				}

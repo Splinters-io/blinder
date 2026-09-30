@@ -69,7 +69,7 @@ Replacement content is part of correctness: neutral filler for display, reversib
 | **Session handling** | Reversible cookie names with per-value scrubbing. Multi-origin routing via `--extra-origin` with deterministic alias hostnames, Host-header routing and CORS origin translation. |
 | **CAPTCHA relay** | Operator-facing challenge queue and separate provider origins. Tor-routed resources keep provider cookies, CSP and CORS separate from the target and operator. |
 | **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
-| **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
+| **Local HTTPS** | Local CA with 90-day lifetime and automatic renewal; session leaf certificates are signed on the fly. Trust the CA once -- adding origins or changing aliases never requires re-trusting. Ephemeral mode available. |
 | **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. Signal-preservation checks record verified behavior and remaining defects. |
 
 See [supported behavior and delivery gates](docs/capabilities.md) for implementation status and known limitations.
@@ -128,18 +128,18 @@ har:
 
 ## Certificates
 
-Preflight generates or reuses the local certificate and prints its public path, fingerprint, expiry and next steps.
+Blinder generates a local CA (Certificate Authority) on first run and uses it to sign session-specific leaf certificates. Trust the CA once; all current and future endpoints -- including extra origins added later -- are automatically trusted without re-running setup.
 
 | Platform | Setup |
 | :--- | :--- |
-| **macOS** | Run the printed `--trust-cert` command, review the fingerprint and approve user Keychain trust. |
-| **Ubuntu / Linux** | Use the printed `curl --cacert` command or your browser/scanner's server-certificate trust settings. |
+| **macOS** | Run the printed `--trust-cert` command, review the CA fingerprint and approve user Keychain trust. One-time setup. |
+| **Ubuntu / Linux** | Use the printed `curl --cacert` command or install the CA certificate in your browser/scanner's trust store. |
 
-Use `--cert-dir DIR` for a chosen private store. Certificates persist across restarts; `--ephemeral-cert` selects a temporary identity. Preflight exit **2** means platform trust needs setup; a client using its own certificate file can still connect successfully.
+Use `--cert-dir DIR` for a chosen CA store. The CA persists for 90 days with automatic renewal; `--ephemeral-cert` generates a temporary self-signed leaf with no CA. Preflight exit **2** means platform trust needs setup; a client using its own CA file can still connect successfully.
 
-Preflight reports trust separately for the listen host, primary alias, configured extra-origin aliases and, when CAPTCHA is configured, the operator and a concrete challenge hostname. Challenge certificates include `*.blinder-challenge.localhost`. With `--tor`, preflight also includes the configured provider aliases. Use the same CAPTCHA and Tor options for preflight and startup. Its exit status and macOS `--trust-cert` action apply to the listen host only. Check name resolution and certificate trust for every hostname your browser will use; a trusted loopback URL does not establish trust for its aliases.
+Adding extra origins, changing the alias or reconfiguring CAPTCHA providers generates a new leaf certificate signed by the same CA -- no re-trusting required. Preflight reports trust for the listen host, primary alias, configured extra-origin aliases and, when CAPTCHA is configured, the operator and a concrete challenge hostname. With `--tor`, preflight also includes the configured provider aliases.
 
-The endpoint store also holds a private `version-signing.key` for resource-reference ownership, independent of certificate renewal. Keep it across restarts so expired references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default endpoint store.
+The CA store also holds a private `version-signing.key` for resource-reference ownership, independent of certificate renewal. Keep it across restarts so expired references remain recognisable. `--ephemeral-cert` keeps TLS temporary; resource-reference ownership still persists in the default store.
 
 [Certificate setup, OS guidance and renewal](docs/testing.md#local-certificate-trust)
 

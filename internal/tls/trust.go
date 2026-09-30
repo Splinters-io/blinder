@@ -11,24 +11,30 @@ import (
 	"runtime"
 )
 
-// CheckTrust checks the platform verifier for this endpoint. Individual clients
-// may use other stores and must still be checked separately during UAT.
+// CheckTrust checks the platform verifier for this endpoint.
 func (m *Material) CheckTrust() error {
 	return m.CheckTrustForHost(m.Host)
 }
 
-// CheckTrustForHost checks a specific browser hostname. A certificate can cover
-// several SANs while the platform's trust policy accepts only one of them.
+// CheckTrustForHost checks whether the leaf certificate is trusted for a
+// specific hostname. When a CA is available, it is provided as an
+// intermediate so the system verifier can chain through it.
 func (m *Material) CheckTrustForHost(host string) error {
-	_, err := m.Certificate.Leaf.Verify(x509.VerifyOptions{DNSName: host})
+	opts := x509.VerifyOptions{DNSName: host}
+	if m.CACertificate.Leaf != nil {
+		opts.Intermediates = x509.NewCertPool()
+		opts.Intermediates.AddCert(m.CACertificate.Leaf)
+	}
+	_, err := m.Certificate.Leaf.Verify(opts)
 	return err
 }
 
 func UserTrustSupported() bool { return runtime.GOOS == "darwin" }
 
-// InstallUserTrust is called only after an explicit CLI request and confirmation.
-// It trusts a single server certificate for SSL and the selected endpoint in the
-// current user's Keychain. It never installs a signing CA or uses sudo.
+// InstallUserTrust installs the local CA in the user's login Keychain so all
+// leaf certificates signed by it are automatically trusted for SSL. When no
+// CA is available (ephemeral mode), it falls back to trusting the self-signed
+// leaf for a single endpoint.
 func (m *Material) InstallUserTrust(ctx context.Context, output io.Writer) error {
 	if !UserTrustSupported() {
 		return fmt.Errorf("automatic user trust is available on macOS; configure your client's certificate store or CA-file option with %s", m.PublicPath)
@@ -36,28 +42,36 @@ func (m *Material) InstallUserTrust(ctx context.Context, output io.Writer) error
 	if m.PublicPath == "" {
 		return fmt.Errorf("trust installation requires a persistent certificate")
 	}
-	if m.Certificate.Leaf.IsCA {
-		return fmt.Errorf("refusing to install a signing CA")
-	}
 	userDir, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	// Use a private snapshot so another preflight cannot replace the certificate
-	// between the displayed fingerprint/confirmation and the platform command.
 	f, err := os.CreateTemp("", "blinder-trust-*.pem")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if _, err := f.Write(publicPEM(m.Certificate)); err != nil {
+
+	var certPEM []byte
+	if m.CACertificate.Leaf != nil {
+		certPEM = publicPEM(m.CACertificate)
+	} else {
+		certPEM = publicPEM(m.Certificate)
+	}
+	if _, err := f.Write(certPEM); err != nil {
 		f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	args := userTrustArgs(filepath.Join(userDir, "Library", "Keychains", "login.keychain-db"), m.Host, f.Name())
+	keychain := filepath.Join(userDir, "Library", "Keychains", "login.keychain-db")
+	var args []string
+	if m.CACertificate.Leaf != nil {
+		args = caTrustArgs(keychain, f.Name())
+	} else {
+		args = leafTrustArgs(keychain, m.Host, f.Name())
+	}
 	cmd := exec.CommandContext(ctx, "/usr/bin/security", args...)
 	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Run(); err != nil {
@@ -66,6 +80,12 @@ func (m *Material) InstallUserTrust(ctx context.Context, output io.Writer) error
 	return nil
 }
 
-func userTrustArgs(keychain, host, cert string) []string {
+// caTrustArgs trusts the CA for all SSL without hostname scoping.
+func caTrustArgs(keychain, cert string) []string {
+	return []string{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, cert}
+}
+
+// leafTrustArgs trusts a single leaf certificate for one hostname (legacy fallback).
+func leafTrustArgs(keychain, host, cert string) []string {
 	return []string{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-s", host, "-k", keychain, cert}
 }
