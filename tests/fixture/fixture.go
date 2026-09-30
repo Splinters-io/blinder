@@ -62,7 +62,7 @@ func Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<h1>AcmeCorp account</h1><p id="session">session-ok</p><a href="/logout">Log out</a>`)
+		fmt.Fprint(w, `<h1>AcmeCorp account</h1><code id="session">session-ok</code><a href="/logout">Log out</a>`)
 	})
 	mux.HandleFunc("/logout", func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: SessionName, Value: "", Path: "/", Secure: true, HttpOnly: true, MaxAge: -1})
@@ -86,6 +86,7 @@ func Handler() http.Handler {
 			http.Error(w, "unexpected form data", http.StatusBadRequest)
 			return
 		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprint(w, "form accepted")
 	})
 	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {

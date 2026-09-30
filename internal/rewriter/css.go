@@ -10,19 +10,40 @@ import (
 
 var cssURLRe = regexp.MustCompile(`(?i)(url\s*\(\s*['"]?)((?:[^)'"\\]|\\.)*)(['"]?\s*\))`)
 var cssImportRe = regexp.MustCompile(`(?i)(@import\s+['"])((?:[^'"\\]|\\.)*)(['"])`)
+var cssSelectorRe = regexp.MustCompile(`([.#])([a-zA-Z_-][a-zA-Z0-9_-]*)`)
 
 func rewriteCSS(body []byte, gate *scrub.Gate, path string, originMaps ...*OriginMapper) []byte {
 	var origins *OriginMapper
-	if len(originMaps) > 0 {
-		origins = originMaps[0]
+	paranoid := false
+	for _, om := range originMaps {
+		if om != nil {
+			origins = om
+		}
 	}
+	return rewriteCSSInner(body, gate, path, origins, paranoid)
+}
+
+func rewriteCSSParanoid(body []byte, gate *scrub.Gate, path string, origins *OriginMapper, paranoid bool) []byte {
+	return rewriteCSSInner(body, gate, path, origins, paranoid)
+}
+
+func rewriteCSSInner(body []byte, gate *scrub.Gate, path string, origins *OriginMapper, paranoid bool) []byte {
 	s := string(body)
 
 	locs := cssURLRe.FindAllStringSubmatchIndex(s, -1)
 	locs = append(locs, cssImportRe.FindAllStringSubmatchIndex(s, -1)...)
 	sort.Slice(locs, func(i, j int) bool { return locs[i][0] < locs[j][0] })
+
+	scrubCSS := func(text string) string {
+		scrubbed := gate.Scrub(text, "css:body:"+path)
+		if paranoid {
+			scrubbed = aliasCSSSelectorNames(scrubbed, gate)
+		}
+		return scrubbed
+	}
+
 	if len(locs) == 0 {
-		return gate.ScrubBytes(body, "css:body:"+path)
+		return []byte(scrubCSS(s))
 	}
 
 	var out strings.Builder
@@ -34,15 +55,12 @@ func rewriteCSS(body []byte, gate *scrub.Gate, path string, originMaps ...*Origi
 			continue
 		}
 		if loc[0] > lastEnd {
-			out.WriteString(gate.Scrub(s[lastEnd:loc[0]], "css:body:"+path))
+			out.WriteString(scrubCSS(s[lastEnd:loc[0]]))
 		}
 		if len(loc) >= 8 {
 			prefix := s[loc[2]:loc[3]]
 			out.WriteString(prefix)
 			value := s[loc[4]:loc[5]]
-			// In an unquoted url(), trailing CSS whitespace belongs to the
-			// syntax, not the resource path. Parsing it as URL data would turn
-			// url(.../image  ) into a request for /image%20%20.
 			trailing := ""
 			if !strings.HasSuffix(prefix, "\"") && !strings.HasSuffix(prefix, "'") {
 				end := len(strings.TrimRight(value, " \t\r\n\f"))
@@ -62,8 +80,78 @@ func rewriteCSS(body []byte, gate *scrub.Gate, path string, originMaps ...*Origi
 	}
 
 	if lastEnd < len(s) {
-		out.WriteString(gate.Scrub(s[lastEnd:], "css:body:"+path))
+		out.WriteString(scrubCSS(s[lastEnd:]))
 	}
 
 	return []byte(out.String())
+}
+
+var cssGroupAtRules = map[string]bool{
+	"media": true, "supports": true, "document": true,
+	"layer": true, "container": true, "scope": true,
+}
+
+func aliasCSSSelectorNames(css string, gate *scrub.Gate) string {
+	var out strings.Builder
+	out.Grow(len(css))
+	// Stack: true = declaration block (don't alias), false = group block (alias OK).
+	var declStack []bool
+	inDecl := false
+	pendingGroup := false
+	i := 0
+	for i < len(css) {
+		if css[i] == '@' {
+			start := i + 1
+			for start < len(css) && (css[start] >= 'a' && css[start] <= 'z' || css[start] >= 'A' && css[start] <= 'Z' || css[start] == '-') {
+				start++
+			}
+			keyword := strings.ToLower(css[i+1 : start])
+			if cssGroupAtRules[keyword] {
+				pendingGroup = true
+			}
+			out.WriteByte(css[i])
+			i++
+			continue
+		}
+		if css[i] == '{' {
+			if pendingGroup {
+				declStack = append(declStack, false)
+				inDecl = false
+				pendingGroup = false
+			} else {
+				declStack = append(declStack, true)
+				inDecl = true
+			}
+			out.WriteByte(css[i])
+			i++
+			continue
+		}
+		if css[i] == '}' {
+			if len(declStack) > 0 {
+				declStack = declStack[:len(declStack)-1]
+			}
+			if len(declStack) > 0 {
+				inDecl = declStack[len(declStack)-1]
+			} else {
+				inDecl = false
+			}
+			pendingGroup = false
+			out.WriteByte(css[i])
+			i++
+			continue
+		}
+		if !inDecl && (css[i] == '.' || css[i] == '#') {
+			loc := cssSelectorRe.FindStringIndex(css[i:])
+			if loc != nil && loc[0] == 0 {
+				prefix := css[i : i+1]
+				name := css[i+1 : i+loc[1]]
+				out.WriteString(prefix + aliasName(name, gate))
+				i += loc[1]
+				continue
+			}
+		}
+		out.WriteByte(css[i])
+		i++
+	}
+	return out.String()
 }

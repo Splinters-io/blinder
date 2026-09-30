@@ -42,7 +42,7 @@ Replacement content is part of correctness: neutral filler for display, reversib
 
 | | |
 | :--- | :--- |
-| **Content scrubbing** | Identity tokens, domain references and cookie values rewritten across HTTP bodies, headers and WebSocket text. HTML tokenizer handles entity-encoded and attribute-embedded identities. Technical content -- vulnerabilities, error messages, injection reflections, security headers -- passes through unchanged. |
+| **Content scrubbing** | Display text replaced with neutral prose filler; interactive elements (buttons, labels, form controls) and diagnostic content (error messages, stack traces, reflected markup) preserved. Identity tokens, domain references and cookie values rewritten across HTTP bodies, headers and WebSocket text. `--preserve-content` keeps original display text for identity-only scrubbing. |
 | **Resource integrity** | SRI attributes stripped on proxied resources (where content will be scrubbed), preserved on external CDN references. Version-tagged body references survive cache revalidation. |
 | **Response cache** | Separate upstream/downstream cache validators. 304 revalidation merges security-policy headers. Vary-aware eviction. |
 | **Session handling** | Reversible cookie names with per-value scrubbing. Multi-origin routing via `--extra-origin` with deterministic alias hostnames, Host-header routing and CORS origin translation. |

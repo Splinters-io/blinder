@@ -86,7 +86,7 @@ type Config struct {
     AliasDomain     string       // default "target-001.local"
     IdentityTokens  []string     // org names, brands to scrub
     VerifyTargetTLS bool         // default true
-    Paranoid        bool         // strip all text, JS paths, CSS identifiers
+    Paranoid        bool         // replace display prose with neutral filler (default: true)
     Tor             *TorConfig   // nil = no Tor
     HAR             *HARConfig   // nil = no HAR capture
     OutputDir       string       // manifest/reports output
@@ -124,7 +124,7 @@ Content-type-specific response rewriting. Each rewriter is a pure function: `(bo
 
 | Content Type | Rewriter | What it does |
 |---|---|---|
-| `text/html` | `rewriteHTML` | Strip comments, scrub domains/emails, replace title/meta/text nodes, replace images with 1x1 GIF data URI, preserve form structure |
+| `text/html` | `rewriteHTML` | Scrub domains/emails, replace display text with neutral prose filler, preserve interactive elements (button, label, legend, summary, output, meter, progress, textarea, option, pre, code), preserve diagnostic signals (error messages, stack traces, reflected markup), replace images with 1x1 GIF data URI |
 | `application/json` | `rewriteJSON` | Scrub domain/email references in string values |
 | `text/javascript` | `rewriteJS` | Scrub domain references |
 | `text/css` | `rewriteCSS` | Scrub domain references in `url()` values |
@@ -288,7 +288,8 @@ Network:
 Scrubbing:
   --alias DOMAIN           Alias domain the client sees (default: target-001.local)
   --identity, -i TOKEN     Identity tokens to scrub (repeatable)
-  --paranoid               Maximum scrubbing: strip all text, JS paths, CSS IDs
+  --paranoid               Replace display prose with neutral filler (default: on)
+  --preserve-content       Keep original display text; only scrub identity tokens
 
 Capture:
   --har FILE               Write HAR 1.2 file with real (pre-scrub) transactions
@@ -323,12 +324,12 @@ blinder \
   -o /tmp/blinder-output
 ```
 
-Paranoid mode with Tor:
+Tor with identity-only scrubbing (no prose replacement):
 ```bash
 blinder \
   -t http://something.onion \
   --tor \
-  --paranoid \
+  --preserve-content \
   --har /tmp/evidence.har
 ```
 

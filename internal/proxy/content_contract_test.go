@@ -20,7 +20,7 @@ func TestContentContractGeneratedResponsesUseNeutralContent(t *testing.T) {
 		{"page", "text/html", `<title>AcmeCorp Portal</title><p>Welcome to AcmeCorp and the ordinary page content.</p><img src="/icon" alt="AcmeCorp logo"><button aria-label="AcmeCorp account" title="AcmeCorp settings">Account</button><input name="company" value="AcmeCorp">`, 200, []string{`src="/icon"`, `name="company"`, "aria-label=", "title="}},
 		{"json", "application/json", `{"company":"AcmeCorp","number":9007199254740993,"ok":false}`, 200, []string{`"number":9007199254740993`, `"ok":false`}},
 		{"script", "application/javascript", `window.company="AcmeCorp";window.count=42;`, 200, []string{"window.company=", "window.count=42;"}},
-		{"style", "text/css", `.notice:after { content: "AcmeCorp"; color: red; }`, 200, []string{".notice:after", "color: red;"}},
+		{"style", "text/css", `.notice:after { content: "AcmeCorp"; color: red; }`, 200, []string{":after", "color: red;"}},
 		{"error", "text/html", `<title>AcmeCorp failure</title><pre>SQLSTATE[42000]: AcmeCorp query failed at character 17</pre>`, 503, []string{"SQLSTATE[42000]", "query failed at character 17"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

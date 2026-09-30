@@ -48,7 +48,8 @@ func run() int {
 		tor         bool
 		torAddr     string
 		noVerifyTLS bool
-		paranoid    bool
+		paranoid        bool
+		preserveContent bool
 		bindAll     bool
 		harPath     string
 		harMaxBody  int64
@@ -76,7 +77,8 @@ func run() int {
 	flag.BoolVar(&tor, "tor", false, "Route upstream through Tor SOCKS5 proxy")
 	flag.StringVar(&torAddr, "tor-addr", "", "Tor SOCKS5 address")
 	flag.BoolVar(&noVerifyTLS, "no-verify-tls", false, "Skip TLS verification on target")
-	flag.BoolVar(&paranoid, "paranoid", false, "Replace ordinary prose and scrub identities (independent of --tor)")
+	flag.BoolVar(&paranoid, "paranoid", true, "Replace display prose with neutral filler (default: on)")
+	flag.BoolVar(&preserveContent, "preserve-content", false, "Keep original display text; only scrub identity tokens")
 	flag.BoolVar(&bindAll, "bind-all", false, "Allow binding to non-loopback addresses")
 	flag.StringVar(&harPath, "har", "", "Write HAR 1.2 file with real (pre-scrub) transactions")
 	flag.Int64Var(&harMaxBody, "har-max-body", 10*1024*1024, "Max bytes per request/response body captured in HAR")
@@ -138,12 +140,16 @@ func run() int {
 		if !noVerifyTLS && fc.NoVerifyTLS {
 			noVerifyTLS = true
 		}
-		if !paranoid && fc.Paranoid {
-			paranoid = true
+		if fc.PreserveContent {
+			paranoid = false
 		}
 		if !bindAll && fc.BindAll {
 			bindAll = true
 		}
+	}
+
+	if preserveContent {
+		paranoid = false
 	}
 
 	if listen == "" {
@@ -413,8 +419,8 @@ func printBanner(cfg *config.Config) {
 		fmt.Println("  Target:  [.onion hidden service]")
 	}
 
-	if cfg.Paranoid {
-		fmt.Println("  Mode:    PARANOID")
+	if !cfg.Paranoid {
+		fmt.Println("  Content: original display text preserved (identity-only scrubbing)")
 	}
 	if cfg.HAR != nil {
 		fmt.Printf("  HAR:     %s\n", cfg.HAR.FilePath)

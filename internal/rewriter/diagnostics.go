@@ -26,9 +26,13 @@ func enterDiagnosticElement(stack []diagnosticElement, tag string, attrs []tagAt
 	case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
 		return stack
 	}
-	// Textarea contents and option labels without a value attribute can be
-	// submitted as form values. They must not become decorative filler.
-	preserve := inDiagnosticElement(stack) || tag == "pre" || tag == "code" || tag == "textarea" || tag == "option"
+	preserve := inDiagnosticElement(stack)
+	switch tag {
+	case "pre", "code", "textarea", "option",
+		"button", "label", "legend", "summary",
+		"output", "meter", "progress":
+		preserve = true
+	}
 	for _, a := range attrs {
 		if (a.key == "role" && strings.EqualFold(strings.TrimSpace(a.val), "alert")) ||
 			(a.key == "aria-live" && strings.EqualFold(strings.TrimSpace(a.val), "assertive")) {

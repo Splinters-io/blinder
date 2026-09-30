@@ -26,9 +26,10 @@ type FileConfig struct {
 		MaxEntries    int    `yaml:"max_entries"`
 		CaptureBudget int    `yaml:"capture_budget"`
 	} `yaml:"har"`
-	NoVerifyTLS bool `yaml:"no_verify_tls"`
-	Paranoid    bool `yaml:"paranoid"`
-	BindAll     bool `yaml:"bind_all"`
+	NoVerifyTLS     bool `yaml:"no_verify_tls"`
+	Paranoid        bool `yaml:"paranoid"`
+	PreserveContent bool `yaml:"preserve_content"`
+	BindAll         bool `yaml:"bind_all"`
 }
 
 func LoadFile(path string) (*FileConfig, error) {

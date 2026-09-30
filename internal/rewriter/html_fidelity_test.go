@@ -193,14 +193,14 @@ func TestHTMLFidelitySRIChangesArePlannedOnce(t *testing.T) {
 		return "fixture-token"
 	}}
 	attrs := []tagAttr{{"src", "/asset#fragment"}, {"integrity", "sha384-old"}, {"data-note", "AcmeCorp"}}
-	got, changed := rewriteTagAttrs("script", attrs, gate, nil, sriDecision{action: sriReplace, replacementHash: "sha384-new", bodyVersion: "version", resolvedURL: "https://target.test/asset#fragment"}, sr)
+	got, changed := rewriteTagAttrs("script", attrs, gate, false, nil, sriDecision{action: sriReplace, replacementHash: "sha384-new", bodyVersion: "version", resolvedURL: "https://target.test/asset#fragment"}, sr)
 	if !changed || registrations != 1 || gate.ReplacementCount() != 1 {
 		t.Fatalf("planned twice or lost changes: changed=%v registrations=%d replacements=%d", changed, registrations, gate.ReplacementCount())
 	}
 	if got[0].val != "/asset?__blv=fixture-token#fragment" || got[1].val != "sha384-new" {
 		t.Fatalf("SRI planned values changed: %#v", got)
 	}
-	_, changed = rewriteTagAttrs("script", []tagAttr{{"integrity", "sha384-first"}, {"integrity", "sha384-second"}}, gate, nil, sriDecision{action: sriKeep, integrityVal: "sha384-second"}, nil)
+	_, changed = rewriteTagAttrs("script", []tagAttr{{"integrity", "sha384-first"}, {"integrity", "sha384-second"}}, gate, false, nil, sriDecision{action: sriKeep, integrityVal: "sha384-second"}, nil)
 	if !changed {
 		t.Fatal("sriKeep incorrectly bypassed an actual duplicate-attribute change")
 	}

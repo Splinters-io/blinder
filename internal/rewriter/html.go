@@ -59,6 +59,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 
 	var rawTextTag string
 	var externalScript bool
+	var jsonLDScript bool
 	var suppressElement bool
 	var diagnosticElements []diagnosticElement
 	var proseSpans []proseSpan
@@ -87,7 +88,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 
 		switch tt {
 		case html.CommentToken:
-			if !suppressElement {
+			if !suppressElement && !paranoid {
 				out.Write(rewriteHTMLComment(raw, gate))
 			}
 
@@ -100,13 +101,17 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			}
 			switch rawTextTag {
 			case "script":
-				rewritten := rewriteJS(raw, gate, "html:script", origins)
-				if !externalScript {
-					rewritten = append(rewritten, hashes.record("script", out.Len(), cspRawText(raw), cspRawText(rewritten))...)
+				if paranoid && jsonLDScript {
+					out.WriteString("{}")
+				} else {
+					rewritten := rewriteJS(raw, gate, "html:script", origins)
+					if !externalScript {
+						rewritten = append(rewritten, hashes.record("script", out.Len(), cspRawText(raw), cspRawText(rewritten))...)
+					}
+					out.Write(rewritten)
 				}
-				out.Write(rewritten)
 			case "style":
-				rewritten := rewriteCSS(raw, gate, "html:style", origins)
+				rewritten := rewriteCSSParanoid(raw, gate, "html:style", origins, paranoid)
 				rewritten = append(rewritten, hashes.record("style", out.Len(), cspRawText(raw), cspRawText(rewritten))...)
 				out.Write(rewritten)
 			case "title":
@@ -159,10 +164,13 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 			}
 			if tagName == "script" {
 				externalScript = false
+				jsonLDScript = false
 				for _, a := range attrs {
 					if a.key == "src" {
 						externalScript = true
-						break
+					}
+					if a.key == "type" && strings.EqualFold(strings.TrimSpace(a.val), "application/ld+json") {
+						jsonLDScript = true
 					}
 				}
 			}
@@ -191,7 +199,7 @@ func rewriteHTML(body []byte, gate *scrub.Gate, paranoid, preserveTitle bool, or
 				continue
 			}
 
-			transformedAttrs, changed := rewriteTagAttrs(tagName, attrs, gate, origins, sriDec, sr)
+			transformedAttrs, changed := rewriteTagAttrs(tagName, attrs, gate, paranoid, origins, sriDec, sr)
 			seenAttrs := make(map[string]bool)
 			for _, a := range attrs {
 				if seenAttrs[a.key] {
@@ -534,7 +542,7 @@ func sriScriptType(value string) bool {
 
 // Compute changes once: scrubbing records findings and version registration has
 // side effects, so a separate speculative pass would duplicate both.
-func rewriteTagAttrs(tagName string, attrs []tagAttr, gate *scrub.Gate, origins *OriginMapper, sri sriDecision, sr *sriRewriter) ([]tagAttr, bool) {
+func rewriteTagAttrs(tagName string, attrs []tagAttr, gate *scrub.Gate, paranoid bool, origins *OriginMapper, sri sriDecision, sr *sriRewriter) ([]tagAttr, bool) {
 	result := make([]tagAttr, 0, len(attrs))
 	changed := false
 	appendAttr := func(original tagAttr, value string) {
@@ -598,6 +606,31 @@ func rewriteTagAttrs(tagName string, attrs []tagAttr, gate *scrub.Gate, origins 
 				changed = true
 				continue
 			}
+		}
+
+		if paranoid && a.key == "class" {
+			appendAttr(a, aliasClassList(a.val, gate))
+			continue
+		}
+		if paranoid && a.key == "id" {
+			appendAttr(a, aliasName(a.val, gate))
+			continue
+		}
+		if paranoid && a.key == "for" && tagName == "label" {
+			appendAttr(a, aliasName(a.val, gate))
+			continue
+		}
+		if paranoid && strings.HasPrefix(a.key, "data-") {
+			appendAttr(a, aliasName(a.val, gate))
+			continue
+		}
+		if paranoid && a.key == "title" && !isInteractiveTag(tagName) {
+			appendAttr(a, proseForHTMLText(a.val, gate.ContentTag([]byte(a.val)), gate))
+			continue
+		}
+		if paranoid && a.key == "content" && tagName == "meta" && isDescriptiveMeta(attrs) {
+			appendAttr(a, proseForHTMLText(a.val, gate.ContentTag([]byte(a.val)), gate))
+			continue
 		}
 
 		var val string
