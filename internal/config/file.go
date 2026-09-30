@@ -12,7 +12,6 @@ type FileConfig struct {
 	Target        string   `yaml:"target"`
 	Alias         string   `yaml:"alias"`
 	Identity      []string `yaml:"identity"`
-	ExtraOrigins  []string `yaml:"extra_origins"`
 	Output        string   `yaml:"output"`
 	CertDir       string   `yaml:"cert_dir"`
 	CaptchaConfig string   `yaml:"captcha_config"`

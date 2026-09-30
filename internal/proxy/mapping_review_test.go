@@ -32,9 +32,13 @@ func mappingReviewEphemeralServer(t *testing.T, target string, tokens []string, 
 
 func mappingReviewServerAt(t *testing.T, target, listen string, tokens []string, fn audit267SRITransport, extra ...string) *Server {
 	t.Helper()
-	cfg, err := config.New(target, listen, "alias.local", tokens, true, false, false, "", "", 0, "", "", 30, 60, extra...)
+	cfg, err := config.New(target, listen, "alias.local", tokens, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, raw := range extra {
+		u, _ := url.Parse(raw)
+		cfg.ExtraOrigins = append(cfg.ExtraOrigins, u)
 	}
 	s, err := NewWithCertificate(cfg, tls.Certificate{})
 	if err != nil {
@@ -42,9 +46,9 @@ func mappingReviewServerAt(t *testing.T, target, listen string, tokens []string,
 	}
 	if fn != nil {
 		s.transport = fn
-		s.sriPipeline = sri.NewPipeline(scopeSRIRepresentation(sri.PipelineConfig{Transport: fn, Cache: s.sriCache, IsAllowedOrigin: s.origins.IsKnownFullOrigin, CookieRestoreFn: s.gate.RestoreCookieHeader, ScrubFn: func(body []byte, ct, path string) []byte {
+		s.sriPipeline = sri.NewPipeline(scopeSRIRepresentation(sri.PipelineConfig{Transport: fn, Cache: s.sriCache, IsAllowedOrigin: s.origins.Load().IsKnownFullOrigin, CookieRestoreFn: s.gate.RestoreCookieHeader, ScrubFn: func(body []byte, ct, path string) []byte {
 			return rewriter.RewriteBody(body, ct, path, s.gate, false).Body
-		}}, s.origins, s.gate, s.cfg.Paranoid))
+		}}, func() *rewriter.OriginMapper { return s.origins.Load() }, s.gate, s.cfg.Paranoid))
 	}
 	return s
 }

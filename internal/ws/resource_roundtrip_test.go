@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Splinters-io/blinder/internal/rewriter"
 	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
@@ -16,7 +17,7 @@ func TestWebSocketSubmittedResourceURLRoundTrip(t *testing.T) {
 	mapper := mustMapper(t, routeURL(t, "http://main.example:8080"), "127.0.0.1:18099", "alias.local")
 	gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
 	alias := gate.Scrub("AcmeCorp", "fixture")
-	p := NewProxy(gate, "alias.local", "main.example:8080", "unused", false, true, "", time.Second, mapper)
+	p := NewProxy(gate, "alias.local", "main.example:8080", "unused", false, true, "", time.Second, func() *rewriter.OriginMapper { return mapper })
 	defer p.Close()
 	for _, tc := range []struct {
 		name, input, want string
@@ -65,7 +66,7 @@ func TestWebSocketSubmittedResourceURLRoundTrip(t *testing.T) {
 
 func TestWebSocketDomainOnlyURLResponseRoundTrip(t *testing.T) {
 	mapper := mustMapper(t, routeURL(t, "http://main.example:8080"), "127.0.0.1:18099", "alias.local")
-	p := NewProxy(scrub.NewGate([]string{"main.example"}, nil, "alias.local"), "alias.local", "main.example:8080", "unused", false, true, "", time.Second, mapper)
+	p := NewProxy(scrub.NewGate([]string{"main.example"}, nil, "alias.local"), "alias.local", "main.example:8080", "unused", false, true, "", time.Second, func() *rewriter.OriginMapper { return mapper })
 	defer p.Close()
 	relay := func(payload []byte, serverToClient bool) []byte {
 		t.Helper()

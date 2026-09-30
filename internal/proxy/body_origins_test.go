@@ -20,7 +20,7 @@ func TestBodyOriginResponseCacheIsolation(t *testing.T) {
 		response.Header.Set("Content-Type", "application/javascript")
 		return response, nil
 	}, "https://assets.example")
-	extra := s.origins.RewriteUpstreamURL("https://assets.example/theme")
+	extra := s.origins.Load().RewriteUpstreamURL("https://assets.example/theme")
 	etags := map[string]string{}
 	for _, host := range []string{"127.0.0.1:18099", "localhost:18099", "127.0.0.1:18099", "localhost:18099"} {
 		req := httptest.NewRequest("GET", "https://"+host+"/script", nil)
@@ -99,7 +99,7 @@ func TestBodyOriginSRIBytesAndCredentialsFollowResourceAuthority(t *testing.T) {
 		}
 		return audit267SRIResponse("application/javascript", script), nil
 	}, "https://assets.example")
-	extraURL, _ := url.Parse(s.origins.RewriteUpstreamURL("https://assets.example/account/script"))
+	extraURL, _ := url.Parse(s.origins.Load().RewriteUpstreamURL("https://assets.example/account/script"))
 	for _, entryHost := range []string{"127.0.0.1:18099", "localhost:18099"} {
 		pageReq := httptest.NewRequest("GET", "https://"+entryHost+"/account/page", nil)
 		pageReq.Header.Set("Cookie", "session=path-scoped")
@@ -145,7 +145,7 @@ func TestBodyOriginSRIBytesAndCredentialsFollowResourceAuthority(t *testing.T) {
 				}
 				wantEndpoint := "https://" + entryHost + "/account/data"
 				if i == 1 {
-					wantEndpoint = s.origins.RewriteUpstreamURL("https://main.example/account/data")
+					wantEndpoint = s.origins.Load().RewriteUpstreamURL("https://main.example/account/data")
 				}
 				if !strings.Contains(w.Body.String(), wantEndpoint) {
 					t.Fatalf("resource route mapping: %s want=%s", w.Body.String(), wantEndpoint)
@@ -209,7 +209,7 @@ func TestBodyOriginCSPCacheAndRevalidation(t *testing.T) {
 			if step > 0 {
 				path = "/updated/"
 			}
-			wantPolicy := "default-src 'none'; script-src https://" + host + path + " 'nonce-YWJj'; connect-src wss://" + host + "/socket " + s.origins.RewriteUpstreamURL("https://assets.example/data")
+			wantPolicy := "default-src 'none'; script-src https://" + host + path + " 'nonce-YWJj'; connect-src wss://" + host + "/socket " + s.origins.Load().RewriteUpstreamURL("https://assets.example/data")
 			if w.Code != wantStatus || w.Header().Get("Content-Security-Policy") != wantPolicy {
 				t.Fatalf("host=%s step=%d status=%d policy=%q want=%q", host, step, w.Code, w.Header().Get("Content-Security-Policy"), wantPolicy)
 			}

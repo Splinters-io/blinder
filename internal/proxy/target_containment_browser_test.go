@@ -159,9 +159,13 @@ catch(e){results.reportFetchError=String(e);const form=document.createElement('f
 	socksAddr, seen := containmentSOCKS(t, map[string]string{pURL.Host: bURL.Host, eURL.Host: bURL.Host})
 	f.socks = seen
 	proxyServer := unstarted(nil, proxyListen)
-	cfg, err := config.New(f.target, proxyServer.Listener.Addr().String(), alias, nil, false, false, false, socksAddr, "", 0, "", "", 10, 30, f.extra)
+	cfg, err := config.New(f.target, proxyServer.Listener.Addr().String(), alias, nil, false, false, false, socksAddr, "", 0, "", "", 10, 30)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if f.extra != "" {
+		extraURL, _ := url.Parse(f.extra)
+		cfg.ExtraOrigins = []*url.URL{extraURL}
 	}
 	s, err := NewWithCertificate(cfg, cert)
 	if err != nil {
@@ -203,7 +207,7 @@ catch(e){results.reportFetchError=String(e);const form=document.createElement('f
 	f.proxyURL, f.client = proxyServer.URL, proxyServer.Client()
 	u, _ := url.Parse(f.proxyURL)
 	f.aliasURL = "https://" + alias + ":" + u.Port()
-	f.extraLocalURL = s.origins.RewriteUpstreamURL(f.extra)
+	f.extraLocalURL = s.origins.Load().RewriteUpstreamURL(f.extra)
 	return f
 }
 

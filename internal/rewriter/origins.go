@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Splinters-io/blinder/internal/scrub"
 )
 
 // OriginRoute pairs an upstream URL with the alias hostname the proxy serves it
@@ -27,8 +29,15 @@ type OriginMapper struct {
 	localAddr        string
 	listenPort       string
 	localScheme      string
+	aliasDomain      string
 	aliases          []string
 	policyToLocal    map[string]string // Policy-only routes never authorize target/SRI requests.
+
+	// OnDiscover is called when RewriteUpstreamURL encounters an HTTP/HTTPS
+	// origin that is not yet registered. The callback should register the
+	// origin and return the local alias URL (e.g. "https://host-xx.alias:port").
+	// A nil callback or empty return leaves the URL unchanged.
+	OnDiscover func(upstream *url.URL) string
 }
 
 // WithPolicyOrigins adds source-expression translations without giving those
@@ -130,6 +139,7 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 		routes:           make(map[string]*url.URL),
 		localAddr:        listen,
 		localScheme:      "https",
+		aliasDomain:      alias,
 	}
 
 	host, port, err := net.SplitHostPort(listen)
@@ -203,6 +213,69 @@ func NewOriginMapper(target *url.URL, listen, alias string, extras ...OriginRout
 	return m, nil
 }
 
+// Register adds an upstream origin to the mapper, returning a new mapper that
+// includes the origin and the alias hostname assigned to it. The receiver is
+// not modified. If the origin is already registered, the receiver is returned
+// unchanged with the existing alias.
+func (m *OriginMapper) Register(upstream *url.URL) (*OriginMapper, string) {
+	upCopy := url.URL{Scheme: upstream.Scheme, Host: upstream.Host}
+	key := originKey(&upCopy)
+	if key == "" {
+		return m, ""
+	}
+	if _, ok := m.upstreamToLocal[key]; ok {
+		for _, a := range m.aliases {
+			expected := scrub.AliasOrigin(upstream.Scheme, upstream.Hostname(), upstream.Port(), m.aliasDomain)
+			if a == expected {
+				return m, a
+			}
+		}
+		return m, ""
+	}
+
+	alias := scrub.AliasOrigin(upstream.Scheme, upstream.Hostname(), upstream.Port(), m.aliasDomain)
+
+	next := &OriginMapper{
+		clientToUpstream: make(map[string]url.URL, len(m.clientToUpstream)+1),
+		upstreamToLocal:  make(map[string]string, len(m.upstreamToLocal)+1),
+		routes:           make(map[string]*url.URL, len(m.routes)+1),
+		localAddr:        m.localAddr,
+		listenPort:       m.listenPort,
+		localScheme:      m.localScheme,
+		aliasDomain:      m.aliasDomain,
+		aliases:          make([]string, len(m.aliases), len(m.aliases)+1),
+		OnDiscover:       m.OnDiscover,
+	}
+	for k, v := range m.clientToUpstream {
+		next.clientToUpstream[k] = v
+	}
+	for k, v := range m.upstreamToLocal {
+		next.upstreamToLocal[k] = v
+	}
+	for k, v := range m.routes {
+		next.routes[k] = v
+	}
+	copy(next.aliases, m.aliases)
+	if m.policyToLocal != nil {
+		next.policyToLocal = make(map[string]string, len(m.policyToLocal))
+		for k, v := range m.policyToLocal {
+			next.policyToLocal[k] = v
+		}
+	}
+
+	lowerAlias := strings.ToLower(alias)
+	aliasURL := &url.URL{Scheme: next.localScheme, Host: net.JoinHostPort(alias, next.listenPort)}
+	if aKey := originKey(aliasURL); aKey != "" {
+		next.clientToUpstream[aKey] = upCopy
+	}
+	next.routes[lowerAlias] = &url.URL{Scheme: upCopy.Scheme, Host: upCopy.Host}
+	next.aliases = append(next.aliases, alias)
+	localAlias := (&url.URL{Scheme: next.localScheme, Host: net.JoinHostPort(alias, next.listenPort)}).String()
+	next.upstreamToLocal[key] = localAlias
+
+	return next, alias
+}
+
 func isLoopback(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
@@ -269,6 +342,15 @@ func (m *OriginMapper) IsKnownOrigin(host string) bool {
 		}
 	}
 	return false
+}
+
+// IsRoutedHostname returns true if the given hostname (without port) is
+// registered as a routing target in this mapper.
+func (m *OriginMapper) IsRoutedHostname(hostname string) bool {
+	if m == nil {
+		return false
+	}
+	return m.routes[strings.ToLower(hostname)] != nil
 }
 
 // Resolve returns the upstream URL for the given request Host header, or nil if
@@ -401,15 +483,32 @@ func (m *OriginMapper) Rewrite(value string, originOnly bool) string {
 	return u.String()
 }
 
+// RewriteKnownUpstreamURL is like RewriteUpstreamURL but never triggers origin
+// discovery. Use it for policy sources (CSP) and other contexts where an
+// unrecognised URL should pass through unchanged rather than register a new
+// origin.
+func (m *OriginMapper) RewriteKnownUpstreamURL(value string) string {
+	return m.rewriteUpstream(value, false)
+}
+
 // RewriteUpstreamURL maps a full upstream URL to the corresponding local alias
 // URL. If the URL's origin matches a known upstream, the scheme+host+port is
 // replaced with the local alias while preserving the path, query and fragment.
 // Unrecognised origins are returned unchanged.
 func (m *OriginMapper) RewriteUpstreamURL(value string) string {
+	return m.rewriteUpstream(value, true)
+}
+
+func (m *OriginMapper) rewriteUpstream(value string, discover bool) string {
 	if m == nil {
 		return value
 	}
-	u, err := url.Parse(value)
+	protoRelative := strings.HasPrefix(value, "//") && (len(value) < 3 || value[2] != '/')
+	lookup := value
+	if protoRelative {
+		lookup = "https:" + value
+	}
+	u, err := url.Parse(lookup)
 	if err != nil {
 		return value
 	}
@@ -417,16 +516,31 @@ func (m *OriginMapper) RewriteUpstreamURL(value string) string {
 	if key == "" {
 		return value
 	}
-	if local, ok := m.upstreamToLocal[key]; ok {
-		lu, err := url.Parse(local)
-		if err != nil {
-			return value
+	local, ok := m.upstreamToLocal[key]
+	if !ok && discover && m.OnDiscover != nil {
+		if _, isLocal := m.clientToUpstream[key]; !isLocal {
+			scheme := strings.ToLower(u.Scheme)
+			if scheme == "http" || scheme == "https" {
+				local = m.OnDiscover(u)
+				ok = local != ""
+			}
 		}
-		u.Scheme = lu.Scheme
-		u.Host = lu.Host
-		return u.String()
 	}
-	return value
+	if !ok {
+		return value
+	}
+	lu, err := url.Parse(local)
+	if err != nil {
+		return value
+	}
+	rewritten := *u
+	rewritten.Scheme = lu.Scheme
+	rewritten.Host = lu.Host
+	result := rewritten.String()
+	if protoRelative {
+		result = strings.TrimPrefix(result, "https:")
+	}
+	return result
 }
 
 // RewriteWebSocketURL maps an explicitly registered ws/wss upstream origin to

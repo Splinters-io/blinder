@@ -19,7 +19,6 @@ import (
 	"github.com/Splinters-io/blinder/internal/config"
 	"github.com/Splinters-io/blinder/internal/endpoint"
 	"github.com/Splinters-io/blinder/internal/proxy"
-	"github.com/Splinters-io/blinder/internal/scrub"
 	blindertls "github.com/Splinters-io/blinder/internal/tls"
 )
 
@@ -44,7 +43,6 @@ func run() int {
 		listen      string
 		alias       string
 		identity    stringSlice
-		extraOrigin stringSlice
 		tor         bool
 		torAddr     string
 		noVerifyTLS bool
@@ -72,8 +70,6 @@ func run() int {
 	flag.StringVar(&alias, "alias", "", "Alias domain the client sees")
 	flag.Var(&identity, "identity", "Identity tokens to scrub (repeatable)")
 	flag.Var(&identity, "i", "Identity tokens to scrub (shorthand, repeatable)")
-	flag.Var(&extraOrigin, "extra-origin", "Additional upstream origin (repeatable)")
-	flag.Var(&extraOrigin, "X", "Additional upstream origin (shorthand, repeatable)")
 	flag.BoolVar(&tor, "tor", false, "Route upstream through Tor SOCKS5 proxy")
 	flag.StringVar(&torAddr, "tor-addr", "", "Tor SOCKS5 address")
 	flag.BoolVar(&noVerifyTLS, "no-verify-tls", false, "Skip TLS verification on target")
@@ -112,9 +108,6 @@ func run() int {
 		}
 		if len(identity) == 0 && len(fc.Identity) > 0 {
 			identity = fc.Identity
-		}
-		if len(extraOrigin) == 0 && len(fc.ExtraOrigins) > 0 {
-			extraOrigin = fc.ExtraOrigins
 		}
 		if outputDir == "" && fc.Output != "" {
 			outputDir = fc.Output
@@ -197,7 +190,6 @@ func run() int {
 		outputDir,
 		certDir,
 		0, 0,
-		[]string(extraOrigin)...,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -364,13 +356,10 @@ running:
 
 // certificateExtraAliases is used once for default-store selection, certificate
 // preparation, endpoint advice and version-key storage. Provider aliases are
-// separate from target ExtraOrigins and are needed only when Tor routes them.
-// Isolated challenge origins are needed for CAPTCHA in either routing mode.
+// needed only when Tor routes them. Isolated challenge origins are needed for
+// CAPTCHA in either routing mode. Target origins are discovered dynamically.
 func certificateExtraAliases(cfg *config.Config) ([]string, error) {
 	var aliases []string
-	for _, u := range cfg.ExtraOrigins {
-		aliases = append(aliases, scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain))
-	}
 	if cfg.Captcha != nil && cfg.Captcha.Matcher != nil {
 		aliases = append(aliases, endpoint.ChallengeWildcard)
 	}
@@ -403,14 +392,6 @@ func printBanner(cfg *config.Config) {
 	fmt.Println()
 	fmt.Printf("  Listen:  https://%s\n", cfg.ListenAddr)
 	fmt.Printf("  Alias:   %s\n", cfg.AliasDomain)
-
-	if len(cfg.ExtraOrigins) > 0 {
-		fmt.Printf("  Origins: %d extra\n", len(cfg.ExtraOrigins))
-		for _, u := range cfg.ExtraOrigins {
-			a := scrub.AliasOrigin(u.Scheme, u.Hostname(), u.Port(), cfg.AliasDomain)
-			fmt.Printf("           %s -> %s\n", a, u.Host)
-		}
-	}
 
 	if cfg.UseTor() {
 		fmt.Printf("  Tor:     %s\n", cfg.Tor.SOCKSAddr)

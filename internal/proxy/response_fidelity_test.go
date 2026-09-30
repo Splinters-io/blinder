@@ -361,7 +361,7 @@ func TestResponseFidelityTwoOriginRouting(t *testing.T) {
 		t.Error("primary response should scrub AcmeCorp")
 	}
 
-	aliases := s.origins.RouteAliases()
+	aliases := s.origins.Load().RouteAliases()
 	if len(aliases) < 2 {
 		t.Fatalf("expected at least 2 route aliases, got %d", len(aliases))
 	}

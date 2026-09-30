@@ -101,7 +101,7 @@ func TestWebSocketRestoresIssuedRequestURIComponents(t *testing.T) {
 		t.Fatal("fixture did not issue its mappings")
 	}
 	mapper := mustMapper(t, upstream, "127.0.0.1:9443", "alias.local")
-	p := NewProxy(gate, "alias.local", upstream.Host, upstream.Host, false, true, "", time.Second, mapper)
+	p := NewProxy(gate, "alias.local", upstream.Host, upstream.Host, false, true, "", time.Second, func() *rewriter.OriginMapper { return mapper })
 	front := startRouteProxy(t, p)
 	pathToken, queryToken := url.PathEscape(token), url.QueryEscape(token)
 	cases := []struct{ name, input, want string }{
@@ -191,7 +191,7 @@ func TestWebSocketRoutesPrimaryAndExtraOrigins(t *testing.T) {
 	primaryURL, extraURL := routeURL(t, primary.URL), routeURL(t, extra.URL)
 	mapper := mustMapper(t, primaryURL, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extraURL, Alias: "extra.alias.local"})
 	gate := scrub.NewGate(nil, []string{"AcmeCorp"}, "alias.local")
-	p := NewProxy(gate, "alias.local", primaryURL.Host, primaryURL.Host, false, false, "", time.Second, mapper)
+	p := NewProxy(gate, "alias.local", primaryURL.Host, primaryURL.Host, false, false, "", time.Second, func() *rewriter.OriginMapper { return mapper })
 	front := startRouteProxy(t, p)
 	for _, tc := range []struct{ alias, upstream string }{{"alias.local", primary.URL}, {"extra.alias.local", extra.URL}} {
 		t.Run(tc.alias, func(t *testing.T) {
@@ -255,7 +255,7 @@ func TestWebSocketExtraOriginTLSVerification(t *testing.T) {
 	extra.Host = net.JoinHostPort("localhost", extra.Port())
 	primary := routeURL(t, "http://127.0.0.1:1")
 	mapper := mustMapper(t, primary, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extra, Alias: "extra.alias.local"})
-	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", primary.Host, primary.Host, false, true, "", time.Second, mapper)
+	p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", primary.Host, primary.Host, false, true, "", time.Second, func() *rewriter.OriginMapper { return mapper })
 	front := startRouteProxy(t, p)
 	conn, _, resp := routeHandshake(t, front.URL, "extra.alias.local:9443", "")
 	defer conn.Close()
@@ -380,7 +380,7 @@ func TestWebSocketExtraOriginSOCKSRoute(t *testing.T) {
 			}
 			primary := routeURL(t, "http://unused.invalid:8000")
 			mapper := mustMapper(t, primary, "127.0.0.1:9443", "alias.local", rewriter.OriginRoute{Upstream: extra, Alias: "extra.alias.local"})
-			p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", primary.Host, primary.Host, false, true, socksAddr, time.Second, mapper)
+			p := NewProxy(scrub.NewGate(nil, nil, "alias.local"), "alias.local", primary.Host, primary.Host, false, true, socksAddr, time.Second, func() *rewriter.OriginMapper { return mapper })
 			front := startRouteProxy(t, p)
 			conn, _, resp := routeHandshake(t, front.URL, "extra.alias.local:9443", "")
 			defer conn.Close()

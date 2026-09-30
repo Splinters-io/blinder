@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -418,11 +419,12 @@ func TestProxy_MultiOriginRouting(t *testing.T) {
 		nil,
 		false, false, false,
 		"", "", 0, "", "", 30, 30,
-		apiTarget.URL,
 	)
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
+	apiURL, _ := url.Parse(apiTarget.URL)
+	cfg.ExtraOrigins = []*url.URL{apiURL}
 
 	srv, addr := startTestProxy(t, cfg)
 	_ = srv

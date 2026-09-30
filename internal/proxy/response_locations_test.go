@@ -143,7 +143,7 @@ func TestResponseLocationsRemainRequestScopedAcrossCaches(t *testing.T) {
 
 func TestResponseLocationOriginBoundaries(t *testing.T) {
 	s := mappingReviewServer(t, "https://upstream.example", nil, nil, "http://upstream.example", "https://upstream.example:8443")
-	aliases := s.origins.RouteAliases()
+	aliases := s.origins.Load().RouteAliases()
 	for _, tc := range []struct{ name, host, location, want string }{
 		{"same-origin", "127.0.0.1:18099", "https://alias.local:18099/account", "https://127.0.0.1:18099/account"},
 		{"double-slash-path", "127.0.0.1:18099", "https://alias.local:18099//unrelated.invalid/path", "https://127.0.0.1:18099//unrelated.invalid/path"},

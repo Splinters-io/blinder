@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,7 +56,8 @@ type Stats struct {
 type Server struct {
 	cfg                  *config.Config
 	gate                 *scrub.Gate
-	origins              *rewriter.OriginMapper
+	origins              atomic.Pointer[rewriter.OriginMapper]
+	originsMu            sync.Mutex // serializes origin registration (CAS)
 	transport            http.RoundTripper
 	server               *http.Server
 	wsProxy              *ws.Proxy
@@ -186,18 +188,6 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		socksAddr = cfg.Tor.SOCKSAddr
 	}
 
-	wsProxy := ws.NewProxy(
-		gate,
-		cfg.AliasDomain,
-		cfg.TargetURL.Host,
-		cfg.TargetURL.Host,
-		cfg.TargetURL.Scheme == "https",
-		cfg.VerifyTargetTLS,
-		socksAddr,
-		5*time.Minute,
-		origins,
-	)
-
 	var harWriter *har.Writer
 	if cfg.HAR != nil {
 		harWriter = har.NewWriter(cfg.HAR.FilePath, cfg.HAR.MaxBodySize, cfg.HAR.MaxEntries)
@@ -209,46 +199,6 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	session := manifest.NewSession(cfg.AliasDomain, cfg.TargetURL.String())
 
 	sriCache := sri.NewCache(256)
-
-	scrubFn := func(body []byte, contentType, path string) []byte {
-		result := rewriter.RewriteBody(body, contentType, path, gate, cfg.Paranoid, rewriter.RewriteOpts{Origins: origins})
-		return result.Body
-	}
-
-	sriCfg := sri.PipelineConfig{
-		Transport:    transport,
-		ScrubFn:      scrubFn,
-		Cache:        sriCache,
-		ContentTag:   gate.ContentTag,
-		FetchTimeout: upstreamTimeout,
-		IsAllowedOrigin: func(u *url.URL) bool {
-			return origins.IsKnownFullOrigin(u)
-		},
-		CookieRestoreFn: func(cookieHeader, origin string) string {
-			return gate.RestoreCookieHeader(cookieHeader, origin)
-		},
-	}
-
-	if harWriter != nil {
-		sriCfg.OnFetch = func(rec sri.FetchRecord) {
-			if rec.Request == nil {
-				return
-			}
-			if rec.Error != "" {
-				harWriter.RecordFetchFailure(rec.Request, rec.Status, rec.Headers, rec.Body, rec.Error, rec.Elapsed, har.FetchFailureDetails{HTTPVersion: rec.HTTPVersion, StatusLine: rec.StatusLine, EncodedBytes: &rec.EncodedBytes, DecodedBytes: &rec.DecodedBytes})
-				return
-			}
-			resp := &http.Response{
-				StatusCode: rec.Status,
-				Status:     rec.StatusLine,
-				Header:     rec.Headers,
-				Proto:      rec.HTTPVersion,
-			}
-			harWriter.Record(rec.Request, nil, resp, rec.Body, rec.Elapsed, har.ResponseBodyInfo{EncodedBytes: rec.EncodedBytes, DecodedBytes: &rec.DecodedBytes})
-		}
-	}
-
-	sriPipeline := sri.NewPipeline(scopeSRIRepresentation(sriCfg, origins, gate, cfg.Paranoid))
 
 	var captchaCfg *captcha.Config
 	if cfg.Captcha != nil {
@@ -271,13 +221,10 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	s := &Server{
 		cfg:                  cfg,
 		gate:                 gate,
-		origins:              origins,
 		transport:            transport,
-		wsProxy:              wsProxy,
 		harWriter:            harWriter,
 		manifest:             session,
 		sriCache:             sriCache,
-		sriPipeline:          sriPipeline,
 		responseCache:        cache.New(4096),
 		versionRefs:          versionRefs,
 		captchaMatcher:       matcher,
@@ -286,6 +233,59 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 		captchaOperatorToken: operatorToken,
 		done:                 make(chan struct{}),
 	}
+
+	origins.OnDiscover = s.discoverOrigin
+	s.origins.Store(origins)
+
+	s.wsProxy = ws.NewProxy(
+		gate,
+		cfg.AliasDomain,
+		cfg.TargetURL.Host,
+		cfg.TargetURL.Host,
+		cfg.TargetURL.Scheme == "https",
+		cfg.VerifyTargetTLS,
+		socksAddr,
+		5*time.Minute,
+		func() *rewriter.OriginMapper { return s.origins.Load() },
+	)
+
+	scrubFn := func(body []byte, contentType, path string) []byte {
+		result := rewriter.RewriteBody(body, contentType, path, gate, cfg.Paranoid, rewriter.RewriteOpts{Origins: s.origins.Load()})
+		return result.Body
+	}
+	sriCfg := sri.PipelineConfig{
+		Transport:    transport,
+		ScrubFn:      scrubFn,
+		Cache:        sriCache,
+		ContentTag:   gate.ContentTag,
+		FetchTimeout: upstreamTimeout,
+		IsAllowedOrigin: func(u *url.URL) bool {
+			return s.origins.Load().IsKnownFullOrigin(u)
+		},
+		CookieRestoreFn: func(cookieHeader, origin string) string {
+			return gate.RestoreCookieHeader(cookieHeader, origin)
+		},
+	}
+	if harWriter != nil {
+		sriCfg.OnFetch = func(rec sri.FetchRecord) {
+			if rec.Request == nil {
+				return
+			}
+			if rec.Error != "" {
+				harWriter.RecordFetchFailure(rec.Request, rec.Status, rec.Headers, rec.Body, rec.Error, rec.Elapsed, har.FetchFailureDetails{HTTPVersion: rec.HTTPVersion, StatusLine: rec.StatusLine, EncodedBytes: &rec.EncodedBytes, DecodedBytes: &rec.DecodedBytes})
+				return
+			}
+			resp := &http.Response{
+				StatusCode: rec.Status,
+				Status:     rec.StatusLine,
+				Header:     rec.Headers,
+				Proto:      rec.HTTPVersion,
+			}
+			harWriter.Record(rec.Request, nil, resp, rec.Body, rec.Elapsed, har.ResponseBodyInfo{EncodedBytes: rec.EncodedBytes, DecodedBytes: &rec.DecodedBytes})
+		}
+	}
+	s.sriPipeline = sri.NewPipeline(scopeSRIRepresentation(sriCfg, func() *rewriter.OriginMapper { return s.origins.Load() }, gate, cfg.Paranoid))
+
 	if err := s.configureProviderRoutes("https"); err != nil {
 		return nil, err
 	}
@@ -309,6 +309,24 @@ func NewWithCertificate(cfg *config.Config, cert tls.Certificate) (*Server, erro
 	}
 
 	return s, nil
+}
+
+func (s *Server) discoverOrigin(upstream *url.URL) string {
+	s.originsMu.Lock()
+	defer s.originsMu.Unlock()
+
+	cur := s.origins.Load()
+	next, alias := cur.Register(upstream)
+	if alias == "" {
+		return ""
+	}
+	if next != cur {
+		s.gate.AddDomains([]string{upstream.Hostname()})
+		s.origins.Store(next)
+		log.Printf("[discover] registered %s://%s → %s", upstream.Scheme, upstream.Host, alias)
+	}
+	_, port, _ := net.SplitHostPort(s.cfg.ListenAddr)
+	return (&url.URL{Scheme: "https", Host: net.JoinHostPort(alias, port)}).String()
 }
 
 func (s *Server) ListenAndServe() error {
@@ -461,13 +479,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		s.manifest.RecordExchange(evidence.entry)
 	}()
 
-	upstream := s.origins.Resolve(r.Host)
+	upstream := s.origins.Load().Resolve(r.Host)
 	if upstream == nil {
 		status = http.StatusMisdirectedRequest
 		http.Error(w, "unknown proxy origin", status)
 		return
 	}
-	requestOrigins := s.origins.ForRequestHost(r.Host)
+	requestOrigins := s.origins.Load().ForRequestHost(r.Host)
 	evidence.observeContext(gate, r, upstream)
 	restoreSubmittedValue := func(value string) string {
 		return rewriter.RestoreResourceValue(value, gate, requestOrigins)
@@ -653,9 +671,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 									w.Header().Add(name, v)
 								}
 							}
-							if cached.UpstreamACAO != "" && s.origins != nil {
+							if cached.UpstreamACAO != "" && s.origins.Load() != nil {
 								w.Header().Set("Access-Control-Allow-Origin",
-									s.origins.RewriteResponseOrigin(cached.UpstreamACAO, r.Header.Get("Origin")))
+									s.origins.Load().RewriteResponseOrigin(cached.UpstreamACAO, r.Header.Get("Origin")))
 							}
 							w.Header().Set("ETag", cached.ETag)
 							w.Header().Del("Content-Length")
@@ -677,7 +695,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Forward to upstream ---
-	upstreamReq := rewriter.RewriteRequestHeaders(r, upstream.Host, gate, s.origins)
+	upstreamReq := rewriter.RewriteRequestHeaders(r, upstream.Host, gate, s.origins.Load())
 	upstreamReq.URL.Scheme = upstream.Scheme
 	upstreamReq.URL.Host = upstream.Host
 	upstreamReq.RequestURI = ""
@@ -809,9 +827,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					w.Header().Add(name, v)
 				}
 			}
-			if refreshed.UpstreamACAO != "" && s.origins != nil {
+			if refreshed.UpstreamACAO != "" && s.origins.Load() != nil {
 				w.Header().Set("Access-Control-Allow-Origin",
-					s.origins.RewriteResponseOrigin(refreshed.UpstreamACAO, r.Header.Get("Origin")))
+					s.origins.Load().RewriteResponseOrigin(refreshed.UpstreamACAO, r.Header.Get("Origin")))
 			}
 			w.Header().Set("ETag", refreshed.ETag)
 			w.Header().Del("Content-Length")
@@ -1236,7 +1254,7 @@ func (s *Server) tryServeSRICache(w http.ResponseWriter, r *http.Request, upstre
 			s.cfg.AliasDomain,
 			upstream.Host,
 			rewriter.ResponseHeaderOpts{
-				OriginMapper:  s.origins.ForRequestHost(r.Host),
+				OriginMapper:  s.origins.Load().ForRequestHost(r.Host),
 				RequestOrigin: r.Header.Get("Origin"),
 			},
 		)
@@ -1289,9 +1307,9 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, entry *cache.Entry, 
 			w.Header().Add(name, v)
 		}
 	}
-	if entry.UpstreamACAO != "" && s.origins != nil {
+	if entry.UpstreamACAO != "" && s.origins.Load() != nil {
 		w.Header().Set("Access-Control-Allow-Origin",
-			s.origins.RewriteResponseOrigin(entry.UpstreamACAO, requestOrigin))
+			s.origins.Load().RewriteResponseOrigin(entry.UpstreamACAO, requestOrigin))
 	}
 	w.Header().Set("ETag", entry.ETag)
 	if entry.ContentType != "" {

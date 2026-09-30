@@ -153,6 +153,36 @@ func (g *Gate) PreserveDomains(domains []string) {
 	}
 }
 
+// AddDomains registers additional target domains for scrubbing at runtime.
+// New domains are visible to all subsequent ForRequest children. In-flight
+// requests that already captured the slice header continue with the previous
+// set, which is acceptable: they started before the origin was discovered.
+func (g *Gate) AddDomains(domains []string) {
+	if g.parent != nil {
+		g.parent.AddDomains(domains)
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	seen := make(map[string]bool, len(g.targetDomains))
+	for _, d := range g.targetDomains {
+		seen[d] = true
+	}
+	newDomains := make([]string, len(g.targetDomains))
+	copy(newDomains, g.targetDomains)
+	newPatterns := make([]*regexp.Regexp, len(g.domainPatterns))
+	copy(newPatterns, g.domainPatterns)
+	for _, d := range domains {
+		if d != "" && !seen[d] {
+			seen[d] = true
+			newDomains = append(newDomains, d)
+			newPatterns = append(newPatterns, literalPattern(d))
+		}
+	}
+	g.targetDomains = newDomains
+	g.domainPatterns = newPatterns
+}
+
 func literalPattern(value string) *regexp.Regexp {
 	if value == "" {
 		return nil

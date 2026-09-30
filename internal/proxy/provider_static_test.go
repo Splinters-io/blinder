@@ -99,7 +99,7 @@ func TestProviderStaticReturnURLsUsePrimaryAndExtraTargetRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.origins = mapper
+		s.origins.Store(mapper)
 		return s
 	})
 	status, headers, body := providerOriginDo(t, client, "GET", aliases[0].String()+"/v1/widget", "", nil)
@@ -108,7 +108,7 @@ func TestProviderStaticReturnURLsUsePrimaryAndExtraTargetRoutes(t *testing.T) {
 	}
 	want := make(map[string]string)
 	for _, destination := range []struct{ name, origin string }{{"primary", target.URL}, {"extra", extra.URL}} {
-		mapped := s.origins.RewriteUpstreamURL(destination.origin + suffix)
+		mapped := s.origins.Load().RewriteUpstreamURL(destination.origin + suffix)
 		if mapped == destination.origin+suffix {
 			t.Fatal("fixture target was not registered")
 		}

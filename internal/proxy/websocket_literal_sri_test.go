@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,10 +45,12 @@ func TestWebSocketLiteralOrdinaryAndSRIPrefetchBytesMatch(t *testing.T) {
 		`const product = "AcmeCorp";` + "\n"
 	// The actual server constructor must supply the same OriginMapper to both
 	// the ordinary response rewrite and the pipeline's captured ScrubFn.
-	cfg, err := config.New(upstream.URL, "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60, extraOrigin)
+	cfg, err := config.New(upstream.URL, "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
+	extraURL, _ := url.Parse(extraOrigin)
+	cfg.ExtraOrigins = []*url.URL{extraURL}
 	s, err := NewWithCertificate(cfg, tls.Certificate{})
 	if err != nil {
 		t.Fatal(err)

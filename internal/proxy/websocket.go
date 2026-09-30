@@ -47,7 +47,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if s.harWriter != nil {
 				s.harWriter.Record(upstreamReq, nil, resp, body, elapsed, har.ResponseBodyInfo{EncodedBytes: measured.EncodedBytes})
 			}
-			outHeaders := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstreamReq.URL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+			outHeaders := rewriter.RewriteResponseHeaders(resp.Header, gate, s.cfg.AliasDomain, upstreamReq.URL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins.Load(), RequestOrigin: r.Header.Get("Origin")})
 			for name, values := range outHeaders {
 				w.Header()[name] = values
 			}
@@ -64,7 +64,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// This is the response to the existing upgrade request, not another
 			// transaction. Reuse HTTP transformations without scheduling cache,
 			// SRI prefetch or CAPTCHA retry work.
-			result := rewriter.RewriteBody(body, resp.Header.Get("Content-Type"), r.URL.Path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{StatusCode: resp.StatusCode, Origins: s.origins, UpstreamBase: upstreamReq.URL})
+			result := rewriter.RewriteBody(body, resp.Header.Get("Content-Type"), r.URL.Path, gate, s.cfg.Paranoid, rewriter.RewriteOpts{StatusCode: resp.StatusCode, Origins: s.origins.Load(), UpstreamBase: upstreamReq.URL})
 			leakCount = gate.ResidualLeakCount(string(result.Body))
 			observed.representation("upstream", int64(len(body)), int64(len(result.Body)))
 			s.stats.Bytes.Add(int64(len(body)))
@@ -84,7 +84,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			for _, name := range []string{"Sec-WebSocket-Accept", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"} {
 				headers.Del(name)
 			}
-			out := rewriter.RewriteResponseHeaders(headers, gate, s.cfg.AliasDomain, upstreamReq.URL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins, RequestOrigin: r.Header.Get("Origin")})
+			out := rewriter.RewriteResponseHeaders(headers, gate, s.cfg.AliasDomain, upstreamReq.URL.Host, rewriter.ResponseHeaderOpts{OriginMapper: s.origins.Load(), RequestOrigin: r.Header.Get("Origin")})
 			out.Set("X-Blinder-View", "transformed")
 			out.Set("X-Blinder-Original-Body-Bytes", "0")
 			out.Set("X-Blinder-Rewritten-Body-Bytes", "0")

@@ -176,7 +176,7 @@ func TestChallengeViewRoutesRefreshOrFailsBeforeReplay(t *testing.T) {
 					if view.Code != http.StatusBadGateway || view.Header().Get("Refresh") != "" || view.Header().Get("Link") != "" || view.Header().Get("Alt-Svc") != "" || strings.Contains(view.Body.String(), "private challenge content") {
 						t.Fatalf("unknown destination replayed: %d %v %s", view.Code, view.Header(), view.Body.String())
 					}
-				} else if view.Code != http.StatusOK || view.Header().Get("Refresh") != "0;url="+s.origins.RewriteUpstreamURL(target) {
+				} else if view.Code != http.StatusOK || view.Header().Get("Refresh") != "0;url="+s.origins.Load().RewriteUpstreamURL(target) {
 					t.Fatalf("target refresh escaped proxy routing: %d %v", view.Code, view.Header())
 				}
 				original, _ := s.captchaQueue.Get(id)

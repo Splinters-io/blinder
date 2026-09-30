@@ -12,7 +12,7 @@ import (
 // Run after cache/header processing so the shared representation never stores
 // one visitor's entry origin for the next visitor.
 func (s *Server) localizeResponseLocations(headers http.Header, requestHost string, upstream *url.URL) {
-	requestUpstream := s.origins.Resolve(requestHost)
+	requestUpstream := s.origins.Load().Resolve(requestHost)
 	if upstream == nil || requestUpstream == nil || !sameOrigin(requestUpstream, upstream) {
 		return
 	}
@@ -22,7 +22,7 @@ func (s *Server) localizeResponseLocations(headers http.Header, requestHost stri
 			if err != nil || !strings.EqualFold(u.Scheme, "https") || u.User != nil || u.Opaque != "" {
 				continue
 			}
-			locationUpstream := s.origins.Resolve(u.Host)
+			locationUpstream := s.origins.Load().Resolve(u.Host)
 			if locationUpstream == nil || !sameOrigin(locationUpstream, upstream) {
 				continue
 			}

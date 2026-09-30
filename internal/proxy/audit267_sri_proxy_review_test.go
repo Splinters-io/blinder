@@ -154,7 +154,7 @@ func audit267SRIServer(t *testing.T, fn audit267SRITransport, keyDir ...string) 
 		ScrubFn: func(body []byte, contentType, path string) []byte {
 			return rewriter.RewriteBody(body, contentType, path, s.gate, s.cfg.Paranoid).Body
 		},
-		IsAllowedOrigin: s.origins.IsKnownFullOrigin,
+		IsAllowedOrigin: s.origins.Load().IsKnownFullOrigin,
 		CookieRestoreFn: s.gate.RestoreCookieHeader,
 		OnFetch: func(rec sri.FetchRecord) {
 			if s.harWriter != nil {
@@ -165,7 +165,7 @@ func audit267SRIServer(t *testing.T, fn audit267SRITransport, keyDir ...string) 
 				s.harWriter.Record(rec.Request, nil, &http.Response{StatusCode: rec.Status, Status: fmt.Sprintf("%d %s", rec.Status, http.StatusText(rec.Status)), Header: rec.Headers, Proto: "HTTP/1.1"}, rec.Body, rec.Elapsed)
 			}
 		},
-	}, s.origins, s.gate, s.cfg.Paranoid))
+	}, func() *rewriter.OriginMapper { return s.origins.Load() }, s.gate, s.cfg.Paranoid))
 	return s
 }
 

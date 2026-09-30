@@ -29,10 +29,12 @@ func TestHTTPRejectedOriginsDoNotReachTarget(t *testing.T) {
 		io.WriteString(w, "extra")
 	}))
 	defer extra.Close()
-	cfg, err := config.New(primary.URL, "127.0.0.1:18099", "alias.local", nil, true, false, false, "", "", 0, "", "", 30, 60, extra.URL)
+	cfg, err := config.New(primary.URL, "127.0.0.1:18099", "alias.local", nil, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
+	extraURL, _ := url.Parse(extra.URL)
+	cfg.ExtraOrigins = []*url.URL{extraURL}
 	s, err := NewWithCertificate(cfg, tls.Certificate{})
 	if err != nil {
 		t.Fatal(err)
@@ -40,10 +42,10 @@ func TestHTTPRejectedOriginsDoNotReachTarget(t *testing.T) {
 	defer s.transport.(*http.Transport).CloseIdleConnections()
 	front := httptest.NewTLSServer(s)
 	defer front.Close()
-	extraAlias := s.origins.RouteAliases()[1]
+	extraAlias := s.origins.Load().RouteAliases()[1]
 	for _, host := range []string{"alias.local:18098", "unknown.example:18099", "alias.local", extraAlias + ":18098", "alias.local:0", "alias.local:65536"} {
 		t.Run(host, func(t *testing.T) {
-			if got := s.origins.Resolve(host); got != nil {
+			if got := s.origins.Load().Resolve(host); got != nil {
 				t.Fatalf("fixture Host should be rejected by mapper: %q -> %v", host, got)
 			}
 			primaryBefore, extraBefore := primaryCalls.Load(), extraCalls.Load()
@@ -83,9 +85,13 @@ func TestHTTPRejectedOriginsDoNotReachTarget(t *testing.T) {
 }
 
 func TestTLSNamesMatchRegisteredOriginAliases(t *testing.T) {
-	cfg, err := config.New("https://primary.example", "127.0.0.1:18099", "Alias.local", nil, true, false, false, "", "", 0, "", t.TempDir()+"/private", 30, 60, "https://assets.example", "https://assets.example:8443", "http://assets.example:8080")
+	cfg, err := config.New("https://primary.example", "127.0.0.1:18099", "Alias.local", nil, true, false, false, "", "", 0, "", t.TempDir()+"/private", 30, 60)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, raw := range []string{"https://assets.example", "https://assets.example:8443", "http://assets.example:8080"} {
+		u, _ := url.Parse(raw)
+		cfg.ExtraOrigins = append(cfg.ExtraOrigins, u)
 	}
 	s, err := New(cfg)
 	if err != nil {
@@ -96,11 +102,11 @@ func TestTLSNamesMatchRegisteredOriginAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, alias := range s.origins.RouteAliases() {
+	for _, alias := range s.origins.Load().RouteAliases() {
 		if err := certificate.VerifyHostname(alias); err != nil {
 			t.Errorf("registered alias missing from TLS SAN: %s: %v", alias, err)
 		}
-		if s.origins.Resolve(alias+":18099") == nil {
+		if s.origins.Load().Resolve(alias+":18099") == nil {
 			t.Errorf("registered alias missing from route table: %s", alias)
 		}
 	}

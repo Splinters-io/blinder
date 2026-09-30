@@ -179,7 +179,7 @@ func newExternalControlFixture(t *testing.T, cert tls.Certificate) *externalCont
 	hash := func(body string) string { return externalControlDigest(body, "sha256") }
 	reported := []controlViolation{{Directive: "script-src-elem", Disposition: "report"}}
 	rewriteLocalJS := func(body string) string {
-		return string(rewriter.RewriteBody([]byte(body), "application/javascript", "/asset/collision-setup", s.gate, false, rewriter.RewriteOpts{Origins: s.origins.ForRequestHost(cfg.ListenAddr)}).Body)
+		return string(rewriter.RewriteBody([]byte(body), "application/javascript", "/asset/collision-setup", s.gate, false, rewriter.RewriteOpts{Origins: s.origins.Load().ForRequestHost(cfg.ListenAddr)}).Body)
 	}
 	// C -> A -> B: A contains the literal alias generated from C, which the
 	// second rewrite must escape. Swapping invalid weak H(B) to H(A) must not

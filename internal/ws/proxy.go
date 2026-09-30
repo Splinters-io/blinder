@@ -46,7 +46,7 @@ var (
 
 type Proxy struct {
 	gate        *scrub.Gate
-	origins     *rewriter.OriginMapper
+	origins     func() *rewriter.OriginMapper
 	aliasDomain string
 	targetHost  string
 	targetAddr  string
@@ -79,7 +79,7 @@ type HandshakeEvent struct {
 	UpstreamAttempted bool
 }
 
-func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useTLS, verifyTLS bool, socksAddr string, idleTimeout time.Duration, origins *rewriter.OriginMapper) *Proxy {
+func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useTLS, verifyTLS bool, socksAddr string, idleTimeout time.Duration, origins func() *rewriter.OriginMapper) *Proxy {
 	if idleTimeout <= 0 {
 		idleTimeout = 5 * time.Minute
 	}
@@ -89,7 +89,8 @@ func NewProxy(gate *scrub.Gate, aliasDomain, targetHost, targetAddr string, useT
 		if useTLS {
 			scheme = "https"
 		}
-		origins, _ = rewriter.NewOriginMapper(&url.URL{Scheme: scheme, Host: targetHost}, "", aliasDomain)
+		fallback, _ := rewriter.NewOriginMapper(&url.URL{Scheme: scheme, Host: targetHost}, "", aliasDomain)
+		origins = func() *rewriter.OriginMapper { return fallback }
 	}
 	return &Proxy{
 		gate:        gate,
@@ -151,14 +152,14 @@ func (p *Proxy) Handle(w http.ResponseWriter, r *http.Request, options ...Handle
 	}
 	// Resolve before dialing: each alias selects its registered complete origin,
 	// including scheme and port. An unknown Host must not reach the primary.
-	upstream := p.origins.Resolve(r.Host)
-	if upstream == nil || !p.origins.IsKnownFullOrigin(upstream) {
+	upstream := p.origins().Resolve(r.Host)
+	if upstream == nil || !p.origins().IsKnownFullOrigin(upstream) {
 		http.Error(w, "unknown websocket origin", http.StatusMisdirectedRequest)
 		return errors.New("unknown websocket origin")
 	}
-	upgradeReq = buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, upstream.Host, gate, p.origins), upstream.Host, p.aliasDomain)
+	upgradeReq = buildUpgradeRequest(rewriter.RewriteRequestHeaders(r, upstream.Host, gate, p.origins()), upstream.Host, p.aliasDomain)
 	upgradeReq.URL.Scheme = upstream.Scheme
-	restoreRequestURI(upgradeReq, gate, p.origins)
+	restoreRequestURI(upgradeReq, gate, p.origins())
 	upgradeReq.Header.Set("Accept-Encoding", "gzip, identity")
 	dialCtx, cancel := context.WithTimeout(r.Context(), timeout)
 	stop := context.AfterFunc(p.ctx, cancel)
@@ -410,10 +411,10 @@ func (p *Proxy) Close() {
 }
 func (p *Proxy) dealiasText(text string) ([]byte, error) {
 	if !json.Valid([]byte(text)) {
-		return []byte(rewriter.RestoreResourceValue(text, p.gate, p.origins)), nil
+		return []byte(rewriter.RestoreResourceValue(text, p.gate, p.origins())), nil
 	}
 	return p.gate.RestoreJSONWithOpaqueKeys([]byte(text), nil, func(value string) string {
-		return rewriter.RestoreResourceValue(value, p.gate, p.origins)
+		return rewriter.RestoreResourceValue(value, p.gate, p.origins())
 	})
 }
 

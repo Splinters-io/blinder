@@ -48,7 +48,7 @@ func EndpointHost(listen string) (string, error) {
 func certificateNames(alias, host string, extra ...string) []string {
 	var names []string
 	seen := make(map[string]bool)
-	base := append([]string{"localhost", "127.0.0.1", "::1", endpoint.OperatorHost, alias, host}, extra...)
+	base := append([]string{"localhost", "127.0.0.1", "::1", endpoint.OperatorHost, alias, "*." + alias, host}, extra...)
 	for _, name := range base {
 		if name != "" && !seen[name] {
 			names = append(names, name)

@@ -35,29 +35,29 @@ func (s *Server) configureProviderRoutes(scheme string) error {
 	}
 	policyOrigins := make(map[string]string)
 	for _, route := range routes.Routes() {
-		if s.origins.Resolve(route.Local.Host) != nil || strings.EqualFold(route.Local.Hostname(), s.cfg.AliasDomain) {
+		if s.origins.Load().Resolve(route.Local.Host) != nil || strings.EqualFold(route.Local.Hostname(), s.cfg.AliasDomain) {
 			return fmt.Errorf("CAPTCHA provider alias collides with a target route")
 		}
-		if s.origins.IsKnownFullOrigin(route.Upstream) {
+		if s.origins.Load().IsKnownFullOrigin(route.Upstream) {
 			return fmt.Errorf("CAPTCHA provider origin cannot also be a target origin")
 		}
 		policyOrigins[route.Upstream.String()] = route.Local.String()
 	}
 	s.providerRoutes = routes
-	s.origins = s.origins.WithLocalScheme(scheme).WithPolicyOrigins(policyOrigins)
+	s.origins.Store(s.origins.Load().WithLocalScheme(scheme).WithPolicyOrigins(policyOrigins))
 	mapTargetURL := func(value string, upstream bool) string {
 		if upstream {
 			value = s.captchaOperator.MapChallengeURL(value)
-			return s.origins.Rewrite(value, false)
+			return s.origins.Load().Rewrite(value, false)
 		}
-		return s.origins.RewriteUpstreamURL(value)
+		return s.origins.Load().RewriteUpstreamURL(value)
 	}
 	mapTargetOrigin := func(value string, upstream bool) string {
 		if upstream {
 			value = s.captchaOperator.MapChallengeOrigin(value)
-			return s.origins.Rewrite(value, true)
+			return s.origins.Load().Rewrite(value, true)
 		}
-		return s.origins.RewriteResponseOrigin(value, "")
+		return s.origins.Load().RewriteResponseOrigin(value, "")
 	}
 	mapPolicy := func(value string, base *url.URL) string {
 		return rewriter.RewriteCSPURLs(value, func(directive, source string) string {
@@ -74,7 +74,7 @@ func (s *Server) configureProviderRoutes(scheme string) error {
 			if directive == "report-uri" {
 				return mapTargetURL(source, false)
 			}
-			return s.origins.PolicySourceAliases(source)
+			return s.origins.Load().PolicySourceAliases(source)
 		})
 	}
 	mapDocumentURL := func(raw string, base *url.URL) (string, bool) {
@@ -114,8 +114,8 @@ func (s *Server) configureProviderRoutes(scheme string) error {
 			if mapped, ok := routes.RewriteURL(u.String(), nil); ok {
 				return mapped, true
 			}
-			if s.origins.IsKnownFullOrigin(u) {
-				return s.origins.RewriteUpstreamURL(u.String()), true
+			if s.origins.Load().IsKnownFullOrigin(u) {
+				return s.origins.Load().RewriteUpstreamURL(u.String()), true
 			}
 			if s.captchaMatcher.IsProviderResource(u) && (!s.cfg.UseTor() || !s.captchaMatcher.ShouldRouteResource(u)) {
 				return u.String(), true

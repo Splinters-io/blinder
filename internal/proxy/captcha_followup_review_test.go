@@ -183,10 +183,12 @@ captcha:
           method: POST
           path_regex: '^/login$'
 `)
-	cfg, err := config.New("https://main.example", "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60, "https://extra.example")
+	cfg, err := config.New("https://main.example", "127.0.0.1:18099", "alias.local", []string{"AcmeCorp"}, true, false, false, "", "", 0, "", "", 30, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
+	extraURL, _ := url.Parse("https://extra.example")
+	cfg.ExtraOrigins = []*url.URL{extraURL}
 	cfg.Captcha = capcfg
 	s, err := NewWithCertificate(cfg, tls.Certificate{})
 	if err != nil {
@@ -199,7 +201,7 @@ captcha:
 		return audit267SRIResponse("text/plain", "ok"), nil
 	})
 	alias := s.gate.Scrub("AcmeCorp", "fixture")
-	dest := s.origins.RewriteUpstreamURL("https://extra.example/login")
+	dest := s.origins.Load().RewriteUpstreamURL("https://extra.example/login")
 	r := httptest.NewRequest("POST", dest, strings.NewReader(url.Values{"vendor-token": {alias}}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
