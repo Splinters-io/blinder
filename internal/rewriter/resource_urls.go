@@ -12,7 +12,15 @@ import (
 // rescanning them can corrupt an IP alias or a hostname containing an identity.
 // Paths, queries and fragments still pass through the reversible scrubber.
 func scrubResourceURL(value string, gate *scrub.Gate, context string, origins *OriginMapper) string {
+	protoRelative := false
 	mapped := origins.RewriteUpstreamURL(value)
+	if mapped == value && strings.HasPrefix(value, "//") {
+		full := origins.RewriteUpstreamURL("https:" + value)
+		if full != "https:"+value {
+			mapped = full
+			protoRelative = true
+		}
+	}
 	if mapped == value {
 		mapped = origins.RewriteWebSocketURL(value)
 	}
@@ -33,9 +41,13 @@ func scrubResourceURL(value string, gate *scrub.Gate, context string, origins *O
 		return gate.Scrub(value, context)
 	}
 	start += 3
+	result := mapped
 	if end := strings.IndexAny(mapped[start:], "/?#"); end >= 0 {
 		boundary := start + end
-		return mapped[:boundary] + gate.ScrubNoDomains(mapped[boundary:], context)
+		result = mapped[:boundary] + gate.ScrubNoDomains(mapped[boundary:], context)
 	}
-	return mapped
+	if protoRelative {
+		result = strings.TrimPrefix(result, "https:")
+	}
+	return result
 }
