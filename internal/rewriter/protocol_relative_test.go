@@ -9,20 +9,20 @@ import (
 )
 
 func TestProtocolRelativeOriginMapping(t *testing.T) {
-	target, _ := url.Parse("https://pentesterlab.com")
-	assetsURL, _ := url.Parse("https://assets.pentesterlab.com")
+	target, _ := url.Parse("https://target-app.test")
+	assetsURL, _ := url.Parse("https://assets.target-app.test")
 	alias := scrub.AliasOrigin(assetsURL.Scheme, assetsURL.Hostname(), assetsURL.Port(), "target-001.localhost")
 	extra := OriginRoute{Upstream: assetsURL, Alias: alias}
 	origins, err := NewOriginMapper(target, "127.0.0.1:18100", "target-001.localhost", extra)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate := scrub.NewGate([]string{"pentesterlab.com"}, []string{"PentesterLab"}, "target-001.localhost")
+	gate := scrub.NewGate([]string{"target-app.test"}, []string{"TargetApp"}, "target-001.localhost")
 
-	input := "//assets.pentesterlab.com/svgs/logo.svg"
+	input := "//assets.target-app.test/svgs/logo.svg"
 	got := scrubResourceURL(input, gate, "test", origins)
 
-	if strings.Contains(got, "pentesterlab") {
+	if strings.Contains(got, "target-app") {
 		t.Fatalf("identity leaked in output: %s", got)
 	}
 	if !strings.HasPrefix(got, "//") {

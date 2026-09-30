@@ -9,8 +9,8 @@ import (
 
 func fingerprintGate() *scrub.Gate {
 	return scrub.NewGate(
-		[]string{"pentesterlab.com"},
-		[]string{"PentesterLab"},
+		[]string{"target-app.test"},
+		[]string{"TargetApp"},
 		"alias.local",
 	)
 }
