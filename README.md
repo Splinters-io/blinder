@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="#the-problem">The problem</a> &nbsp; / &nbsp;
+  <a href="#the-reasoning">The reasoning</a> &nbsp; / &nbsp;
   <a href="#how-blinder-works">How it works</a> &nbsp; / &nbsp;
   <a href="#quick-start">Quick start</a> &nbsp; / &nbsp;
   <a href="#certificates">Certificates</a> &nbsp; / &nbsp;
@@ -20,30 +20,21 @@
 
 ---
 
-## The problem
+## The reasoning
 
-Security testing is a behavioral discipline. A SQL injection is a SQL injection regardless of whose database it reaches. A broken access control is broken whether the application belongs to a startup or a household name. A file inclusion reads from the server no matter what logo sits in the header.
+Security testing is a behavioral discipline. What an application does -- how it handles input, what controls it enforces, what it reflects back, how it fails -- is what matters. Identity should be irrelevant to that analysis.
 
-AI-assisted security tools don't work that way. They see the target -- its domain, its brand, its organization -- and they form opinions. They soften findings for well-known services. They refuse to generate proof-of-concept payloads based on *who* the target is. They decline to test paths they associate with a particular vendor. The AI is making decisions that belong to the operator, and it's making them based on context rather than behavior.
+AI-assisted security tools don't work that way. They see the target -- its domain, its brand, its organization -- and they form opinions. They soften findings for well-known services. They refuse to probe based on *who* the target is. They decline to test paths they associate with a particular vendor. The AI is making decisions that belong to the operator, and it's making them based on context rather than behavior.
 
-This is the wrong axis. Good application security focuses on what the application *does*: how it handles input, what controls it enforces, what it reflects back, how it fails. Identity should be irrelevant to that analysis. But today, every AI-assisted tool has the target's full identity wired into every decision it makes -- what to test, how hard to push, whether to report.
+This is the wrong axis. The operator authorizes the scope. The tool evaluates behavior. Those are different responsibilities and they shouldn't collapse into one. But today, every AI-assisted tool has the target's full identity wired into every decision it makes -- what to test, how hard to push, whether to report.
 
-There should be a cleaner way to approach this. Blinder is a starting point: a practical tool, but also a position that testing should be separated from context. The operator authorizes the scope. The tool evaluates behavior. Those are different responsibilities and they shouldn't collapse into one.
+Blinder is a starting point: a practical tool, but also a position that testing should be separated from context. This is an early attempt to get the idea out there. If the approach resonates, we'd welcome better implementations, contributions, or just the conversation about where the line should be.
 
 ### Behavior is sometimes content
 
-Stripping identity doesn't mean stripping content. That's where most naive approaches break. Many vulnerability classes are observable *only* as changes in response content:
+Stripping identity doesn't mean stripping content. That's where most naive approaches break. Vulnerabilities are observable as changes in response content -- error messages, reflected input, data the session shouldn't reach, computed results that reveal server-side evaluation. If a proxy stripped this content, it would hide the evidence the tester is looking for.
 
-| Vulnerability | What changes in the response |
-| :--- | :--- |
-| **SQL injection** | Database errors, table structures, query results in the body |
-| **Local/remote file inclusion** | File contents -- config files, source code, `/etc/passwd` |
-| **Cross-site scripting** | Reflected attacker input rendered back into the page |
-| **Server-side template injection** | Evaluated expressions returned as computed results |
-| **Information disclosure** | Stack traces, internal paths, version strings in error pages |
-| **Broken access control** | Data the session shouldn't be authorized to reach |
-
-If a proxy stripped this content, it would hide the evidence of the very vulnerabilities the tester is looking for. The requirement is surgical: remove *identity* while preserving *behavioral signals*. A page that belongs to no one but behaves exactly as the original does -- including when it behaves badly.
+The requirement is surgical: remove *identity* while preserving *behavioral signals*. A page that belongs to no one but behaves exactly as the original does -- including when it behaves badly.
 
 ## How Blinder works
 

@@ -20,11 +20,13 @@
 
 ## Why
 
-LLM-driven security tools decide what to test based on what they see. When an AI agent sees the real target -- its domain, its brand, its organisation name -- it forms opinions. It may refuse to probe a well-known service, soften its findings, or decline to generate a proof-of-concept because of who the target is rather than what the target does.
+Security testing is a behavioral discipline. What an application does -- how it handles input, what controls it enforces, what it reflects back, how it fails -- is what matters. Identity should be irrelevant to that analysis.
 
-Blinder removes that decision. To the downstream AI, the target looks like a locally hosted application at `https://127.0.0.1:8099`. There is no brand to recognise, no domain to have an opinion about. The AI focuses on the application's behavior: its injection points, its broken access controls, its reflected input. An application vulnerable to XSS still reflects attacker-controlled markup through Blinder. A SQL injection still produces diagnostic errors. A CSRF still lacks its token. Every technical vulnerability the application has is preserved exactly as-is -- only the identity is gone.
+AI-assisted security tools don't work that way. They see the target -- its domain, its brand, its organization -- and they form opinions. They soften findings for well-known services. They refuse to probe based on *who* the target is. They decline to test paths they associate with a particular vendor. The AI is making decisions that belong to the operator, and it's making them based on context rather than behavior.
 
-This is content-blind scanning: the operator controls who the target is; the AI focuses on what it does.
+Blinder removes that decision. To the downstream AI, the target looks like a locally hosted application at `https://127.0.0.1:8099`. There is no brand to recognize, no domain to have an opinion about. The AI focuses on the application's behavior. Every technical vulnerability the application has is preserved exactly as-is -- only the identity is gone.
+
+This is content-blind scanning: the operator controls who the target is; the AI focuses on what it does. This is an early attempt to get the idea out there -- we'd welcome better implementations, contributions, or just the conversation about where the line should be.
 
 Replacement content is part of correctness: neutral filler for display, reversible values for application data, and preserved diagnostics and control behavior. Generated removal notices do not belong in pages.
 
