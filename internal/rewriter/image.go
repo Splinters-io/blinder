@@ -61,10 +61,8 @@ func rewriteImageDataURL(value string, gate *scrub.Gate) (string, bool) {
 			return invalid, true
 		}
 	}
-	// Textual vectors need their own structural transform. They must not
-	// bypass masking merely because the bytes are embedded in HTML.
 	if mediaType == "image/svg+xml" {
-		body = NullBytes(len(body))
+		body = rewriteSVG(body, gate)
 	} else {
 		img := rewriteImage(body, gate, "body:image:data")
 		body = img.body
