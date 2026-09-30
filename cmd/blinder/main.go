@@ -280,10 +280,10 @@ func run() int {
 	}
 
 	if token := srv.CaptchaOperatorToken(); token != "" && cfg.Captcha != nil && len(cfg.Captcha.Providers) > 0 {
-		log.Printf("  CAPTCHA operator token: %s", token)
+		masked := token[:8] + "..." + token[len(token)-8:]
+		log.Printf("  CAPTCHA operator token: %s", masked)
 		log.Printf("  Operator: %s", srv.CaptchaOperatorURL())
 		log.Printf("  Browser login: %slogin?token=%s", srv.CaptchaOperatorURL(), token)
-		log.Printf("  Use: curl -H 'Authorization: Bearer %s' %s", token, srv.CaptchaOperatorURL())
 	}
 
 	sigCh := make(chan os.Signal, 1)

@@ -52,6 +52,7 @@ type OperatorHandler struct {
 	challengeHeaders func(http.Header, *url.URL) error
 	viewMu           sync.Mutex
 	views            map[[32]byte]challengeView
+	authLimiter      *authRateLimiter
 }
 
 // SetChallengeHeaderRewriter configures URL translation for original response
@@ -93,6 +94,7 @@ func NewOperatorHandler(queue *ChallengeQueue, matcher *Matcher, transport http.
 		resourceTimeout:  30 * time.Second,
 		resourceSessions: make(map[string]*cookiejar.Jar),
 		views:            make(map[[32]byte]challengeView),
+		authLimiter:      newAuthRateLimiter(10, time.Minute),
 	}, token
 }
 
@@ -173,6 +175,11 @@ func (h *OperatorHandler) setAuthCookie(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *OperatorHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.authLimiter.allowed() {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many failed requests", http.StatusTooManyRequests)
+		return
+	}
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		http.Error(w, "missing token parameter", http.StatusBadRequest)
@@ -180,6 +187,7 @@ func (h *OperatorHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := hashToken(token)
 	if subtle.ConstantTimeCompare(hash[:], h.bearerHash[:]) != 1 {
+		h.authLimiter.recordFailure()
 		http.Error(w, "invalid token", http.StatusForbidden)
 		return
 	}
@@ -225,7 +233,13 @@ func (h *OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.authLimiter.allowed() {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many failed requests", http.StatusTooManyRequests)
+		return
+	}
 	if !h.authorize(r) {
+		h.authLimiter.recordFailure()
 		http.Error(w, "operator authorization required", http.StatusForbidden)
 		return
 	}

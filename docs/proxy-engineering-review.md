@@ -1,6 +1,6 @@
 # Proxy engineering lessons for Blinder
 
-**Follow-up:** this review is a historical snapshot. The subsequent working tree fixes the three reproduced acceptance defects, bounds all HAR bodies, corrects replacement MIME and records actual HTTP replacement counts. See [current status](capabilities.md) and the [test report](testing-results-2026-09-23.md) for delivered work and remaining gates.
+**Follow-up:** this review is a historical snapshot. The subsequent working tree fixes the three reproduced acceptance defects, bounds all HAR bodies, corrects replacement MIME and records actual HTTP replacement counts. See [current status](capabilities.md) for delivered work and remaining gates.
 
 Reviewed 2026-09-23. Public upstream source: [`kgretzky/evilginx2` at `4c0988a1`](https://github.com/kgretzky/evilginx2/tree/4c0988a1d9db4d172a185e979a38bfd0efdb5830). Blinder baseline: `34eb0a07501d7de8c857e3fffaa7c601b887aa0b`, plus the current uncommitted certificate-preflight, functional-test and documentation changes.
 
@@ -79,7 +79,7 @@ Upstream also separates certificate storage/management from serving. [Certificat
 
 ## 6. Close the existing delivery gaps before expanding scope
 
-The [recorded functional baseline](testing-results-2026-09-23.md) remains the acceptance gate: 25 passing and four failing working-tree scenarios, representing three defects. This review did not rerun or change those tests.
+The recorded functional baseline remains the acceptance gate. This review did not rerun or change those tests.
 
 Fix Origin mapping, return nonzero promptly after listener failure, and attempt all requested artifact writes while returning nonzero if any fail. Only announce readiness after a successful bind. Add the full tagged functional suite to CI once those acceptance failures are corrected; do not skip them to obtain a green result.
 

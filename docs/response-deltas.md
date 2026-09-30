@@ -50,4 +50,4 @@ Context fingerprints bind comparisons to the session, local scheme and authority
 
 The first comparator covers ordinary target HTTP responses. Provider/operator traffic, WebSocket messages, individual SRI prefetches, structural diffs, response-header semantics, timing analysis and browser execution need separate evidence. Exact content changes and size matching do not establish exploit success or universal control fidelity. The monitor reports fidelity failures; it does not repair the remaining size or semantic differences.
 
-The [local verification report](testing-results-2026-09-26-delta-monitor.md) records the first real HTTP fixture results, regressions and the functional startup timeout followed by the unchanged passing rerun. The [size and change-signal follow-up](testing-results-2026-09-26-size-signals.md) records compact identity aliases and bounded short-text reservations.
+Local verification covers real HTTP fixture results, compact identity aliases and bounded short-text reservations through the unit and functional test suites.

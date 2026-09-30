@@ -50,4 +50,4 @@ At `57560aa`, none of the ten whole-workflow rows above has final release sign-o
 - Actual alias trust in the intended clients, extra-origin browser WebSockets, real-provider human completion and selected HAR viewer/replay acceptance.
 - The integrated live Tor/onion track; the last Tor attempt stopped at 5% bootstrap and supplied no circuit acceptance.
 
-Use the [current capabilities](capabilities.md), [test procedures](testing.md) and [27 September browser evidence](testing-results-2026-09-27-browser.md) to plan and record closures. Closing a blocker requires its evidence, not deletion of its description.
+Use the [current capabilities](capabilities.md) and [test procedures](testing.md) to plan and record closures. Closing a blocker requires its evidence, not deletion of its description.

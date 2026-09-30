@@ -70,7 +70,7 @@ Replacement content is part of correctness: neutral filler for display, reversib
 | **CAPTCHA relay** | Operator-facing challenge queue and separate provider origins. Tor-routed resources keep provider cookies, CSP and CORS separate from the target and operator. |
 | **Private routing** | Upstream HTTP and WebSocket through Tor SOCKS5 with remote hostname resolution. Tor failures are hard errors, never silent fallbacks. |
 | **Local HTTPS** | Persistent 90-day certificates with automatic renewal, OS-aware setup and explicit macOS user trust. Ephemeral mode available. |
-| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. [Signal-preservation checks](docs/testing-results-2026-09-26-content-signals.md) record verified behavior and remaining defects. |
+| **Evidence** | Pre-scrub HAR with journal-based persistence, request manifest with per-request scrub/leak counts, domain mappings and scrub report. [Paired response comparisons](docs/response-deltas.md) check byte-size fidelity and whether content/status changes survive masking. Signal-preservation checks record verified behavior and remaining defects. |
 
 **Development build; day-one acceptance is not complete.** The [delivery contract](docs/day-one-contract.md) fixes the requirements and evidence needed for sign-off. Current [supported behavior and delivery gates](docs/capabilities.md) record implementation progress without reducing that scope.
 
@@ -174,7 +174,7 @@ With `--tor`, each configured `route-with-target` provider origin gets its own `
 
 Built-in profiles cover hCaptcha, reCAPTCHA and Turnstile. Custom providers use explicit `resource_origins`, optional `resource_url_regex`, `opaque_fields` and `submissions`; every relayed request is checked against that scope. Direct mode leaves provider references intact, and `tor_policy: direct` remains an explicit Tor exception.
 
-Chrome completed the [synthetic operator flow](docs/testing-results-2026-09-27-browser.md): all 13 provider requests used the relay, and the original POST resumed with its exact solution token, session and refreshed CSRF. A separate cross-site Lax-cookie case preserved the direct provider's HTTP 400 denial. This is bounded local acceptance: CSP-restricted challenges, other dynamic loading APIs, actual alias trust, real-provider human completion and live Tor/onion acceptance remain open. The [repeatable browser checks](docs/testing.md#captcha-browser-acceptance) record those gates separately.
+Chrome completed the synthetic operator flow: all 13 provider requests used the relay, and the original POST resumed with its exact solution token, session and refreshed CSRF. A separate cross-site Lax-cookie case preserved the direct provider's HTTP 400 denial. This is bounded local acceptance: CSP-restricted challenges, other dynamic loading APIs, actual alias trust, real-provider human completion and live Tor/onion acceptance remain open. The [repeatable browser checks](docs/testing.md#captcha-browser-acceptance) record those gates separately.
 
 ### Local testing
 
@@ -201,6 +201,8 @@ hcaptcha test keys always pass without a visual challenge. Turnstile test key `1
 ## Evidence
 
 Keep original captures on the operator's side; they contain real target data.
+
+> **Security note:** HAR files contain the complete pre-scrub HTTP exchange, including `Authorization`, `Cookie` and `Set-Cookie` headers. They are written with owner-only permissions (0600), but anyone with access to the file has every credential that transited the proxy during that session. Treat HAR files as secrets: do not commit them to version control, share them without redaction, or store them on shared filesystems.
 
 | Output | Contents |
 | :--- | :--- |

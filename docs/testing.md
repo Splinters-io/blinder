@@ -4,11 +4,7 @@ The [day-one delivery contract](day-one-contract.md) fixes the required outcome,
 
 Use these as three separate gates. Package regressions check specific defect classes; functional tests exercise the actual CLI and network boundary; UAT verifies the selected browser/scanner workflow with an operator. Green CI alone is not UAT approval or a general anonymization guarantee.
 
-The [27 September browser report](testing-results-2026-09-27-browser.md) records the latest behavior/CSP/SRI comparison and the synthetic CAPTCHA completion and denial profiles. The earlier [provider-origin](testing-results-2026-09-26-provider-origins.md), [operator acceptance](testing-results-2026-09-26-acceptance.md), [post-commit review](testing-results-2026-09-26-postcommit.md) and [fidelity](testing-results-2026-09-26.md) reports preserve their versioned evidence. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
-
-The [behavior-preservation checkpoint](testing-results-2026-09-26-behavior.md) records image, JavaScript-navigation and malformed-source work. An initial browser comparison exposed a percent-encoded JavaScript URL acquiring a CSP grant. The expanded 15-pair Chrome comparison passed the correction at `d6c6b42`, alongside 20 inline CSP and 29 external CSP/SRI pairs. Those 64 pairs were run before the current CAPTCHA changes; the latest report distinguishes the checkpoints.
-
-The [content-contract checkpoint](testing-results-2026-09-26-content-contract.md) records generated-filler identity checks, response-level content requirements and the replacement of the outdated preview process that still emitted removal labels. Its live root-response check is separate from browser workflow acceptance.
+Browser acceptance covers behavior/CSP/SRI comparisons and synthetic CAPTCHA completion and denial profiles. The behavior-preservation checkpoint covers image, JavaScript-navigation and malformed-source work. The expanded 15-pair Chrome comparison passed at `d6c6b42`, alongside 20 inline CSP and 29 external CSP/SRI pairs. Selected browser/scanner workflows, certificate trust and successful live Tor/onion UAT remain separate acceptance gates.
 
 ## Automated checks
 
@@ -37,7 +33,7 @@ BLINDER_REVIEW_CERT_DIR=/private/tmp/blinder-acceptance-certs \
 go test -race -count=1 -timeout 200s ./internal/proxy -run '^TestControlFidelityBrowser$' -v
 ```
 
-Open the URL in `/private/tmp/blinder-csp-browser-url.txt` within 180 seconds. The fixture runs the direct baseline, navigates to Blinder, and compares execution, computed style and policy-violation events. It records `/private/tmp/blinder-csp-browser-result.json`. Both stages use local synthetic targets; the command does not install trust or bypass certificate warnings. See the [CSP acceptance report](testing-results-2026-09-26-csp.md) for measured coverage and remaining work.
+Open the URL in `/private/tmp/blinder-csp-browser-url.txt` within 180 seconds. The fixture runs the direct baseline, navigates to Blinder, and compares execution, computed style and policy-violation events. It records `/private/tmp/blinder-csp-browser-result.json`. Both stages use local synthetic targets; the command does not install trust or bypass certificate warnings. Coverage and remaining CSP fidelity work are tracked in the delivery gates.
 
 For image, JavaScript-navigation and malformed-source regressions:
 
@@ -113,7 +109,7 @@ go test -race -count=1 ./internal/proxy -run '^(TestCompactIdentity|TestContentC
 go test -race -count=1 ./internal/rewriter -run '^(TestProse|TestWholeDocumentFit)'
 ```
 
-These checks cover exact alias byte budgets, Unicode case restoration, literal marker safety, concurrent request views, fixed-width namespace exhaustion, bounded display reservations and fallback counts. Real HTTP fixtures verify equal response sizes without shortening diagnostics and restoration of submitted aliases. Short display outputs are distinct only while reservations succeed; one-byte exhaustion remains an explicit lost-signal case. The [size and change-signal report](testing-results-2026-09-26-size-signals.md) records this checkpoint.
+These checks cover exact alias byte budgets, Unicode case restoration, literal marker safety, concurrent request views, fixed-width namespace exhaustion, bounded display reservations and fallback counts. Real HTTP fixtures verify equal response sizes without shortening diagnostics and restoration of submitted aliases. Short display outputs are distinct only while reservations succeed; one-byte exhaustion remains an explicit lost-signal case. Size and change-signal verification is covered by the unit and functional test suites.
 
 Run `go test -race -count=1 ./internal/rewriter ./internal/proxy -run '^TestBodySize|^TestTitle|^TestHTMLQuotedAttrEdits'` for whole-HTML size matching. These tests compare differently sized responses, including gzip input, and require each final decoded length and the signed difference between them to match upstream. They also verify that fitting occurs after provider URL expansion, that SQL-style diagnostics, script text and form values survive, and that insufficient adjustment space is reported rather than taken from functional content. These are synthetic fidelity fixtures, not proof of SQL injection detection on arbitrary sites.
 
@@ -134,7 +130,7 @@ BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -timeout 130s ./internal/proxy -
 
 Open the URL in `/private/tmp/blinder-response-browser-url.txt`, check the ordinary paragraph has become verse, click **Validate**, and confirm that the page displays `E_EMAIL`, the validation message and the Unicode input `café`, while its configured identity uses its reversible alias. The fixture verifies that textarea and option values reach upstream as `AcmeCorp & café`, not filler. The upstream response must remain 422. Then navigate to `/review-cleanup` on the fixture origin to finish. The local browser run matched the complete form page at **432 original → 432 rewritten → 432 emitted bytes**. The error response retained its diagnostic text with **277 → 285 → 285 bytes**; error content was not shortened to force a match. This does not establish wider site compatibility or universal content anonymisation.
 
-The current `TestCaptchaFlowBrowser` positive profile passed in Chrome through isolated challenge/provider origins: all 13 provider requests matched relay observations, operator submission displayed **Solution submitted**, and the original POST resumed with its exact token, target session and refreshed CSRF. The direct baseline also passed 13 provider requests. A separate cross-site Lax-cookie profile preserved the direct provider's visible POST 400 denial through Blinder. See the [current browser record](testing-results-2026-09-27-browser.md) and [repeatable commands](#captcha-browser-acceptance); these local synthetic results do not establish live-provider or Tor acceptance.
+The current `TestCaptchaFlowBrowser` positive profile passed in Chrome through isolated challenge/provider origins: all 13 provider requests matched relay observations, operator submission displayed **Solution submitted**, and the original POST resumed with its exact token, target session and refreshed CSRF. The direct baseline also passed 13 provider requests. A separate cross-site Lax-cookie profile preserved the direct provider's visible POST 400 denial through Blinder. See the [repeatable commands](#captcha-browser-acceptance); these local synthetic results do not establish live-provider or Tor acceptance.
 
 Tor mode also has eight deterministic SOCKS5 scenarios: HTTP and HTTPS onion targets on their default ports, a custom target port, a clearnet hostname passed to SOCKS for resolution, certificate rejection through the tunnel, and proxy rejection/disconnection/unavailability. Every scenario exercises both HTTP and WebSocket paths. The failure cases use a directly reachable target and assert that it receives zero requests.
 
@@ -374,7 +370,7 @@ The automated persistent-certificate test verifies HTTPS across restarts using o
 
 Tor is a required acceptance track. A mocked SOCKS5 pass does not satisfy it. Use a bootstrapped Tor service and record its version, bootstrap status, SOCKS address, target, timings and outcome. Use an operator-controlled onion target for the authenticated and WebSocket flows.
 
-The isolated 27 September readiness attempt opened its local SOCKS listener but remained at 5% bootstrap for the 90-second observation window. Its notice log recorded no specific network or configuration error. It made no target requests and was stopped cleanly; exit and onion acceptance remain NOT RUN. The [browser report](testing-results-2026-09-27-browser.md) retains that evidence separately from synthetic SOCKS passes.
+The isolated 27 September readiness attempt opened its local SOCKS listener but remained at 5% bootstrap for the 90-second observation window. Its notice log recorded no specific network or configuration error. It made no target requests and was stopped cleanly; exit and onion acceptance remain NOT RUN. Exit and onion acceptance remain separate from synthetic SOCKS passes.
 
 For a separate temporary Tor client, with Tor already installed, in another terminal:
 
@@ -417,4 +413,4 @@ Release acceptance requires the open functional failures to be fixed, the full f
 
 ### External CSP and SRI comparison
 
-Run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -run '^TestExternalControlFidelityBrowser$' -v ./internal/proxy` and open the local HTTPS URL written to `/private/tmp/blinder-external-csp-browser-url.txt` in the already trusted Chrome profile. The fixture runs the direct baseline followed by Blinder and verifies execution, policy violations, resource errors and upstream request counts. It writes `/private/tmp/blinder-external-csp-browser-result.json`. See the [29-pair acceptance record](testing-results-2026-09-26-external-csp.md). Do not replace a browser trust failure with a certificate bypass or count an opt-in skip as a pass.
+Run `BLINDER_REVIEW_BROWSER=1 go test -race -count=1 -run '^TestExternalControlFidelityBrowser$' -v ./internal/proxy` and open the local HTTPS URL written to `/private/tmp/blinder-external-csp-browser-url.txt` in the already trusted Chrome profile. The fixture runs the direct baseline followed by Blinder and verifies execution, policy violations, resource errors and upstream request counts. It writes `/private/tmp/blinder-external-csp-browser-result.json`. Do not replace a browser trust failure with a certificate bypass or count an opt-in skip as a pass.
